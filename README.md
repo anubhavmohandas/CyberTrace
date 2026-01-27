@@ -119,6 +119,26 @@ CyberTrace only accesses **publicly available** information. It does not:
 
 Use responsibly and ethically for legitimate OSINT research.
 
+## Documentation
+
+For complete technical documentation including:
+- Architecture overview
+- Module API reference
+- Development guide
+- Troubleshooting
+
+See [docs/TECHNICAL_DOCUMENTATION.md](docs/TECHNICAL_DOCUMENTATION.md)
+
+## Testing
+
+```bash
+# Run test suite
+pytest tests/ -v
+
+# Quick test
+python -m cybertrace search "MH12AB1234" --output json
+```
+
 ## License
 
-MIT License
+MIT License - see [LICENSE](LICENSE) file
