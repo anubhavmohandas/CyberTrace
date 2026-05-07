@@ -1,0 +1,19 @@
+# Core
+click>=8.0.0
+aiohttp>=3.8.0
+python-dotenv>=1.0.0
+
+# DNS/WHOIS
+dnspython>=2.2.0
+python-whois>=0.8.0
+
+# Output formatting
+rich>=13.0.0
+
+# Optional: Enhanced features
+# requests[socks]  # For Tor support
+# PySocks>=1.7.0
+# stem>=1.8.0      # Tor control
+
+# External tools (install separately):
+# pip install maigret sherlock-project holehe
