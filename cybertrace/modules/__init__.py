@@ -9,6 +9,8 @@ from .username_module import UsernameModule
 from .email_module import EmailModule
 from .darkweb_module import DarkwebModule
 from .indian_module import IndianModule
+from .phone_module import PhoneModule
+from .ip_module import IPModule
 
 
 # Registry of all available modules
@@ -20,19 +22,21 @@ MODULE_REGISTRY: Dict[str, Type[BaseModule]] = {
     'email': EmailModule,
     'darkweb': DarkwebModule,
     'indian': IndianModule,
+    'phone': PhoneModule,
+    'ip': IPModule,
 }
 
 # Input type to module mapping
 TYPE_TO_MODULE: Dict[str, str] = {
     'email': 'email',
-    'phone': 'phone',  # TODO: implement phone module
+    'phone': 'phone',
     'phone_indian': 'phone',
     'phone_intl': 'phone',
     'username': 'username',
     'domain': 'domain',
     'url': 'domain',
-    'ipv4': 'domain',
-    'ipv6': 'domain',
+    'ipv4': 'ip',       # was 'domain' — now routes to dedicated IP module
+    'ipv6': 'ip',       # was 'domain' — now routes to dedicated IP module
     'bitcoin': 'bitcoin',
     'btc_legacy': 'bitcoin',
     'btc_bech32': 'bitcoin',
@@ -85,6 +89,8 @@ __all__ = [
     'EmailModule',
     'DarkwebModule',
     'IndianModule',
+    'PhoneModule',
+    'IPModule',
     'get_module',
     'get_all_modules',
     'list_modules',

@@ -29,7 +29,22 @@ PATTERNS = {
     
     # Network
     'ipv4': re.compile(r'^(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)$'),
-    'ipv6': re.compile(r'^(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$'),
+    # IPv6: supports full, compressed (::), and mixed notations
+    'ipv6': re.compile(
+        r'^('
+        r'([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|'          # full 8 groups
+        r'([0-9a-fA-F]{1,4}:){1,7}:|'                          # trailing ::
+        r':([0-9a-fA-F]{1,4}:){1,7}[0-9a-fA-F]{0,4}|'         # leading ::
+        r'([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|'         # one :: in middle
+        r'([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|'
+        r'([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|'
+        r'([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|'
+        r'([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|'
+        r'[0-9a-fA-F]{1,4}:(:[0-9a-fA-F]{1,4}){1,6}|'
+        r'::(ffff(:0{1,4})?:)?((25[0-5]|(2[0-4]|1?[0-9])?[0-9])\.){3}(25[0-5]|(2[0-4]|1?[0-9])?[0-9])|'  # IPv4-mapped
+        r'::1|::'                                                # loopback / unspecified
+        r')$'
+    ),
 }
 
 # Detection priority - checked in order
@@ -45,8 +60,8 @@ DETECTION_ORDER = [
     ('pan_indian', 'indian'),
     ('vehicle_indian', 'indian'),
     ('aadhaar', 'indian'),
-    ('ipv4', 'domain'),
-    ('ipv6', 'domain'),
+    ('ipv4', 'ip'),
+    ('ipv6', 'ip'),
     ('url', 'domain'),
     ('domain', 'domain'),
 ]

@@ -183,6 +183,24 @@ def indian(target: str, output: str):
     ctx.invoke(search, target=target, input_type='indian', output_format=output)
 
 
+@cli.command()
+@click.argument('number')
+@click.option('--output', '-o', default='table', type=click.Choice(['table', 'json', 'rich']))
+def phone(number: str, output: str):
+    """Investigate a phone number (carrier, country, line type)."""
+    ctx = click.get_current_context()
+    ctx.invoke(search, target=number, input_type='phone', output_format=output)
+
+
+@cli.command()
+@click.argument('address')
+@click.option('--output', '-o', default='table', type=click.Choice(['table', 'json', 'rich']))
+def ip(address: str, output: str):
+    """IP intelligence: geo, ASN, abuse score, open ports (Shodan)."""
+    ctx = click.get_current_context()
+    ctx.invoke(search, target=address, input_type='ip', output_format=output)
+
+
 def main():
     """Entry point for CLI."""
     cli()

@@ -27,7 +27,11 @@ class APIKeys:
     telegram_bot: Optional[str] = None
     twocaptcha: Optional[str] = None
     etherscan: Optional[str] = None
-    
+    # New keys
+    abuseipdb: Optional[str] = None    # https://www.abuseipdb.com/register — free 1k/day
+    greynoise: Optional[str] = None    # https://viz.greynoise.io/signup — community free
+    leakcheck: Optional[str] = None    # https://leakcheck.io — optional breach DB
+
     @classmethod
     def from_env(cls) -> 'APIKeys':
         return cls(
@@ -45,6 +49,9 @@ class APIKeys:
             telegram_bot=os.getenv('TELEGRAM_BOT_TOKEN'),
             twocaptcha=os.getenv('TWOCAPTCHA_API_KEY'),
             etherscan=os.getenv('ETHERSCAN_API_KEY'),
+            abuseipdb=os.getenv('ABUSEIPDB_API_KEY'),
+            greynoise=os.getenv('GREYNOISE_API_KEY'),
+            leakcheck=os.getenv('LEAKCHECK_API_KEY'),
         )
     
     def get(self, key: str) -> Optional[str]:

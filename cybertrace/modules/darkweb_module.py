@@ -75,10 +75,30 @@ class DarkwebModule(BaseModule):
         if self.config.api_keys.has('intelx'):
             sources.append(('intelx', self._search_intelx(target)))
 
-        # Phase 4: Search paste sites and leak databases
+        # Phase 4: RansomLook — free, no key, useful for domain/company targets
+        sources.append(('ransomwhat', self._search_ransomwhat(target)))
+
+        # Phase 5: Real paste site search via PSBDMP
         sources.append(('paste_sites', self._search_paste_sites(target)))
 
         await self.run_sources(sources, result)
+
+        # Phase 6: Validate onion addresses discovered in Phase 2
+        # Collect all onion addresses found across sources
+        discovered_onions = set()
+        for source_result in result.sources.values():
+            if source_result.success and source_result.data:
+                for addr in source_result.data.get('onion_addresses_found', []):
+                    discovered_onions.add(addr)
+                for item in source_result.data.get('results', []):
+                    if isinstance(item, dict) and item.get('onion_url'):
+                        onion_match = re.search(r'([a-z2-7]{56}\.onion)', item['onion_url'])
+                        if onion_match:
+                            discovered_onions.add(onion_match.group(1))
+
+        if discovered_onions:
+            onion_result = await self._search_onion_lookup(list(discovered_onions))
+            result.sources['onion_lookup'] = onion_result
 
         # Build summary
         result.summary = self._build_summary(result)
@@ -320,6 +340,104 @@ class DarkwebModule(BaseModule):
             },
         )
 
+    async def _search_ransomwhat(self, query: str) -> SourceResult:
+        """
+        Search RansomLook (ransomwhat.telemetry.ltd) for ransomware victim mentions.
+
+        Free API, no key required. Tracks active ransomware groups and their victims.
+        Useful when target is a domain or company name.
+
+        API: https://api.ransomwhat.telemetry.ltd
+        """
+        base_url = "https://api.ransomwhat.telemetry.ltd"
+
+        # Strip subdomain noise — search by root domain or plain name
+        search_term = query.lower().replace('www.', '').split('/')[0]
+
+        try:
+            # Fetch all victims and filter client-side — API has no search param
+            data = await self.fetch_json(f"{base_url}/victims")
+        except Exception as e:
+            return SourceResult(source='ransomwhat', success=False, error=str(e))
+
+        if not data:
+            return SourceResult(source='ransomwhat', success=False, error='No response from ransomwhat API')
+
+        victims = data if isinstance(data, list) else data.get('data', [])
+
+        matches = []
+        for victim in victims:
+            name = victim.get('post_title', '') or victim.get('victim', '') or ''
+            website = victim.get('website', '') or ''
+            if (search_term in name.lower()) or (search_term in website.lower()):
+                matches.append({
+                    'victim': name,
+                    'group': victim.get('group_name', 'Unknown'),
+                    'website': website,
+                    'published': victim.get('post_date', ''),
+                    'country': victim.get('country', ''),
+                    'activity': victim.get('activity', ''),
+                    'description': (victim.get('description', '') or '')[:200],
+                })
+
+        return SourceResult(
+            source='ransomwhat',
+            success=True,
+            data={
+                'result_count': len(matches),
+                'results': matches,
+                'note': 'Matches from RansomLook ransomware victim database',
+            },
+        )
+
+    async def _search_onion_lookup(self, onion_addresses: List[str]) -> SourceResult:
+        """
+        Validate and enrich onion addresses via onion.al API.
+
+        Free API, no key required. Returns online status, title, description,
+        and last-seen timestamp for each onion address.
+
+        API: https://onion.al/api/{onion_address}
+        """
+        if not onion_addresses:
+            return SourceResult(
+                source='onion_lookup',
+                success=False,
+                error='No onion addresses to validate',
+            )
+
+        base_url = "https://onion.al/api"
+        results = []
+
+        for onion in onion_addresses[:10]:  # Cap to avoid hammering the API
+            clean = onion.replace('http://', '').replace('https://', '').split('/')[0]
+            try:
+                data = await self.fetch_json(f"{base_url}/{clean}")
+                if data:
+                    results.append({
+                        'onion': clean,
+                        'online': data.get('online', False),
+                        'title': data.get('title', ''),
+                        'description': (data.get('description', '') or '')[:200],
+                        'last_seen': data.get('last_online', ''),
+                        'first_seen': data.get('first_online', ''),
+                    })
+            except Exception:
+                results.append({'onion': clean, 'online': None, 'error': 'lookup failed'})
+
+        online_count = sum(1 for r in results if r.get('online') is True)
+
+        return SourceResult(
+            source='onion_lookup',
+            success=len(results) > 0,
+            data={
+                'checked': len(results),
+                'online': online_count,
+                'offline': len(results) - online_count,
+                'results': results,
+            },
+        )
+
     async def _search_intelx(self, query: str) -> SourceResult:
         """
         Search IntelligenceX for pastes, leaks, and dark web content.
@@ -395,36 +513,41 @@ class DarkwebModule(BaseModule):
 
     async def _search_paste_sites(self, query: str) -> SourceResult:
         """
-        Search paste sites for mentions of the target.
+        Search paste sites via PSBDMP.ws — a real indexed paste search API.
 
-        Paste sites often contain leaked data.
+        Free API, no key required. Indexes Pastebin, GitHub Gist, and others.
+        API: https://psbdmp.ws/api/v3/search/{query}
         """
+        encoded = quote_plus(query)
+        url = f"https://psbdmp.ws/api/v3/search/{encoded}"
+
+        try:
+            data = await self.fetch_json(url)
+        except Exception as e:
+            return SourceResult(source='paste_sites', success=False, error=str(e))
+
+        if not data:
+            return SourceResult(source='paste_sites', success=False, error='No response from PSBDMP')
+
+        items = data if isinstance(data, list) else data.get('data', [])
+
         results = []
-
-        # Search via Google dork for paste sites
-        paste_sites = [
-            'pastebin.com',
-            'ghostbin.com',
-            'paste.ee',
-            'hastebin.com',
-            'dpaste.org',
-            'privatebin.net',
-        ]
-
-        # We can't actually scrape Google, but we can provide guidance
-        google_dorks = [
-            f'site:pastebin.com "{query}"',
-            f'site:ghostbin.com "{query}"',
-            f'site:paste.ee "{query}"',
-        ]
+        for item in items[:20]:
+            results.append({
+                'id': item.get('id', ''),
+                'url': f"https://pastebin.com/{item.get('id', '')}" if item.get('id') else '',
+                'tags': item.get('tags', ''),
+                'length': item.get('length', 0),
+                'time': item.get('time', ''),
+            })
 
         return SourceResult(
             source='paste_sites',
             success=True,
             data={
-                'manual_search_dorks': google_dorks,
-                'paste_sites_to_check': paste_sites,
-                'note': 'Use these Google dorks to search paste sites manually, or use PSBDMP.ws for indexed pastes.',
+                'result_count': len(results),
+                'results': results,
+                'source_api': 'PSBDMP.ws',
             },
         )
 
@@ -462,6 +585,9 @@ class DarkwebModule(BaseModule):
         total_mentions = 0
         all_results = []
         all_onions = set()
+        ransomware_hits = []
+        paste_hits = []
+        onion_validation = {}
 
         for source, res in result.sources.items():
             if not res.success:
@@ -473,16 +599,32 @@ class DarkwebModule(BaseModule):
 
             # Collect results
             for item in data.get('results', []):
-                all_results.append({
-                    'source': source,
-                    **item,
-                })
+                all_results.append({'source': source, **item})
 
             # Collect unique .onion addresses
             for addr in data.get('onion_addresses_found', []):
                 all_onions.add(addr)
 
-        return {
+            # Ransomware victim hits
+            if source == 'ransomwhat' and data.get('results'):
+                ransomware_hits = data['results']
+
+            # Paste site hits
+            if source == 'paste_sites' and data.get('results'):
+                paste_hits = data['results']
+
+            # Onion validation summary
+            if source == 'onion_lookup':
+                onion_validation = {
+                    'checked': data.get('checked', 0),
+                    'online': data.get('online', 0),
+                    'offline': data.get('offline', 0),
+                    'live_services': [
+                        r for r in data.get('results', []) if r.get('online')
+                    ],
+                }
+
+        summary = {
             'target': result.target,
             'total_mentions': total_mentions,
             'sources_searched': len([s for s in result.sources.values() if s.success]),
@@ -495,3 +637,21 @@ class DarkwebModule(BaseModule):
             },
             'note': 'Results from clearnet indexes. Direct Tor access may reveal more.',
         }
+
+        if ransomware_hits:
+            summary['ransomware_exposure'] = {
+                'hit_count': len(ransomware_hits),
+                'groups_involved': list({h['group'] for h in ransomware_hits}),
+                'victims': ransomware_hits[:5],
+            }
+
+        if paste_hits:
+            summary['paste_exposure'] = {
+                'hit_count': len(paste_hits),
+                'sample_pastes': paste_hits[:5],
+            }
+
+        if onion_validation:
+            summary['onion_validation'] = onion_validation
+
+        return summary

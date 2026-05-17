@@ -4,6 +4,7 @@ import asyncio
 import aiohttp
 import hashlib
 import json
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -137,40 +138,68 @@ class BaseModule(ABC):
         self,
         url: str,
         method: str = 'GET',
+        retries: int = 2,
+        retry_delay: float = 1.0,
+        ok_statuses: tuple = (200,),
         **kwargs
     ) -> Optional[str]:
         """
         Fetch URL and return text content.
-        
+
+        Retries with exponential backoff on transient errors (429, 5xx).
         Returns None on error (doesn't raise).
         """
-        try:
-            async with self.session.request(method, url, **kwargs) as resp:
-                if resp.status == 200:
-                    return await resp.text()
+        for attempt in range(retries + 1):
+            try:
+                async with self.session.request(method, url, **kwargs) as resp:
+                    if resp.status in ok_statuses:
+                        return await resp.text()
+                    # Retry on rate limit or server errors
+                    if resp.status in (429, 500, 502, 503, 504) and attempt < retries:
+                        await asyncio.sleep(retry_delay * (2 ** attempt))
+                        continue
+                    return None
+            except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
+                if attempt < retries:
+                    await asyncio.sleep(retry_delay * (2 ** attempt))
+                    continue
                 return None
-        except Exception:
-            return None
-    
+            except Exception:
+                return None
+        return None
+
     async def fetch_json(
         self,
         url: str,
         method: str = 'GET',
+        retries: int = 2,
+        retry_delay: float = 1.0,
         **kwargs
     ) -> Optional[dict]:
         """
         Fetch URL and parse JSON response.
-        
+
+        Retries with exponential backoff on transient errors (429, 5xx).
         Returns None on error (doesn't raise).
         """
-        try:
-            async with self.session.request(method, url, **kwargs) as resp:
-                if resp.status == 200:
-                    return await resp.json()
+        for attempt in range(retries + 1):
+            try:
+                async with self.session.request(method, url, **kwargs) as resp:
+                    if resp.status == 200:
+                        return await resp.json(content_type=None)
+                    if resp.status in (429, 500, 502, 503, 504) and attempt < retries:
+                        await asyncio.sleep(retry_delay * (2 ** attempt))
+                        continue
+                    return None
+            except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
+                if attempt < retries:
+                    await asyncio.sleep(retry_delay * (2 ** attempt))
+                    continue
                 return None
-        except Exception:
-            return None
-    
+            except Exception:
+                return None
+        return None
+
     async def check_exists(self, url: str, **kwargs) -> bool:
         """Check if a URL returns 200 OK."""
         try:

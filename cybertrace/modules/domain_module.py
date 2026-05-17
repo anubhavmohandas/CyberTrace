@@ -52,12 +52,22 @@ class DomainModule(BaseModule):
         if self.config.api_keys.has('urlscan'):
             sources.append(('urlscan', self._check_urlscan(domain)))
         
+        # HackerTarget free subdomain enum (no key)
+        sources.append(('hackertarget', self._check_hackertarget(domain)))
+
+        if self.config.api_keys.has('shodan'):
+            sources.append(('shodan_dns', self._check_shodan_dns(domain)))
+
         await self.run_sources(sources, result)
-        
+
         # Build summary
         result.summary = self._build_summary(result)
+
+        # Attach Google dorks to summary for SHADOHDORKS-style output
+        result.summary['dorks'] = self._generate_dorks(domain)
+
         result.end_time = datetime.utcnow()
-        
+
         return result
     
     def _clean_domain(self, target: str) -> str:
@@ -308,6 +318,144 @@ class DomainModule(BaseModule):
             data=parsed,
         )
     
+    async def _check_hackertarget(self, domain: str) -> SourceResult:
+        """
+        HackerTarget free subdomain enumeration — no key needed.
+        Uses reverse DNS + zone transfer attempts via their public API.
+        Free tier: 100 queries/day.
+        """
+        url = f"https://api.hackertarget.com/hostsearch/?q={domain}"
+        text = await self.fetch(url, retries=1)
+
+        if not text or 'error' in text.lower() or 'API count exceeded' in text:
+            return SourceResult(
+                source='hackertarget',
+                success=False,
+                error=text.strip() if text else 'No response',
+            )
+
+        subdomains: List[str] = []
+        ips: List[str] = []
+
+        for line in text.strip().split('\n'):
+            line = line.strip()
+            if not line or ',' not in line:
+                continue
+            parts = line.split(',', 1)
+            host = parts[0].strip()
+            ip = parts[1].strip() if len(parts) > 1 else None
+            if host and host.endswith(domain):
+                subdomains.append(host)
+            if ip:
+                ips.append(ip)
+
+        return SourceResult(
+            source='hackertarget',
+            success=True,
+            data={
+                'subdomain_count': len(subdomains),
+                'subdomains': sorted(set(subdomains))[:100],
+                'associated_ips': sorted(set(ips))[:50],
+            },
+        )
+
+    async def _check_shodan_dns(self, domain: str) -> SourceResult:
+        """Shodan DNS/domain lookup — finds related IPs and subdomains."""
+        api_key = self.config.api_keys.get('shodan')
+        url = f"https://api.shodan.io/dns/domain/{domain}?key={api_key}"
+
+        data = await self.fetch_json(url)
+
+        if not data or 'error' in data:
+            return SourceResult(
+                source='shodan_dns',
+                success=False,
+                error=data.get('error', 'No response') if data else 'No response',
+            )
+
+        subdomains = data.get('subdomains', [])
+        full_subdomains = [f"{s}.{domain}" for s in subdomains]
+
+        tags = data.get('tags', [])
+        dns_records = data.get('data', [])
+
+        parsed: Dict[str, Any] = {
+            'subdomains': full_subdomains[:100],
+            'subdomain_count': len(subdomains),
+            'tags': tags,
+            'dns_records': [
+                {
+                    'subdomain': r.get('subdomain'),
+                    'type': r.get('type'),
+                    'value': r.get('value'),
+                    'last_seen': r.get('last_seen'),
+                }
+                for r in dns_records[:20]
+            ],
+        }
+
+        return SourceResult(source='shodan_dns', success=True, data=parsed)
+
+    def _generate_dorks(self, domain: str) -> Dict[str, List[str]]:
+        """
+        Generate Google dorks for this domain — SHADOHDORKS integration.
+        Returns categorised dork strings ready to be searched.
+        """
+        d = domain
+        return {
+            'subdomain_enum': [
+                f'site:*.{d}',
+                f'site:*.{d} -www',
+                f'"@{d}" -site:www.{d} -site:{d}',
+                f'site:{d} inurl:staging',
+                f'site:{d} inurl:dev',
+                f'site:{d} inurl:test',
+                f'site:*.{d} inurl:*.api',
+                f'site:{d} inurl:mail',
+                f'site:{d} inurl:api',
+            ],
+            'exposed_files': [
+                f'intitle:"index of" site:{d}',
+                f'intitle:"index of" "parent directory" site:{d}',
+                f'intitle:"index of /backup" site:{d}',
+                f'intitle:"index of /admin" site:{d}',
+                f'ext:sql | ext:dbf | ext:mdb | ext:ora site:{d}',
+                f'filetype:log site:{d}',
+                f'inurl:/db_backup OR inurl:/database_backup site:{d}',
+                f'intitle:"index of /" +backup site:{d}',
+                f'inurl:ftp site:{d}',
+                f'ext:txt {d} (vhost OR hostname OR nameserver)',
+            ],
+            'secrets_configs': [
+                f'ext:env | ext:.env site:{d}',
+                f'ext:yaml | ext:yml "database" site:{d}',
+                f'intext:"DB_PASSWORD" site:{d}',
+                f'intext:"AWS_ACCESS_KEY_ID" site:{d}',
+                f'ext:xml intext:"awsaccesskey" site:{d}',
+                f'intext:"private_key" ext:txt site:{d}',
+                f'filetype:json "api_key" site:{d}',
+                f'inurl:.git/config site:{d}',
+                f'intitle:"Swagger UI" site:{d}',
+                f'filetype:env "password" site:{d}',
+                f'inurl:.git/HEAD site:{d}',
+                f'ext:conf site:{d}',
+                f'filetype:xml intext:"password" site:{d}',
+                f'inurl:wp-config.php site:{d}',
+            ],
+            'admin_panels': [
+                f'inurl:admin/login.php site:{d}',
+                f'inurl:wp-login.php site:{d}',
+                f'intitle:"admin panel" | intitle:"control panel" site:{d}',
+                f'inurl:(admin | administrator | login) site:{d}',
+                f'intitle:"phpMyAdmin" site:{d}',
+                f'intitle:"Adminer" site:{d}',
+                f'site:{d} inurl:admin',
+                f'site:{d} intitle:"sign in"',
+                f'site:{d} inurl:auth',
+                f'intitle:"Logon Page" site:{d}',
+            ],
+        }
+
     def _first_or_value(self, val):
         """Get first element if list, else return value."""
         if isinstance(val, list):
@@ -365,8 +513,24 @@ class DomainModule(BaseModule):
             if source == 'crtsh':
                 summary['subdomains'] = data.get('subdomains', [])[:50]  # Top 50
                 summary['subdomain_count'] = data.get('subdomain_count', 0)
-                # Add subdomains to related for further investigation
                 result.related.extend(summary['subdomains'][:10])
+
+            # HackerTarget
+            if source == 'hackertarget' and data.get('subdomains'):
+                existing = set(summary.get('subdomains', []))
+                new_subs = [s for s in data['subdomains'] if s not in existing]
+                summary['subdomains'] = sorted(existing | set(new_subs))[:100]
+                summary['subdomain_count'] = len(summary['subdomains'])
+                result.related.extend(new_subs[:5])
+
+            # Shodan DNS
+            if source == 'shodan_dns' and data.get('subdomains'):
+                existing = set(summary.get('subdomains', []))
+                new_subs = [s for s in data['subdomains'] if s not in existing]
+                summary['subdomains'] = sorted(existing | set(new_subs))[:100]
+                summary['subdomain_count'] = len(summary['subdomains'])
+                if data.get('tags'):
+                    summary['shodan_tags'] = data['tags']
             
             # VirusTotal
             if source == 'virustotal':
