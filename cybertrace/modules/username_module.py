@@ -28,14 +28,15 @@ class UsernameModule(BaseModule):
     supported_types = {'username'}
     
     # High-value platforms to always check manually (fast verification)
+    # LinkedIn removed: always returns 999/redirect without auth and cannot be
+    # reliably checked without a logged-in session.
     KEY_PLATFORMS = {
         'github': 'https://api.github.com/users/{username}',
-        'twitter': 'https://twitter.com/{username}',
+        'twitter': 'https://nitter.net/{username}',
         'instagram': 'https://www.instagram.com/{username}/',
         'reddit': 'https://www.reddit.com/user/{username}/about.json',
         'youtube': 'https://www.youtube.com/@{username}',
         'tiktok': 'https://www.tiktok.com/@{username}',
-        'linkedin': 'https://www.linkedin.com/in/{username}',
         'telegram': 'https://t.me/{username}',
         'medium': 'https://medium.com/@{username}',
         'twitch': 'https://www.twitch.tv/{username}',
@@ -89,27 +90,96 @@ class UsernameModule(BaseModule):
         
         async def check_platform(name: str, url_template: str):
             url = url_template.format(username=username)
+            headers = {
+                'User-Agent': (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/124.0.0.0 Safari/537.36'
+                ),
+            }
             try:
-                async with self.session.get(url, allow_redirects=False) as resp:
-                    # Different platforms have different "found" indicators
+                async with self.session.get(
+                    url, allow_redirects=True, headers=headers
+                ) as resp:
+                    # ---- GitHub: JSON API, 404 means not found ----
                     if name == 'github':
                         if resp.status == 200:
                             data = await resp.json()
-                            return (name, True, {'url': f"https://github.com/{username}", 'followers': data.get('followers')})
+                            return (name, True, {
+                                'url': f"https://github.com/{username}",
+                                'followers': data.get('followers'),
+                            })
+                        return (name, False, None)
+
+                    # ---- Reddit: JSON endpoint, 404 means not found ----
                     elif name == 'reddit':
                         if resp.status == 200:
                             data = await resp.json()
                             if 'data' in data:
-                                return (name, True, {'url': f"https://reddit.com/user/{username}", 'karma': data['data'].get('total_karma')})
-                    elif name in ('twitter', 'instagram', 'linkedin'):
-                        # These return 200 but may redirect or show error page
-                        # For now, just check status
+                                return (name, True, {
+                                    'url': f"https://reddit.com/user/{username}",
+                                    'karma': data['data'].get('total_karma'),
+                                })
+                        return (name, False, None)
+
+                    # ---- Twitter/X via Nitter proxy ----
+                    # Nitter returns HTTP 200 for both found and not-found pages;
+                    # distinguish by body text.
+                    elif name == 'twitter':
                         if resp.status == 200:
-                            return (name, True, {'url': url})
+                            body = await resp.text()
+                            not_found_markers = [
+                                'user not found',
+                                'no results for',
+                                "doesn't exist",
+                                'this account doesn',
+                                'profile does not exist',
+                            ]
+                            body_lower = body.lower()
+                            if any(m in body_lower for m in not_found_markers):
+                                return (name, False, None)
+                            # Additional check: a real Nitter profile page has a
+                            # timeline or profile header element
+                            if 'timeline' in body_lower or 'tweets' in body_lower:
+                                return (name, True, {'url': f"https://twitter.com/{username}"})
+                        return (name, False, None)
+
+                    # ---- Instagram: 200 with "sorry, this page isn't available" = not found ----
+                    elif name == 'instagram':
+                        if resp.status == 200:
+                            body = await resp.text()
+                            not_found_markers = [
+                                "sorry, this page isn't available",
+                                "sorry, this page is not available",
+                                'page not found',
+                            ]
+                            body_lower = body.lower()
+                            if any(m in body_lower for m in not_found_markers):
+                                return (name, False, None)
+                            return (name, True, {'url': f"https://www.instagram.com/{username}/"})
+                        return (name, False, None)
+
+                    # ---- TikTok: 200 with "couldn't find this account" = not found ----
+                    elif name == 'tiktok':
+                        if resp.status == 200:
+                            body = await resp.text()
+                            not_found_markers = [
+                                "couldn't find this account",
+                                "this account doesn't exist",
+                                'account not found',
+                            ]
+                            body_lower = body.lower()
+                            if any(m in body_lower for m in not_found_markers):
+                                return (name, False, None)
+                            return (name, True, {'url': f"https://www.tiktok.com/@{username}"})
+                        return (name, False, None)
+
+                    # ---- All other platforms: HTTP 200 = found ----
                     else:
                         if resp.status == 200:
                             return (name, True, {'url': url})
-                    return (name, False, None)
+                        return (name, False, None)
+
             except Exception as e:
                 return (name, None, str(e))
         
@@ -295,7 +365,7 @@ class UsernameModule(BaseModule):
             'developer': ['github', 'gitlab', 'bitbucket', 'stackoverflow', 'codepen', 'replit', 'hackerrank'],
             'content': ['youtube', 'twitch', 'medium', 'substack', 'patreon', 'onlyfans'],
             'messaging': ['telegram', 'discord', 'slack'],
-            'professional': ['linkedin', 'indeed', 'glassdoor'],
+            'professional': ['indeed', 'glassdoor', 'xing'],
             'gaming': ['steam', 'xbox', 'playstation', 'epicgames', 'origin'],
         }
         

@@ -57,6 +57,26 @@ logs/
 Thumbs.db
 
 # Project specific
-data/cache/
+data/
 *.db
 *.sqlite
+api_keys.py
+
+# OSINT output files — never commit investigation results
+output/
+outputs/
+results/
+reports/
+*.json.out
+*.report
+
+# Sensitive files — extra safety net
+*.key
+*.pem
+*.p12
+secrets.yml
+secrets.yaml
+config.local.py
+
+# Tor
+*.onion_cache

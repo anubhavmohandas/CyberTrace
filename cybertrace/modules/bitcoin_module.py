@@ -192,23 +192,59 @@ class BitcoinModule(BaseModule):
         )
     
     async def _check_bitcoin_abuse(self, address: str) -> SourceResult:
-        """Check BitcoinAbuse for scam reports."""
-        url = f"https://www.bitcoinabuse.com/api/reports/check?address={address}"
-        
+        """
+        Check Cryptoscamdb for scam/abuse reports on this address.
+
+        Cryptoscamdb is a free, community-maintained database of crypto scam
+        addresses and domains. The API requires no key for basic lookups.
+        Endpoint: https://api.cryptoscamdb.org/v1/check/{address}
+
+        Response shape (success):
+          {"success": true, "result": "blocked"|"neutral", "entries": [...]}
+        Each entry may contain a "type" field (e.g. "scam", "phishing").
+        """
+        url = f"https://api.cryptoscamdb.org/v1/check/{address}"
+
         data = await self.fetch_json(url)
-        
+
         if data is None:
             return SourceResult(
                 source='bitcoinabuse',
                 success=False,
-                error='API error or address not found',
+                error='No response from Cryptoscamdb',
             )
-        
+
+        if not data.get('success'):
+            # API returned success=false — address unknown to the database
+            return SourceResult(
+                source='bitcoinabuse',
+                success=True,
+                data={
+                    'reported': False,
+                    'report_count': 0,
+                    'scam_type': None,
+                },
+            )
+
+        entries = data.get('entries') or []
+        result_flag = data.get('result', 'neutral')
+        is_flagged = result_flag == 'blocked' or len(entries) > 0
+
+        # Derive scam_type from the first matching entry if available
+        scam_type = None
+        if entries and isinstance(entries[0], dict):
+            scam_type = (
+                entries[0].get('type')
+                or entries[0].get('category')
+                or None
+            )
+
         parsed = {
-            'reported': data.get('count', 0) > 0,
-            'report_count': data.get('count', 0),
+            'reported': is_flagged,
+            'report_count': len(entries) if entries else (1 if is_flagged else 0),
+            'scam_type': scam_type,
         }
-        
+
         return SourceResult(
             source='bitcoinabuse',
             success=True,

@@ -41,8 +41,8 @@ class PhoneModule(BaseModule):
     Sources:
     - phonenumbers  : Parse, validate, country, carrier, timezone (no key)
     - numverify     : Line type, carrier, detailed validation (API key)
-    - ip-api        : Free carrier/geo lookup as sanity-check fallback
-    - callerapi     : Caller name lookup (free tier, limited)
+    - api-bdc.net   : Free reverse phone lookup — carrier, country, line type (no key)
+    - phonenumbers  : Used as fallback when HTTP sources return no data
     """
 
     name = "phone"
@@ -128,57 +128,79 @@ class PhoneModule(BaseModule):
 
     async def _free_carrier_lookup(self, number: str) -> SourceResult:
         """
-        Free carrier/geo via ip-api's phone endpoint.
-        Docs: http://ip-api.com (no phone endpoint) — using abstract-style free fallback.
+        Free carrier/geo lookup using two reliable keyless sources.
 
-        Actually uses: https://phone.abstractapi.com alternative (freekey not available)
-        Fallback: phone-validation via OpenCNAM-style scraping is blocked.
+        Source A: api-bdc.net phone reverse lookup (free, no key needed).
+          Returns carrier, country, line type, and location data as JSON.
+          Endpoint: https://api-bdc.net/data/phone-reverse-lookup?number={e164}&localityLanguage=en
 
-        We use callerapi.com free tier instead: https://www.callerapi.com/api
-        No key required for basic carrier+country lookup.
+        Source B: phonenumbers library data already collected in _parse_with_phonenumbers.
+          Used as graceful fallback when the HTTP source returns nothing useful.
         """
         clean = re.sub(r'[^\d+]', '', number)
-        # Ensure E.164 format for the request
         if not clean.startswith('+'):
             clean = '+' + clean
 
-        # Try callerapi free tier (no key, returns carrier + location)
-        url = f"https://www.callerapi.com/api?phone={clean}"
+        # Source A: api-bdc.net free reverse phone lookup (no key required)
+        url = f"https://api-bdc.net/data/phone-reverse-lookup?number={clean}&localityLanguage=en"
         data = await self.fetch_json(url, retries=1)
 
-        if data and data.get('status') == 'success':
+        if data and not data.get('error') and data.get('countryCode'):
+            # Map api-bdc.net response fields to our standard format
+            carrier_name = (
+                data.get('carrierName')
+                or data.get('carrier')
+                or None
+            )
+            line_type_raw = data.get('numberType') or data.get('lineType') or None
+            # Normalise line type string (api-bdc returns e.g. "MOBILE", "FIXED_LINE")
+            line_type = None
+            if line_type_raw:
+                line_type = line_type_raw.lower().replace('_', ' ')
+
             return SourceResult(
                 source='free_carrier_lookup',
                 success=True,
                 data={
-                    'carrier': data.get('carrier'),
-                    'country': data.get('country'),
-                    'country_code': data.get('country_code'),
-                    'line_type': data.get('line_type'),
-                    'city': data.get('city') or None,
-                    'state': data.get('state') or None,
+                    'carrier': carrier_name,
+                    'country': data.get('countryName') or data.get('country') or None,
+                    'country_code': data.get('countryCode') or None,
+                    'line_type': line_type,
+                    'city': data.get('city') or data.get('localityName') or None,
+                    'region': data.get('principalSubdivision') or data.get('region') or None,
+                    'international_format': data.get('internationalNumber') or None,
+                    'source_api': 'api-bdc.net',
                 },
             )
 
-        # Second fallback: numverify free (no key, very limited but returns country)
-        url2 = f"https://api.apilayer.com/number_verification/validate?number={clean}"
-        data2 = await self.fetch_json(url2, retries=0)
-        if data2 and data2.get('valid'):
-            return SourceResult(
-                source='free_carrier_lookup',
-                success=True,
-                data={
-                    'country': data2.get('country_name'),
-                    'country_code': data2.get('country_code'),
-                    'carrier': data2.get('carrier'),
-                    'line_type': data2.get('line_type'),
-                },
-            )
+        # Source B: graceful fallback — surface whatever phonenumbers already gave us.
+        # The caller (_build_summary) already merges phonenumbers_lib data, so we
+        # just signal that the HTTP lookup failed rather than crashing.
+        try:
+            import phonenumbers
+            from phonenumbers import geocoder, carrier as pn_carrier
+            parsed = phonenumbers.parse(number, None)
+            fallback_carrier = pn_carrier.name_for_number(parsed, 'en') or None
+            fallback_country = geocoder.description_for_number(parsed, 'en') or None
+            if fallback_carrier or fallback_country:
+                return SourceResult(
+                    source='free_carrier_lookup',
+                    success=True,
+                    data={
+                        'carrier': fallback_carrier,
+                        'country': fallback_country,
+                        'country_code': None,
+                        'line_type': None,
+                        'source_api': 'phonenumbers_fallback',
+                    },
+                )
+        except Exception:
+            pass
 
         return SourceResult(
             source='free_carrier_lookup',
             success=False,
-            error='All free carrier lookups returned no result',
+            error='api-bdc.net returned no data and phonenumbers fallback yielded nothing',
         )
 
     async def _check_numverify(self, number: str) -> SourceResult:

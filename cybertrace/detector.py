@@ -4,6 +4,12 @@ import re
 from typing import Tuple
 
 PATTERNS = {
+    # Coordinates — lat,lon (decimal degrees)
+    'coordinates': re.compile(r'^-?\d{1,3}\.\d+\s*,\s*-?\d{1,3}\.\d+$'),
+
+    # Image/file paths
+    'image_file': re.compile(r'^.+\.(jpe?g|png|gif|bmp|tiff?|webp|heic|raw|cr2|nef|arw)$', re.IGNORECASE),
+
     # Email - standard format
     'email': re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'),
     
@@ -49,6 +55,8 @@ PATTERNS = {
 
 # Detection priority - checked in order
 DETECTION_ORDER = [
+    ('coordinates', 'geoint'),
+    ('image_file', 'image'),
     ('email', 'email'),
     ('phone_indian', 'phone'),
     ('phone_intl', 'phone'),

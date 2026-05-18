@@ -11,12 +11,16 @@ from .darkweb_module import DarkwebModule
 from .indian_module import IndianModule
 from .phone_module import PhoneModule
 from .ip_module import IPModule
+from .image_module import ImageModule
+from .breach_module import BreachModule
+from .geoint_module import GeointModule
+from .social_module import SocialModule
 
 
 # Registry of all available modules
 MODULE_REGISTRY: Dict[str, Type[BaseModule]] = {
     'bitcoin': BitcoinModule,
-    'ethereum': BitcoinModule,  # Same module handles both
+    'ethereum': BitcoinModule,   # Same module handles both
     'domain': DomainModule,
     'username': UsernameModule,
     'email': EmailModule,
@@ -24,28 +28,49 @@ MODULE_REGISTRY: Dict[str, Type[BaseModule]] = {
     'indian': IndianModule,
     'phone': PhoneModule,
     'ip': IPModule,
+    'image': ImageModule,
+    'breach': BreachModule,
+    'geoint': GeointModule,
+    'social': SocialModule,
 }
 
 # Input type to module mapping
 TYPE_TO_MODULE: Dict[str, str] = {
+    # Email
     'email': 'email',
+    # Phone
     'phone': 'phone',
     'phone_indian': 'phone',
     'phone_intl': 'phone',
+    # Identity / Social
     'username': 'username',
+    'name': 'social',
+    # Domain / URL
     'domain': 'domain',
     'url': 'domain',
-    'ipv4': 'ip',       # was 'domain' — now routes to dedicated IP module
-    'ipv6': 'ip',       # was 'domain' — now routes to dedicated IP module
+    # IP
+    'ipv4': 'ip',
+    'ipv6': 'ip',
+    # Crypto
     'bitcoin': 'bitcoin',
     'btc_legacy': 'bitcoin',
     'btc_bech32': 'bitcoin',
     'ethereum': 'ethereum',
+    # Dark Web
     'onion': 'darkweb',
+    'darkweb': 'darkweb',
+    # Indian identifiers
     'vehicle_indian': 'indian',
     'pan_indian': 'indian',
     'gstin': 'indian',
     'aadhaar': 'indian',
+    # New modules
+    'image': 'image',
+    'file': 'image',
+    'coordinates': 'geoint',
+    'address': 'geoint',
+    'breach': 'breach',
+    'social': 'social',
 }
 
 
@@ -91,6 +116,10 @@ __all__ = [
     'IndianModule',
     'PhoneModule',
     'IPModule',
+    'ImageModule',
+    'BreachModule',
+    'GeointModule',
+    'SocialModule',
     'get_module',
     'get_all_modules',
     'list_modules',

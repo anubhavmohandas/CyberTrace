@@ -47,11 +47,16 @@ class DarkwebModule(BaseModule):
     SEARCH_ENGINES = {
         'ahmia': 'https://ahmia.fi/search/?q={query}',
         'torch': 'https://torsearch.io/search?q={query}',  # Clearnet mirror
+        'dargle': 'https://www.dargle.net/search?q={query}',  # Onion link directory search
         'haystack': 'https://haystak.io/search?q={query}',  # If available
     }
 
     async def search(self, target: str, **options) -> ModuleResult:
-        """Search dark web sources for target."""
+        """Search dark web sources for target.
+
+        Uses clearnet gateways and indexes including Ahmia, Dargle, Torch,
+        and other public dark web indexes. No Tor required.
+        """
 
         result = ModuleResult(
             target=target,
@@ -67,7 +72,7 @@ class DarkwebModule(BaseModule):
         # Phase 2: Search dark web indexes
         sources.extend([
             ('ahmia', self._search_ahmia(target)),
-            ('darksearch', self._search_darksearch(target)),
+            ('dargle', self._search_dargle(target)),
             ('torch', self._search_torch(target)),
         ])
 
@@ -260,35 +265,84 @@ class DarkwebModule(BaseModule):
             },
         )
 
-    async def _search_darksearch(self, query: str) -> SourceResult:
-        """Search DarkSearch.io API."""
+    async def _search_dargle(self, query: str) -> SourceResult:
+        """
+        Search Dargle (dargle.net) — a live clearnet dark web index.
+
+        Dargle indexes .onion sites and exposes them via a clearnet search
+        interface. Parses HTML results to extract onion links and titles.
+        """
         encoded_query = quote_plus(query)
-        url = f"https://darksearch.io/api/search?query={encoded_query}&page=1"
+        url = f"https://www.dargle.net/search?q={encoded_query}"
 
-        data = await self.fetch_json(url)
+        html = await self.fetch(url)
 
-        if not data:
+        if not html:
             return SourceResult(
-                source='darksearch',
+                source='dargle',
                 success=False,
-                error='No response from DarkSearch',
+                error='No response from Dargle',
             )
 
         results = []
-        for item in data.get('data', [])[:20]:
+
+        # Extract result blocks — Dargle wraps each result in a div/article
+        # with a title link and optional description
+        # Pattern 1: anchor tags containing .onion URLs
+        link_pattern = r'<a[^>]+href=["\']([^"\']*(?:[a-z2-7]{56}\.onion|\.onion)[^"\']*)["\'][^>]*>([^<]{1,120})</a>'
+        matches = re.findall(link_pattern, html, re.IGNORECASE)
+
+        seen_onions: set = set()
+        for href, link_text in matches:
+            clean_title = link_text.strip()
+            if not clean_title or len(clean_title) < 3:
+                continue
+            # Skip navigation/UI links (very short or generic)
+            if clean_title.lower() in ('home', 'search', 'about', 'next', 'prev', 'previous', '»', '«'):
+                continue
+            onion_match = re.search(r'([a-z2-7]{56}\.onion)', href, re.IGNORECASE)
+            onion_url = href if '.onion' in href else None
+            onion_addr = onion_match.group(1) if onion_match else None
+            if onion_addr and onion_addr in seen_onions:
+                continue
+            if onion_addr:
+                seen_onions.add(onion_addr)
             results.append({
-                'title': item.get('title', '')[:100],
-                'description': item.get('description', '')[:200],
-                'onion_url': item.get('link'),
+                'title': clean_title[:100],
+                'onion_url': onion_url,
+                'description': '',
             })
 
+        # Pattern 2: if the above yields nothing, try broader extraction
+        if not results:
+            # Look for any .onion address near a readable title in the page
+            block_pattern = r'([a-z2-7]{56}\.onion)'
+            raw_onions = re.findall(block_pattern, html, re.IGNORECASE)
+            # Try to find titles close to these onion addresses
+            for onion in list(dict.fromkeys(raw_onions))[:20]:  # deduplicate, cap 20
+                # Search for a title tag or heading near this onion address
+                idx = html.find(onion)
+                snippet = html[max(0, idx - 300):idx + len(onion) + 50]
+                title_match = re.search(r'>([^<]{5,80})</(?:a|h[1-6]|span|div)', snippet)
+                title = title_match.group(1).strip() if title_match else 'Unknown'
+                if onion not in seen_onions:
+                    seen_onions.add(onion)
+                    results.append({
+                        'title': title[:100],
+                        'onion_url': f'http://{onion}',
+                        'description': '',
+                    })
+
+        onion_addresses = list(seen_onions)
+
         return SourceResult(
-            source='darksearch',
+            source='dargle',
             success=True,
             data={
-                'total': data.get('total', 0),
                 'result_count': len(results),
-                'results': results,
+                'results': results[:20],
+                'onion_addresses_found': onion_addresses[:10],
+                'search_url': url,
             },
         )
 

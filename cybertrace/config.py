@@ -6,67 +6,10 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
 
+from cybertrace.api_keys import APIKeys, API_KEYS  # noqa: F401
+
 # Load .env from project root
 load_dotenv()
-
-
-@dataclass
-class APIKeys:
-    """API key storage."""
-    virustotal: Optional[str] = None
-    shodan: Optional[str] = None
-    urlscan: Optional[str] = None
-    github: Optional[str] = None
-    emailrep: Optional[str] = None
-    intelx: Optional[str] = None
-    hunter: Optional[str] = None
-    numverify: Optional[str] = None
-    twilio_sid: Optional[str] = None
-    twilio_token: Optional[str] = None
-    dehashed: Optional[str] = None
-    telegram_bot: Optional[str] = None
-    twocaptcha: Optional[str] = None
-    etherscan: Optional[str] = None
-    # New keys
-    abuseipdb: Optional[str] = None    # https://www.abuseipdb.com/register — free 1k/day
-    greynoise: Optional[str] = None    # https://viz.greynoise.io/signup — community free
-    leakcheck: Optional[str] = None    # https://leakcheck.io — optional breach DB
-
-    @classmethod
-    def from_env(cls) -> 'APIKeys':
-        return cls(
-            virustotal=os.getenv('VIRUSTOTAL_API_KEY'),
-            shodan=os.getenv('SHODAN_API_KEY'),
-            urlscan=os.getenv('URLSCAN_API_KEY'),
-            github=os.getenv('GITHUB_TOKEN'),
-            emailrep=os.getenv('EMAILREP_API_KEY'),
-            intelx=os.getenv('INTELX_API_KEY'),
-            hunter=os.getenv('HUNTER_API_KEY'),
-            numverify=os.getenv('NUMVERIFY_API_KEY'),
-            twilio_sid=os.getenv('TWILIO_SID'),
-            twilio_token=os.getenv('TWILIO_TOKEN'),
-            dehashed=os.getenv('DEHASHED_API_KEY'),
-            telegram_bot=os.getenv('TELEGRAM_BOT_TOKEN'),
-            twocaptcha=os.getenv('TWOCAPTCHA_API_KEY'),
-            etherscan=os.getenv('ETHERSCAN_API_KEY'),
-            abuseipdb=os.getenv('ABUSEIPDB_API_KEY'),
-            greynoise=os.getenv('GREYNOISE_API_KEY'),
-            leakcheck=os.getenv('LEAKCHECK_API_KEY'),
-        )
-    
-    def get(self, key: str) -> Optional[str]:
-        return getattr(self, key, None)
-    
-    def has(self, key: str) -> bool:
-        val = self.get(key)
-        return val is not None and val.strip() != ''
-    
-    def status(self) -> Dict[str, bool]:
-        """Return status of all API keys."""
-        return {
-            name: self.has(name)
-            for name in self.__dataclass_fields__.keys()
-        }
 
 
 @dataclass
@@ -134,16 +77,10 @@ class Config:
     
     def print_status(self):
         """Print configuration status."""
-        print("\n=== CyberTrace Configuration ===\n")
-        
-        print("API Keys:")
-        for name, available in self.api_keys.status().items():
-            icon = "✓" if available else "✗"
-            print(f"  [{icon}] {name}")
-        
-        print(f"\nTor: {'Enabled' if self.tor.enabled else 'Disabled'}")
-        print(f"Cache TTL: {self.cache_ttl_hours}h")
-        print(f"Timeout: {self.request_timeout}s")
+        self.api_keys.print_status()
+        print(f"  Tor:     {'Enabled' if self.tor.enabled else 'Disabled'}")
+        print(f"  Cache:   {self.cache_ttl_hours}h TTL")
+        print(f"  Timeout: {self.request_timeout}s\n")
 
 
 # Global config instance
