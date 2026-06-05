@@ -94,13 +94,22 @@ class BaseModule(ABC):
         await self._close_session()
     
     async def _create_session(self):
-        """Create aiohttp session with default settings."""
-        if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=self.config.request_timeout)
-            self._session = aiohttp.ClientSession(
-                timeout=timeout,
-                headers={'User-Agent': self.config.user_agent},
-            )
+            """Create aiohttp session with default settings."""
+            if self._session is None or self._session.closed:
+                timeout = aiohttp.ClientTimeout(total=self.config.request_timeout)
+                # CVE-2026-34525 (CWE-20): aiohttp <3.13.4 improperly validates URLs,
+                # allowing malformed user-supplied IPs/domains to trigger unexpected
+                # behaviour. Version bump is the primary fix; connector limits add
+                # defence-in-depth by capping connections to malformed targets.
+                connector = aiohttp.TCPConnector(
+                    limit=10,
+                    limit_per_host=5,
+                )
+                self._session = aiohttp.ClientSession(
+                    timeout=timeout,
+                    connector=connector,
+                    headers={'User-Agent': self.config.user_agent},
+                )
     
     async def _close_session(self):
         """Close aiohttp session."""
