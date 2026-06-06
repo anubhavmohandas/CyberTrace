@@ -94,22 +94,34 @@ class BaseModule(ABC):
         await self._close_session()
     
     async def _create_session(self):
-            """Create aiohttp session with default settings."""
-            if self._session is None or self._session.closed:
-                timeout = aiohttp.ClientTimeout(total=self.config.request_timeout)
-                # CVE-2026-34525 (CWE-20): aiohttp <3.13.4 improperly validates URLs,
-                # allowing malformed user-supplied IPs/domains to trigger unexpected
-                # behaviour. Version bump is the primary fix; connector limits add
-                # defence-in-depth by capping connections to malformed targets.
-                connector = aiohttp.TCPConnector(
-                    limit=10,
-                    limit_per_host=5,
-                )
-                self._session = aiohttp.ClientSession(
-                    timeout=timeout,
-                    connector=connector,
-                    headers={'User-Agent': self.config.user_agent},
-                )
+        """Create aiohttp session with default settings."""
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(total=self.config.request_timeout)
+            # CVE-2026-34525 (CWE-20): aiohttp <3.13.4 improperly validates URLs,
+            # allowing malformed user-supplied IPs/domains to trigger unexpected
+            # behaviour. Version bump is the primary fix; connector limits add
+            # defence-in-depth by capping connections to malformed targets.
+            # CVE-2026-47265 (CWE-346): aiohttp <3.14.0 fails to validate redirect
+            # origins, allowing a MITM or DNS-poisoning attacker to redirect
+            # CyberTrace's outbound requests to a malicious server. Primary fix is
+            # bumping aiohttp to >=3.14.0. Defence-in-depth: disable automatic
+            # redirects at the session level so all redirects are handled explicitly
+            # and can be validated against known-good origin domains before following.
+            connector = aiohttp.TCPConnector(
+                limit=10,
+                limit_per_host=5,
+                ssl=True
+            )
+            self._session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=connector,
+                connector_owner=True,
+                # CVE-2026-47265: disable automatic redirect following at session
+                # level. Individual request call sites should validate any redirect
+                # Location header against their expected base URL before re-issuing
+                # the request manually if a redirect is legitimately needed.
+                allow_redirects=False
+            )
     
     async def _close_session(self):
         """Close aiohttp session."""

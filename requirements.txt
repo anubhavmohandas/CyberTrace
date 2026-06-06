@@ -20,3 +20,7 @@ rich>=13.7.0
 
 # External tools (install separately):
 # pip install maigret sherlock-project holehe
+
+
+# SAGE PATCH for N/A:
+aiohttp>=3.14.0
