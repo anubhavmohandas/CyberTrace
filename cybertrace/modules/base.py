@@ -4,12 +4,15 @@ import asyncio
 import aiohttp
 import hashlib
 import json
+import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from ..config import config
 
@@ -108,8 +111,8 @@ class BaseModule(ABC):
             # redirects at the session level so all redirects are handled explicitly
             # and can be validated against known-good origin domains before following.
             connector = aiohttp.TCPConnector(
-                limit=10,
-                limit_per_host=5,
+                limit=100,          # raised from 10 — each module fans out to ~10 sources concurrently
+                limit_per_host=20,  # raised from 5 — prevents serialisation on multi-request sources
                 ssl=True
             )
             self._session = aiohttp.ClientSession(
@@ -180,12 +183,14 @@ class BaseModule(ABC):
                         await asyncio.sleep(retry_delay * (2 ** attempt))
                         continue
                     return None
-            except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
+            except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
+                logger.debug("fetch transient error [%s] attempt %d/%d: %s", url, attempt + 1, retries + 1, e)
                 if attempt < retries:
                     await asyncio.sleep(retry_delay * (2 ** attempt))
                     continue
                 return None
-            except Exception:
+            except Exception as e:
+                logger.warning("fetch unexpected error [%s]: %s", url, e)
                 return None
         return None
 
@@ -212,12 +217,14 @@ class BaseModule(ABC):
                         await asyncio.sleep(retry_delay * (2 ** attempt))
                         continue
                     return None
-            except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
+            except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
+                logger.debug("fetch_json transient error [%s] attempt %d/%d: %s", url, attempt + 1, retries + 1, e)
                 if attempt < retries:
                     await asyncio.sleep(retry_delay * (2 ** attempt))
                     continue
                 return None
-            except Exception:
+            except Exception as e:
+                logger.warning("fetch_json unexpected error [%s]: %s", url, e)
                 return None
         return None
 

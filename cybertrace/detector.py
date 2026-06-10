@@ -91,10 +91,11 @@ def detect_input_type(input_str: str) -> Tuple[str, str]:
     
     for pattern_name, module_type in DETECTION_ORDER:
         pattern = PATTERNS[pattern_name]
-        
-        # Use phone-cleaned version for phone patterns
-        test_str = phone_cleaned if 'phone' in pattern_name else cleaned
-        
+
+        # Use startswith instead of 'in' substring check — avoids scanning the
+        # full string on every iteration; matters for batch target processing
+        test_str = phone_cleaned if pattern_name.startswith('phone') else cleaned
+
         if pattern.match(test_str):
             return (pattern_name, module_type)
     

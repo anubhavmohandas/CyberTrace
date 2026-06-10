@@ -430,12 +430,14 @@ class EmailModule(BaseModule):
 
         search_id = search_data['id']
 
-        # Step 2: Wait briefly, then fetch results
-        import asyncio
-        await asyncio.sleep(3)
-
+        # Step 2: Poll for results with exponential backoff (max 5 attempts, capped at 10s)
         results_url = f"https://2.intelx.io/intelligent/search/result?id={search_id}&limit=20&offset=0"
-        result_data = await self.fetch_json(results_url, headers=headers)
+        result_data = None
+        for poll_attempt in range(5):
+            await asyncio.sleep(min(2 ** poll_attempt, 10))
+            result_data = await self.fetch_json(results_url, headers=headers)
+            if result_data and result_data.get('records'):
+                break
 
         if not result_data:
             return SourceResult(source='intelx', success=False, error='Results fetch failed')

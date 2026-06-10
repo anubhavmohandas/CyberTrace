@@ -41,13 +41,16 @@ def format_table(result: ModuleResult) -> str:
         if source_result.error:
             lines.append(f"      Error: {source_result.error}")
         elif source_result.data:
-            # Show key findings
+            # Show key findings — truncate before str() conversion to avoid
+            # building large string representations of nested objects
             for key, value in list(source_result.data.items())[:5]:
                 if value is not None:
-                    # Truncate long values
-                    str_val = str(value)
-                    if len(str_val) > 50:
-                        str_val = str_val[:47] + "..."
+                    if isinstance(value, str):
+                        str_val = value[:47] + "..." if len(value) > 50 else value
+                    else:
+                        str_val = str(value)
+                        if len(str_val) > 50:
+                            str_val = str_val[:47] + "..."
                     lines.append(f"      {key}: {str_val}")
         lines.append("")
     
@@ -179,14 +182,29 @@ def format_rich(result: ModuleResult):
 
 
 def save_result(result: ModuleResult, filepath: str, format: str = 'json') -> None:
-    """Save result to file."""
+    """Save result to file (synchronous — use save_result_async inside async code)."""
     if format == 'json':
         content = format_json(result)
     else:
         content = format_table(result)
-    
+
     with open(filepath, 'w') as f:
         f.write(content)
+
+
+async def save_result_async(result: ModuleResult, filepath: str, format: str = 'json') -> None:
+    """Save result to file without blocking the event loop."""
+    try:
+        import aiofiles
+        content = format_json(result) if format == 'json' else format_table(result)
+        async with aiofiles.open(filepath, 'w') as f:
+            await f.write(content)
+    except ImportError:
+        # aiofiles not installed — fall back to thread pool to avoid blocking
+        import asyncio
+        content = format_json(result) if format == 'json' else format_table(result)
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: open(filepath, 'w').write(content))
 
 
 def print_result(result: ModuleResult, format: str = 'table') -> None:
