@@ -111,8 +111,8 @@ class BaseModule(ABC):
             # redirects at the session level so all redirects are handled explicitly
             # and can be validated against known-good origin domains before following.
             connector = aiohttp.TCPConnector(
-                limit=100,          # raised from 10 — each module fans out to ~10 sources concurrently
-                limit_per_host=20,  # raised from 5 — prevents serialisation on multi-request sources
+                limit=10,
+                limit_per_host=5,
                 ssl=True
             )
             self._session = aiohttp.ClientSession(
