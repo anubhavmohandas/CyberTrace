@@ -1,10 +1,10 @@
 # Core
 click>=8.3.3  # SAGE: CVE-2026-7246
-aiohttp>=3.14.0  # SAGE: CVE-2025-69223, CVE-2025-69224, CVE-2025-69225, CVE-2025-69226, CVE-2025-69227, CVE-2025-69228, CVE-2025-69229, CVE-2025-69230, CVE-2026-22815, CVE-2026-34513, CVE-2026-34514, CVE-2026-34515, CVE-2026-34516, CVE-2026-34517, CVE-2026-34518, CVE-2026-34519, CVE-2026-34520, CVE-2026-34525, CVE-2026-34993, CVE-2026-47265
+aiohttp>=3.14.1
 python-dotenv>=1.2.2  # SAGE: CVE-2026-28684
 
 # DNS/WHOIS
-dnspython>=2.8.0  # SAGE: CVE-2025-12084, CVE-2025-12781, CVE-2025-13836, CVE-2025-13837, CVE-2026-3087, CVE-2026-4519, CVE-2026-6019, CVE-2026-7210
+dnspython>=2.8.0
 python-whois>=0.9.0
 
 # Phone parsing (replaces unmaintained PhoneInfoga)
@@ -29,36 +29,36 @@ rich>=13.7.0
 
 
 # SAGE PATCH for N/A:
-aiohttp>=3.14.0
+aiohttp>=3.14.1
 
 
 # SAGE PATCH for N/A:
-aiohttp>=3.14.0
+aiohttp>=3.14.1
 
 
 # SAGE PATCH for N/A:
-aiohttp>=3.14.0
+aiohttp>=3.14.1
 
 
 # SAGE PATCH for N/A:
-aiohttp>=3.14.0
+aiohttp>=3.14.1
 
 
 # SAGE PATCH for N/A:
-aiohttp>=3.14.0
+aiohttp>=3.14.1
 
 
 # SAGE PATCH for N/A:
-aiohttp>=3.14.0
+aiohttp>=3.14.1
 
 
 # SAGE PATCH for N/A:
-aiohttp>=3.14.0
+aiohttp>=3.14.1
 
 
 # SAGE PATCH for N/A:
-aiohttp>=3.14.0
+aiohttp>=3.14.1
 
 
 # SAGE PATCH for N/A:
-aiohttp>=3.14.0
+aiohttp>=3.14.1
