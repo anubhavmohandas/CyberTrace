@@ -454,6 +454,16 @@ def norm_email(value: str) -> Optional[str]:
     local, domain = value.rsplit("@", 1)
     if domain.rpartition(".")[2] in _NON_TLD:
         return None
+    # A local-part that opens or closes on `-` or `.` is a fragment, not a
+    # mailbox. Riseup's list instructions read `listname-subscribe@lists.riseup
+    # .net`, and the extractor — starting at the first character it can match —
+    # took `-subscribe@lists.riseup.net`, an address belonging to no one, and
+    # minted it as an operator artifact. Leading/trailing/doubled dots are
+    # invalid dot-atom outright (RFC 5322 3.2.3). Catching the shape covers the
+    # whole `-request@`/`-owner@`/`-bounces@` family, which naming the two
+    # observed strings would not.
+    if local[0] in "-." or local[-1] in "-." or ".." in local:
+        return None
     # Documentation, not a mailbox — never let it reach the keyserver pivot.
     if (domain in _PLACEHOLDER_DOMAINS
             or _registrable(domain) in _PLACEHOLDER_DOMAINS
@@ -476,9 +486,16 @@ def norm_ip(value: str) -> Optional[str]:
 
 def norm_onion(value: str) -> Optional[str]:
     """v3 only. v2 was retired in 2021 and its 16-char form collides with far
-    too much base32-looking page text to be worth accepting."""
+    too much base32-looking page text to be worth accepting.
+
+    Subdomain labels are dropped, matching detector.normalize_input: the circuit
+    is built to the .onion address itself, so `www.<addr>.onion` — the form
+    Facebook and Reddit publish — is the same hidden service and must resolve to
+    one node, not a second one that never correlates with the first.
+    """
     value = value.strip().lower().removeprefix("http://").removeprefix("https://")
     value = value.split("/", 1)[0].split(":", 1)[0]
+    value = ".".join(value.split(".")[-2:])
     return value if re.fullmatch(r"[a-z2-7]{56}\.onion", value) else None
 
 

@@ -712,8 +712,16 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
                         normalize(etype, str(raw)) == normalize(etype, target_url):
                     continue
                 where = seen_at.get(raw) or {}
+                # Quoted third-party content — a forwarded message, a pasted
+                # source header — is something the page reproduces, not
+                # something it controls. MENTIONS is the edge that already says
+                # that, and correlate.CONTEXT_WEIGHT scores it at 0.15, so the
+                # artifact stays visible as supporting context and stops short
+                # of becoming operator identity.
+                quoted = where.get("section") == "quoted"
                 _link(store, page_snaps.get(where.get("page"), sid), market_id, etype,
-                      "DISCOVERED_VIA" if index_hit else rtype, str(raw), name,
+                      "DISCOVERED_VIA" if index_hit else "MENTIONS" if quoted else rtype,
+                      str(raw), name,
                       section=where.get("section") or key,
                       # An index co-ranking is provenance, not a claim about the
                       # site, so it is recorded at a confidence that cannot on

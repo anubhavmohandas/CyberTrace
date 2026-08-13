@@ -26,6 +26,19 @@ logger = logging.getLogger(__name__)
 # operator's; the same string in passing prose is a mention. Checked against the
 # raw HTML window, so class="footer" / id="wallet" count as evidence too.
 _SECTION_RULES = (
+    # Checked first, because it overrides every rule under it: content the page
+    # reproduces rather than authors. A mailing-list archive is the case that
+    # forced this — Riseup's list archive quotes a message carrying a script
+    # header, `script MICRO-CAL (V4.2) par Amroune Selim (amrounix@gmail.com)`,
+    # and that address was minted as an operator artifact, pivoted to a
+    # username, and pivoted again to the GitHub and Gravatar of a person with no
+    # connection to the site. An address inside quoted content belongs to
+    # whoever was quoted. Denylisting Gmail would not have caught it; provenance
+    # does. Downstream: evidence.ingest demotes the edge to MENTIONS and
+    # _pivot_targets refuses to enrich it.
+    ('quoted', re.compile(
+        r'wrote:|-{2,}\s*original message|in reply to|<blockquote|&gt;\s*&gt;'
+        r'|written by|authored by|\bauthor\s*:|all copies', re.I)),
     ('wallet', re.compile(r'wallet|donate|payment|deposit|escrow|bitcoin|monero', re.I)),
     ('contact', re.compile(r'contact|support|abuse|admin|reach us', re.I)),
     ('pgp', re.compile(r'pgp|gpg|public key|signature', re.I)),
@@ -228,8 +241,17 @@ class DarkwebModule(BaseModule):
             # footer artifact, and letting the value match its own section rule
             # would relabel it 'contact' on the strength of its local-part.
             around = f"{before} {after}"
+            # 'quoted' is the one rule that gets a wider look-back. A quote
+            # marker heads the block it introduces — `On <date>, X wrote:`, an
+            # opening <blockquote> — so it sits above the address rather than
+            # beside it, and ±70 would only catch a quoted address by luck. The
+            # other rules keep the narrow window on purpose: a `donate` heading
+            # 500 chars up says nothing about the address down here.
+            section = next((n for n, rx in _SECTION_RULES if rx.search(around)), 'body')
+            if section != 'quoted' and _QUOTED_LEAD.search(html[max(0, m.start() - 600):m.start()]):
+                section = 'quoted'
             evidence[raw] = {
-                'section': next((n for n, rx in _SECTION_RULES if rx.search(around)), 'body'),
+                'section': section,
                 'context': re.sub(
                     r'\s+', ' ', re.sub(r'<[^>]+>', ' ', f"{before}{raw}{after}")).strip()[:200],
             }
@@ -1276,12 +1298,20 @@ class DarkwebModule(BaseModule):
         kind to bound external calls. ETH addresses go to the bitcoin module too
         (it auto-detects the coin); email local-parts become candidate usernames;
         candidate operator IPs get RDAP/ASN/geo enrichment via the ip module."""
-        emails = (data.get('emails') or [])[:cap]
-        crypto = (
-            (data.get('bitcoin_addresses') or []) + (data.get('ethereum_addresses') or [])
-        )[:cap]
+        # Artifacts read out of quoted third-party content are never enriched.
+        # Enrichment is the step that turns a string into a named person — the
+        # keyserver, GitHub and Gravatar lookups — so a quoted address must be
+        # stopped before it, not scored down after. See _SECTION_RULES.
+        quoted = {v for v, where in (data.get('artifact_evidence') or {}).items()
+                  if where.get('section') == 'quoted'}
+        own_emails = [e for e in (data.get('emails') or []) if e not in quoted]
+        emails = own_emails[:cap]
+        crypto = [
+            c for c in (data.get('bitcoin_addresses') or [])
+            + (data.get('ethereum_addresses') or []) if c not in quoted
+        ][:cap]
         ips = (data.get('candidate_operator_ips') or [])[:cap]
-        usernames = DarkwebModule._usernames_from_emails(data.get('emails') or [])[:cap]
+        usernames = DarkwebModule._usernames_from_emails(own_emails)[:cap]
         return (
             [('email', e) for e in emails]
             + [('bitcoin', c) for c in crypto]
