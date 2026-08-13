@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -149,6 +151,7 @@ RELATIONSHIP_TYPES = {
     "USES_BTC", "USES_XMR", "USES_ETH", "PART_OF_CLUSTER",
     "HOSTED_ON", "RESOLVES_TO", "BELONGS_TO_ASN", "OWNED_BY",
     "USES_CERT", "USES_NS", "USES_ANALYTICS", "CANDIDATE_IP", "LINKS_TO",
+    "HAS_FINGERPRINT",
     "COPIES", "CROSS_SIGNS", "SIGNED_BY", "SIMILAR_TO", "SUCCESSOR_OF",
     "LINKED_TO", "ASSOCIATED_WITH_IP",
 }
@@ -204,6 +207,50 @@ ARTIFACT_MAP = {
 }
 
 
+# Server banners so common they identify nothing. A fingerprint made only of
+# these must not become an entity: it would put every nginx market on one shared
+# node and hand correlation a fleet of operator candidates whose sole connection
+# is running the same web server — the exact shared-infrastructure noise a
+# fingerprint is meant to cut through. A hand-written banner is the opposite: it
+# is close to a build signature, and operators rarely think to change it.
+_GENERIC_BANNER = re.compile(
+    r"(nginx|apache2?|httpd|caddy|cloudflare|litespeed|iis|openresty|jetty|"
+    r"gunicorn|werkzeug|express|php|asp\.net|node(\.js)?|tornado|kestrel)"
+    r"[/ ]?[\d.]*$", re.I)
+
+
+def fingerprint_signature(fp: dict) -> Optional[str]:
+    """Canonical identity for an HTTP fingerprint, or None if it distinguishes
+    nothing. Two markets built by one operator collapse onto a single node here.
+
+    Volatile fields must stay out of the identity or nothing ever matches twice:
+    clock skew and Date live beside this in the payload and are deliberately not
+    read. Lists are sorted so header ordering between visits cannot fork a node.
+
+    occam: substring-free exact-ish banner match, no commonness model. If a
+    corpus shows generic banners still merging markets, weight by how many
+    distinct targets share the signature instead of judging the string.
+    """
+    if not isinstance(fp, dict):
+        return None
+    fields = {k: sorted(map(str, v)) if isinstance(v, (list, tuple)) else str(v)
+              for k, v in fp.items() if v}
+    distinctive = any(not _GENERIC_BANNER.fullmatch(v.strip())
+                      for v in fields.values() if isinstance(v, str))
+    return _canon_json(fields) if distinctive and fields else None
+
+
+# Collectors that search an index *for* the target instead of observing it. Only
+# target_onion and operator_pivot actually fetch the site, so only they can say
+# what it links to. A search result list says two onions ranked together and
+# nothing more — ingesting that as LINKS_TO gives any two markets that co-rank
+# beside the same link directory a shared node, which correlation then reads as
+# an operator link. The failure is loudest when the target is DOWN: the visit
+# fails, the index still answers, and the market's whole neighbourhood is noise.
+_INDEX_SOURCES = {"ahmia", "torch", "dargle", "intelx", "onion_directories",
+                  "paste_sites", "ransomwhat", "onion_lookup"}
+
+
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -221,6 +268,13 @@ class EvidenceStore:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self.conn.commit()
+        # (etype, raw) -> times normalization refused it. Extractor precision is
+        # valid/extracted, and the store otherwise keeps only the numerator: a
+        # rejected value leaves no row anywhere, so without this the denominator
+        # is unrecoverable from the DB or the saved JSON.
+        # occam: in-memory, per-instance, not a table — an audit ingests and
+        # reads in one process. Persist it if rejects ever need trending.
+        self.rejected: Counter = Counter()
 
     def close(self) -> None:
         self.conn.close()
@@ -311,6 +365,7 @@ class EvidenceStore:
             raise ValueError(f"unknown entity type: {etype}")
         norm = normalize(etype, value)
         if norm is None:
+            self.rejected[(etype, str(value)[:120])] += 1
             return None
         key = norm.lower()
         eid = self._id("ent", f"{etype}|{key}")
@@ -524,11 +579,30 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
         seen_at = payload.get("artifact_evidence") or {}
 
         for key, (etype, rtype) in ARTIFACT_MAP.items():
+            # An index returns what ranked beside the target, not what the target
+            # links to. Everything else in its payload still counts: a paste that
+            # names this market and an email is real evidence about it.
+            if key == "onion_addresses_found" and name in _INDEX_SOURCES:
+                continue
             for raw in payload.get(key) or []:
+                # The target's own address is already HAS_ADDRESS; re-adding it as
+                # a link would make every market cite itself as an associate.
+                if etype == "ONION_ADDRESS" and \
+                        normalize(etype, str(raw)) == normalize(etype, target_url):
+                    continue
                 where = seen_at.get(raw) or {}
                 _link(store, sid, market_id, etype, rtype, str(raw), name,
                       section=where.get("section") or key,
                       context=where.get("context"), observed_at=observed_at)
+
+        # The server's own build signature. Declared in ENTITY_TYPES but never
+        # written until now, so a self-hosted market's strongest operator tell
+        # reached the dossier and stopped there, invisible to correlation.
+        signature = fingerprint_signature(payload.get("server_fingerprint") or {})
+        if signature:
+            _link(store, sid, market_id, "HTTP_FINGERPRINT", "HAS_FINGERPRINT",
+                  signature, name, section="server_fingerprint",
+                  confidence=0.8, observed_at=observed_at)
 
         # Prefer the true fingerprint; fall back to the collector's key_id, which
         # normalize keeps in a separate PGP:KEYID: namespace precisely so a weak

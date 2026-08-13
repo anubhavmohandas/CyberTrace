@@ -18,6 +18,12 @@ from urllib.parse import urlsplit
 logger = logging.getLogger(__name__)
 
 from ..config import config
+from ..safety import BlockedContent, is_blocked_url, scrub
+
+# Only the outermost run_sources() renders: rich permits one live display at a
+# time, and the darkweb operator pivot runs whole sub-module searches inside a
+# source. asyncio is single-threaded here, so a plain flag is enough.
+_display_active = False
 
 
 @dataclass
@@ -90,6 +96,7 @@ class BaseModule(ABC):
 
     def __init__(self):
         self.config = config
+        self.show_progress = True  # CLI clears this for -q
         self._session: Optional[aiohttp.ClientSession] = None      # direct / clearnet
         self._tor_session: Optional[aiohttp.ClientSession] = None  # via Tor SOCKS5
         self._tor_lock = asyncio.Lock()
@@ -175,7 +182,14 @@ class BaseModule(ABC):
         This is why a global Tor switch is wrong for this tool: forcing the
         clearnet indexes (Ahmia, PSBDMP, ransomwhat…) through Tor exit nodes
         makes several of them unreachable. Onion-only routing keeps both working.
+
+        Also the single URL safety gate: every HTTP helper here and in the
+        modules awaits this before it can send anything, so one check covers
+        them all. BlockedContent lands in each caller's existing `except`,
+        making a refused URL behave exactly like an unreachable one.
         """
+        if is_blocked_url(url):
+            raise BlockedContent("URL refused by content-safety gate")
         if self._is_onion(url) or self.config.tor.enabled:
             return await self._get_tor_session()
         if self._session is None:
@@ -235,12 +249,15 @@ class BaseModule(ABC):
         Returns None on error (doesn't raise).
         """
         kwargs.setdefault('allow_redirects', False)  # CVE-2026-47265
-        session = await self._session_for(url)  # .onion -> Tor, clearnet -> direct
+        try:
+            session = await self._session_for(url)  # .onion -> Tor, clearnet -> direct
+        except BlockedContent:
+            return None  # resolved outside the retry loop, so caught explicitly
         for attempt in range(retries + 1):
             try:
                 async with session.request(method, url, **kwargs) as resp:
                     if resp.status in ok_statuses:
-                        return await resp.text()
+                        return scrub(await resp.text(), url)
                     # Retry on rate limit or server errors
                     if resp.status in (429, 500, 502, 503, 504) and attempt < retries:
                         await asyncio.sleep(retry_delay * (2 ** attempt))
@@ -272,7 +289,10 @@ class BaseModule(ABC):
         Returns None on error (doesn't raise).
         """
         kwargs.setdefault('allow_redirects', False)  # CVE-2026-47265
-        session = await self._session_for(url)  # .onion -> Tor, clearnet -> direct
+        try:
+            session = await self._session_for(url)  # .onion -> Tor, clearnet -> direct
+        except BlockedContent:
+            return None  # resolved outside the retry loop, so caught explicitly
         for attempt in range(retries + 1):
             try:
                 async with session.request(method, url, **kwargs) as resp:
@@ -341,13 +361,12 @@ class BaseModule(ABC):
         if not sources:
             return
 
-        # Run all sources concurrently
-        tasks = [coro for _, coro in sources]
         names = [name for name, _ in sources]
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await self._gather_with_progress(sources)
 
         for name, res in zip(names, results):
+            if res is None:
+                continue  # source opted out (nothing to look up) — not a failure
             if isinstance(res, Exception):
                 result.sources[name] = SourceResult(
                     source=name,
@@ -368,3 +387,61 @@ class BaseModule(ABC):
                     success=False,
                     error="Invalid return type",
                 )
+
+    # Progress rendering
+
+    @staticmethod
+    def _progress_label(name: str, res: Any) -> str:
+        """Finished-row text: what the source was, and how it landed."""
+        from rich.markup import escape
+
+        if isinstance(res, Exception):
+            return f"[red]✗[/] {name} — {escape(str(res) or type(res).__name__)[:70]}"
+        if res is None:
+            return f"[dim]–[/] {name} — skipped"
+        ok = res.success if isinstance(res, SourceResult) else bool(res)
+        if ok:
+            return f"[green]✓[/] {name}"
+        error = getattr(res, 'error', None)
+        detail = f" — {escape(error)[:70]}" if error else " — no data"
+        return f"[yellow]○[/] {name}{detail}"
+
+    async def _gather_with_progress(self, sources: List[tuple]) -> List[Any]:
+        """
+        Run the source coroutines concurrently, with a live per-source row on
+        stderr so a slow search (a Tor fetch runs tens of seconds) never looks
+        hung. Exceptions come back as values, as gather(return_exceptions=True).
+
+        Nothing is drawn when stderr is not a terminal — piped/redirected output
+        stays clean — nor under -q, nor for a nested search inside a source.
+        """
+        global _display_active
+        from rich.console import Console
+        from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+
+        console = Console(stderr=True)
+        show = self.show_progress and console.is_terminal and not _display_active
+        _display_active |= show
+        try:
+            with Progress(
+                SpinnerColumn(finished_text=' '),
+                TextColumn('{task.description}'),
+                TimeElapsedColumn(),
+                console=console,
+                disable=not show,
+            ) as progress:
+                tasks = {name: progress.add_task(name, total=1) for name, _ in sources}
+
+                async def run(name: str, coro):
+                    try:
+                        res = await coro
+                    except Exception as e:  # recorded as a failed source by the caller
+                        res = e
+                    progress.update(tasks[name], completed=1,
+                                    description=self._progress_label(name, res))
+                    return res
+
+                return await asyncio.gather(*(run(n, c) for n, c in sources))
+        finally:
+            if show:
+                _display_active = False

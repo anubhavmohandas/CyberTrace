@@ -10,6 +10,7 @@ from .config import config
 from .detector import detect_input_type, normalize_input
 from .modules import get_module, list_modules, TYPE_TO_MODULE
 from .output import print_result, save_result, format_operator_candidates
+from .safety import is_blocked_query
 
 LOGO = r"""
    ██████╗██╗   ██╗██████╗ ███████╗██████╗ ████████╗██████╗  █████╗  ██████╗███████╗
@@ -132,6 +133,11 @@ def search(target: str, input_type: str, output_format: str, save_path: Optional
     TARGET can be an email, phone, username, domain, Bitcoin address, etc.
     The type is auto-detected if not specified.
     """
+    if is_blocked_query(target):
+        click.echo("[!] Target refused: names prohibited content (CSAM/gore). "
+                   "Not searched, nothing stored.", err=True)
+        sys.exit(2)
+
     # Detect input type
     if input_type == 'auto':
         specific_type, module_type = detect_input_type(target)
@@ -153,10 +159,11 @@ def search(target: str, input_type: str, output_format: str, save_path: Optional
         click.echo(f"[!] Available modules: {', '.join(list_modules().keys())}", err=True)
         sys.exit(1)
     
+    module.show_progress = not quiet
     if not quiet:
         click.echo(f"[*] Using module: {module.name}", err=True)
         click.echo(f"[*] Searching...", err=True)
-    
+
     # Run search
     try:
         result = asyncio.run(_run_search(module, normalized, deep=deep, tor=tor, timeout=timeout))

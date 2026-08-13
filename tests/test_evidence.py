@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 
 import pytest
 
-from cybertrace.evidence import EvidenceStore, ingest, detect_clones, page_similarity
+from cybertrace.evidence import (
+    EvidenceStore, ingest, detect_clones, fingerprint_signature, page_similarity,
+)
 from cybertrace.modules.base import ModuleResult, SourceResult
 from cybertrace.modules.email_module import EmailModule
 from cybertrace.normalize import (
@@ -67,9 +69,29 @@ def test_xmr_and_eth():
     assert norm_eth("0x1234") is None
 
 
+def test_rejects_are_counted():
+    """A refused value must leave a trace. It writes no row anywhere, so without
+    the counter `extracted` is unrecoverable and precision cannot be computed."""
+    store = EvidenceStore(":memory:")
+    assert store.upsert_entity("EMAIL", "logo_dark_48@2x.webp") is None
+    assert store.upsert_entity("EMAIL", "ops@blockchair.com") is not None
+    store.upsert_entity("EMAIL", "logo_dark_48@2x.webp")          # seen twice
+    assert store.rejected[("EMAIL", "logo_dark_48@2x.webp")] == 2
+    assert sum(store.rejected.values()) == 2                      # accepted not counted
+    store.close()
+
+
 def test_misc_normalizers():
     assert norm_email("  BOSS@Example.COM.") == "boss@example.com"
     assert norm_email("not-an-email") is None
+    # Asset filenames are the false-positive family seen in the wild (Blockchair
+    # served logo_dark_48@2x.webp, which minted an EMAIL and a USERNAME node).
+    assert norm_email("logo_dark_48@2x.webp") is None
+    assert norm_email("image@2x.png") is None
+    assert norm_email("sprite@3x.svg") is None
+    assert norm_email("foo@bar.com") == "foo@bar.com"
+    assert norm_email(f"admin@{ONION_A}") == f"admin@{ONION_A}"   # real onion mailbox
+    assert norm_email("admin@example.onion") is None              # placeholder onion
     assert norm_ip(" 1.2.3.4 ") == "1.2.3.4"
     assert norm_ip("999.1.1.1") is None
     assert norm_onion("http://" + ONION_A.upper() + "/index") == ONION_A
@@ -122,6 +144,79 @@ def _result(target, seen=datetime(2026, 1, 10, tzinfo=timezone.utc), **onion_dat
         data={'online': True, **onion_data},
     )
     return r
+
+
+def test_fingerprint_only_when_it_distinguishes():
+    """A shared web server is not a shared operator.
+
+    DarkForest served `X-Powered-By: the almighty n0tr1v` — hand-written, close
+    to a build signature, and the strongest tell on a login-wall page that
+    yielded no other artifact. A bare `Server: nginx` is the opposite: minting a
+    node for it would link every nginx market to every other one.
+    """
+    custom = {'X-Powered-By': 'the almighty n0tr1v', 'cookie_names': ['_csrf']}
+    assert fingerprint_signature(custom)
+    assert fingerprint_signature({'Server': 'nginx'}) is None
+    assert fingerprint_signature({'Server': 'Apache/2.4.57'}) is None
+    assert fingerprint_signature({'Server': 'nginx', 'X-Powered-By': 'PHP/8.1.2'}) is None
+    assert fingerprint_signature({}) is None
+    # Header order between two visits must not fork one operator into two nodes.
+    assert fingerprint_signature({'Server': 'zz', 'cookie_names': ['b', 'a']}) == \
+           fingerprint_signature({'cookie_names': ['a', 'b'], 'Server': 'zz'})
+
+    # Two markets sharing a hand-written banner must land on ONE node — that is
+    # the whole point of giving the signature an identity.
+    store = EvidenceStore(":memory:")
+    for onion in (ONION_A, ONION_B):
+        ingest(_result(onion, server_fingerprint=custom), store)
+    fps = store.conn.execute(
+        "SELECT COUNT(*) c FROM entities WHERE etype='HTTP_FINGERPRINT'").fetchone()["c"]
+    assert fps == 1
+    assert store.conn.execute(
+        "SELECT COUNT(*) c FROM relationships "
+        "WHERE rtype='HAS_FINGERPRINT'").fetchone()["c"] == 2
+    store.close()
+
+    store = EvidenceStore(":memory:")
+    ingest(_result(ONION_A, server_fingerprint={'Server': 'nginx'}), store)
+    assert store.conn.execute(
+        "SELECT COUNT(*) c FROM entities WHERE etype='HTTP_FINGERPRINT'").fetchone()["c"] == 0
+    store.close()
+
+
+def test_index_hits_do_not_become_target_links():
+    """Search-index co-occurrence must not become a LINKS_TO edge.
+
+    Seen in the wild: mentalhub's onion was unreachable, so nothing was fetched,
+    yet Torch's result list gave the market three edges to a link directory that
+    merely ranked beside it. Two down markets sharing that directory then look
+    like one operator. The same list from an actual visit IS a real link.
+    """
+    others = ["b" * 56 + ".onion", "c" * 56 + ".onion"]
+
+    r = ModuleResult(target=ONION_A, target_type='darkweb', module='darkweb')
+    r.sources['torch'] = SourceResult(
+        source='torch', success=True, timestamp=datetime(2026, 1, 10, tzinfo=timezone.utc),
+        data={'onion_addresses_found': others + [ONION_A], 'emails': ['op@example.com']})
+
+    store = EvidenceStore(":memory:")
+    assert ingest(r, store), "the index snapshot itself must still be recorded"
+    links = store.conn.execute(
+        "SELECT COUNT(*) c FROM relationships WHERE rtype='LINKS_TO'").fetchone()["c"]
+    assert links == 0
+    # Non-onion artifacts from an index hit are still evidence about the target.
+    assert store.find_entity("EMAIL", "op@example.com") is not None
+    store.close()
+
+    visited = _result(ONION_A, onion_addresses_found=others + [ONION_A])
+    store = EvidenceStore(":memory:")
+    ingest(visited, store)
+    rows = store.conn.execute(
+        "SELECT b.normalized_value v FROM relationships r "
+        "JOIN entities b ON b.entity_id=r.target_entity_id "
+        "WHERE r.rtype='LINKS_TO'").fetchall()
+    assert {row["v"] for row in rows} == set(others)   # own address excluded, not self-linked
+    store.close()
 
 
 # --- M4 enrichment routing ---------------------------------------------------

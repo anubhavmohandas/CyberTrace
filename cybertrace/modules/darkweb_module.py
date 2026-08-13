@@ -14,6 +14,7 @@ from urllib.parse import quote_plus, unquote
 from ..normalize import (
     norm_btc, norm_domain, norm_email, norm_eth, norm_onion, norm_pgp, norm_xmr,
 )
+from ..safety import scrub
 from .base import BaseModule, ModuleResult, SourceResult
 
 logger = logging.getLogger(__name__)
@@ -131,16 +132,23 @@ class DarkwebModule(BaseModule):
                             discovered_onions.add(onion_match.group(1))
 
         if discovered_onions:
-            onion_result = await self._search_onion_lookup(list(discovered_onions))
-            result.sources['onion_lookup'] = onion_result
+            # Through run_sources for its progress row: probing every discovered
+            # onion over Tor can outlast phases 0-5 combined.
+            await self.run_sources(
+                [('onion_lookup', self._search_onion_lookup(list(discovered_onions)))],
+                result,
+            )
 
         # Phase 7: Auto-pivot operator artifacts (emails, crypto) found on the
         # live onion into their own modules for a one-command operator profile.
         live = result.sources.get('target_onion')
         if live and live.success:
-            pivot = await self._pivot_operator_artifacts(live.data)
-            if pivot:
-                result.sources['operator_pivot'] = pivot
+            # Returns None when there are no artifacts to pivot; run_sources
+            # drops a None rather than recording a phantom failed source.
+            await self.run_sources(
+                [('operator_pivot', self._pivot_operator_artifacts(live.data))],
+                result,
+            )
 
         # Build summary
         result.summary = self._build_summary(result)
@@ -279,7 +287,9 @@ class DarkwebModule(BaseModule):
         try:
             session = await self._session_for(url)
             async with session.request('GET', url, allow_redirects=False) as resp:
-                text = await resp.text(errors='ignore')
+                # scrub, not fetch()'s: this path keeps headers, so it bypasses
+                # the base helper and needs the content gate applied here too.
+                text = scrub(await resp.text(errors='ignore'), url)
                 return resp.status, dict(resp.headers), text
         except Exception as e:  # unreachable / Tor down / timeout
             logger.debug("onion fetch failed [%s]: %s", url, e)

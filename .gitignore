@@ -64,12 +64,18 @@ data/
 # only a loader — it reads os.getenv and stores nothing.
 api_keys.py
 
-# OSINT output files — never commit investigation results
+# OSINT output files. Scratch run output stays out of the repo.
+# evidence/ is the deliberate exception and IS tracked: the saved --save JSON
+# there is the corpus the extractor-precision audit measures against, so it has
+# to be versioned alongside the normalizers whose behaviour it pins down.
+# Everything in evidence/ is published — read a run before adding it.
 output/
 outputs/
 results/
 reports/
 *.json.out
+*.json
+# !evidence/*.json
 *.report
 
 # Sensitive files — extra safety net

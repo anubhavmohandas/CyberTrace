@@ -262,12 +262,42 @@ def norm_eth(addr: str) -> Optional[str]:
     return f"ETH:{addr}" if re.fullmatch(r"0x[0-9a-f]{40}", addr) else None
 
 
-_EMAIL_RE = re.compile(r"[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+")
+# File extensions that land in the TLD slot when scraping HTML: `logo@2x.webp`
+# is a retina asset filename, not a mailbox. This guard is why the list exists —
+# a false email seeds a false local-part username, which seeds false social
+# accounts, so one bad extraction multiplies into a whole invented subgraph.
+_NON_TLD = frozenset("""
+webp png jpg jpeg gif svg ico bmp tif tiff avif
+css js mjs json xml map woff woff2 ttf eot otf
+html htm php asp aspx jsp cgi
+mp3 mp4 webm ogg wav avi mov pdf zip gz tar rar
+py rb sh txt md yml yaml toml lock
+""".split())
+
+# TLD is alphabetic or punycode — never digits, never a hyphen. `foo@bar.2x`
+# never reaches the extension list because the shape already fails.
+_EMAIL_RE = re.compile(r"[^@\s]+@(?:[^@\s.]+\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})")
 
 
 def norm_email(value: str) -> Optional[str]:
+    """A plausible domain is required, not merely `something@something.tld`.
+
+    occam: no IANA TLD list — nothing installed carries one and a vendored copy
+    goes stale, rejecting new gTLDs. Shape + extension blocklist catches the
+    asset-filename family that actually appears in scraped pages. Upgrade to a
+    real TLD allowlist if false emails survive in some other shape.
+    """
     value = value.strip().strip(".,;:<>()[]").lower()
-    return value if _EMAIL_RE.fullmatch(value) and len(value) <= 254 else None
+    if not _EMAIL_RE.fullmatch(value) or len(value) > 254:
+        return None
+    domain = value.rsplit("@", 1)[1]
+    if domain.rpartition(".")[2] in _NON_TLD:
+        return None
+    # An onion mailbox is a real operator pivot, so it is accepted — but only for
+    # an address that is actually an onion. `user@example.onion` is documentation.
+    if domain.endswith(".onion") and norm_onion(domain) is None:
+        return None
+    return value
 
 
 def norm_ip(value: str) -> Optional[str]:

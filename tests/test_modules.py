@@ -357,3 +357,62 @@ class TestMaigretReportParsing:
     def test_ignores_malformed_entries(self):
         data = {'a': 'not-a-dict', 'b': {'status': None}, 'c': {}}
         assert UsernameModule._parse_maigret_report(data) == []
+
+
+class TestSourceProgress:
+    """run_sources renders live status without changing what it records."""
+
+    @staticmethod
+    def _run(sources, show_progress=False):
+        import asyncio
+        module = get_module('bitcoin')
+        module.show_progress = show_progress
+        result = ModuleResult(target='t', target_type='x', module='m')
+        asyncio.run(module.run_sources(sources, result))
+        return result
+
+    def test_results_survive_the_progress_wrapper(self):
+        async def ok():
+            return {'found': 1}
+
+        async def boom():
+            raise ValueError("nope")
+
+        async def opted_out():
+            return None
+
+        result = self._run([('a', ok()), ('b', boom()), ('c', opted_out())])
+        assert result.sources['a'].success and result.sources['a'].data == {'found': 1}
+        assert not result.sources['b'].success and 'nope' in result.sources['b'].error
+        assert 'c' not in result.sources  # None is dropped, not a phantom failure
+
+    def test_nested_search_does_not_open_a_second_display(self, monkeypatch):
+        """The darkweb pivot runs a whole sub-search inside a source; rich
+        allows only one live display, so the inner one must render nothing."""
+        import cybertrace.modules.base as base
+
+        monkeypatch.setenv('FORCE_COLOR', '1')  # make Console.is_terminal true
+
+        async def _noop():
+            return {'ok': True}
+
+        async def inner():
+            assert base._display_active is True  # outer owns the display
+            nested = get_module('bitcoin')
+            nested.show_progress = True
+            inner_result = ModuleResult(target='t', target_type='x', module='m')
+            # A second live display would raise rich.errors.LiveError here.
+            await nested.run_sources([('leaf', _noop())], inner_result)
+            return inner_result.sources['leaf'].data
+
+        result = self._run([('outer', inner())], show_progress=True)
+        assert result.sources['outer'].success
+        assert base._display_active is False  # released on exit
+
+    def test_labels_report_each_outcome(self):
+        from cybertrace.modules.base import BaseModule as B
+        assert '✓' in B._progress_label('a', SourceResult(source='a', success=True))
+        assert '○' in B._progress_label('a', SourceResult(source='a', success=False,
+                                                          error='down'))
+        assert '✗' in B._progress_label('a', ValueError('x'))
+        assert 'skipped' in B._progress_label('a', None)
