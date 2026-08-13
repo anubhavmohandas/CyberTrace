@@ -12,6 +12,78 @@ def format_json(result: ModuleResult, indent: int = 2) -> str:
     return json.dumps(result.to_dict(), indent=indent, default=str)
 
 
+def _format_operator_intel(intel: Dict[str, Any], width: int) -> list:
+    """Expand the operator_intel block into readable lines. Only non-empty
+    signals are shown so a hardened target stays quiet instead of noisy."""
+    lines = [" OPERATOR INTELLIGENCE ".center(width, "-"), "-" * width]
+
+    ips = intel.get('candidate_operator_ips')
+    lines.append(f"  [!] Candidate operator IPs: {', '.join(ips) if ips else 'none found'}")
+
+    if intel.get('live_url'):
+        lines.append(f"  Live site:  {intel['live_url']}  ({intel.get('title') or 'no title'})")
+    if intel.get('clock_skew_seconds') is not None:
+        lines.append(f"  Clock skew: {intel['clock_skew_seconds']}s vs UTC")
+
+    fp = intel.get('server_fingerprint') or {}
+    if fp:
+        lines.append(f"  Server:     {', '.join(f'{k}={v}' for k, v in fp.items())[:200]}")
+
+    hosts = intel.get('clearnet_hosts_referenced') or []
+    if hosts:
+        lines.append(f"  Clearnet hosts referenced ({len(hosts)}):")
+        for h in hosts[:15]:
+            lines.append(f"      - {h}")
+
+    for label, key in (('Emails', 'emails'), ('Analytics IDs', 'analytics_ids')):
+        vals = intel.get(key) or []
+        if vals:
+            lines.append(f"  {label}: {', '.join(vals)}")
+
+    crypto = intel.get('crypto') or {}
+    for coin, addrs in crypto.items():
+        if addrs:
+            lines.append(f"  {coin.capitalize()}: {', '.join(addrs)}")
+
+    if intel.get('pgp_key_present'):
+        lines.append("  PGP key present on page: yes")
+
+    for m in intel.get('favicon_shodan') or []:
+        lines.append(
+            f"  [!] Favicon match: {m.get('ip')}:{m.get('port')} "
+            f"{m.get('org') or ''} {m.get('hostnames') or ''}".rstrip()
+        )
+
+    for mc in intel.get('misconfigurations') or []:
+        leak = f" leaked_ips={mc['leaked_ips']}" if mc.get('leaked_ips') else ""
+        lines.append(f"  Misconfig: {mc.get('path')} ({mc.get('status')}){leak}")
+
+    lines.append("")
+    lines.append("-" * width)
+    return lines
+
+
+def _format_pivots(pivots: list, width: int) -> list:
+    """Render the operator-artifact pivots (email/crypto sub-module results)."""
+    lines = [" ARTIFACT PIVOTS ".center(width, "-"), "-" * width]
+    for p in pivots:
+        head = f"  {p.get('type', '?')}: {p.get('target', '')}"
+        if p.get('error'):
+            lines.append(f"{head}  [error: {p['error']}]")
+            continue
+        lines.append(f"{head}  ({p.get('sources_ok', '')})")
+        for k, v in list((p.get('summary') or {}).items())[:4]:
+            if isinstance(v, list):
+                v = f"{len(v)} items"
+            elif isinstance(v, dict):
+                v = f"{len(v)} entries"
+            sv = str(v)
+            lines.append(f"      {k}: {sv[:57] + '...' if len(sv) > 60 else sv}")
+    lines.append("")
+    lines.append("-" * width)
+    return lines
+
+
 def format_table(result: ModuleResult) -> str:
     """Format result as ASCII table."""
     lines = []
@@ -29,7 +101,17 @@ def format_table(result: ModuleResult) -> str:
     lines.append(f"  Sources:    {result.success_count}/{result.total_count} successful")
     lines.append("")
     lines.append("-" * width)
-    
+
+    # Operator intelligence — the headline for onion targets. Rendered up top
+    # and fully expanded (the generic summary renderer only shows "N entries").
+    intel = (result.summary or {}).get('operator_intel')
+    if intel:
+        lines.extend(_format_operator_intel(intel, width))
+
+    pivots = (result.summary or {}).get('operator_pivots')
+    if pivots:
+        lines.extend(_format_pivots(pivots, width))
+
     # Source results
     lines.append(" SOURCE RESULTS ".center(width, "-"))
     lines.append("-" * width)

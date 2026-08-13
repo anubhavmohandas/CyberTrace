@@ -1,7 +1,6 @@
 """Email OSINT module."""
 
 import asyncio
-import shutil
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 import json
@@ -49,7 +48,7 @@ class EmailModule(BaseModule):
         ]
 
         # Holehe if available
-        if shutil.which('holehe'):
+        if self.which('holehe'):
             sources.append(('holehe', self._run_holehe(email)))
 
         # Optional API sources
@@ -214,11 +213,11 @@ class EmailModule(BaseModule):
         """Run Holehe tool to check 120+ sites."""
         try:
             proc = await asyncio.create_subprocess_exec(
-                'holehe', email, '--only-used',
+                self.which('holehe'), email, '--only-used',
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.tool_timeout)
             
             output = stdout.decode()
             

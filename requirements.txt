@@ -1,7 +1,11 @@
+# Single source of truth: pyproject.toml reads this file
+# (see [tool.setuptools.dynamic]). Install with: pip install -e .
+
 # Core
 click>=8.3.3  # SAGE: CVE-2026-7246
 aiohttp>=3.14.0  # SAGE: CVE-2025-69223, CVE-2025-69224, CVE-2025-69225, CVE-2025-69226, CVE-2025-69227, CVE-2025-69228, CVE-2025-69229, CVE-2025-69230, CVE-2026-22815, CVE-2026-34513, CVE-2026-34514, CVE-2026-34515, CVE-2026-34516, CVE-2026-34517, CVE-2026-34518, CVE-2026-34519, CVE-2026-34520, CVE-2026-34525, CVE-2026-34993, CVE-2026-47265
 python-dotenv>=1.2.2  # SAGE: CVE-2026-28684
+aiofiles>=23.2.1
 
 # DNS/WHOIS
 dnspython>=2.8.0  # SAGE: CVE-2025-12084, CVE-2025-12781, CVE-2025-13836, CVE-2025-13837, CVE-2026-3087, CVE-2026-4519, CVE-2026-6019, CVE-2026-7210
@@ -13,128 +17,21 @@ phonenumbers>=8.13.0
 # Output formatting
 rich>=13.7.0
 
-# Optional: Enhanced features
-# requests[socks]  # For Tor support
-# PySocks>=1.7.1
-# stem>=1.8.2      # Tor control
+# Image EXIF/GPS extraction (image_module falls back to this without exiftool)
+Pillow>=11.0.0
 
-# External tools (install separately):
-# pip install maigret sherlock-project holehe
+# OSINT tools — invoked as subprocesses via shutil.which(), so they must land on
+# PATH inside the venv. username_module needs maigret/sherlock, email_module holehe.
+maigret>=0.6.4
+sherlock-project>=0.16.0
+holehe>=1.61
 
+# Favicon hashing for the Shodan de-anon pivot (darkweb_module). mmh3 is the
+# canonical implementation of Shodan's http.favicon.hash — used for exactness.
+mmh3>=4.0.0
 
-# SAGE PATCH for N/A:
-
-
-# SAGE PATCH for N/A:
-
-
-# SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
-
-# SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
-
-# SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
-
-# SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
-
-# SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
-
-# SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
-
-# SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
-
-# SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
-
-# SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
-
-// SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
-
-// SAGE PATCH for N/A:
-# Core
-click>=8.3.3  # SAGE: CVE-2026-7246
-aiohttp>=3.14.0  # SAGE: CVE-2025-69223, CVE-2025-69224, CVE-2025-69225, CVE-2025-69226, CVE-2025-69227, CVE-2025-69228, CVE-2025-69229, CVE-2025-69230, CVE-2026-22815, CVE-2026-34513, CVE-2026-34514, CVE-2026-34515, CVE-2026-34516, CVE-2026-34517, CVE-2026-34518, CVE-2026-34519, CVE-2026-34520, CVE-2026-34525, CVE-2026-34993, CVE-2026-47265
-python-dotenv>=1.2.2  # SAGE: CVE-2026-28684
-
-# DNS/WHOIS
-dnspython>=2.8.0  # SAGE: CVE-2025-12084, CVE-2025-12781, CVE-2025-13836, CVE-2025-13837, CVE-2026-3087, CVE-2026-4519, CVE-2026-6019, CVE-2026-7210
-python-whois>=0.9.0
-
-# Phone parsing (replaces unmaintained PhoneInfoga)
-phonenumbers>=8.13.0
-
-# Output formatting
-rich>=13.7.0
-
-# Optional: Enhanced features
-# requests[socks]  # For Tor support
-# PySocks>=1.7.1
-# stem>=1.8.2      # Tor control
-
-# External tools (install separately):
-# pip install maigret sherlock-project holehe
-
-
-# SAGE PATCH for N/A:
-
-
-# SAGE PATCH for N/A:
-
-
-# SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
-
-# SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
-
-# SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
-
-# SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
-
-# SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
-
-# SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
-
-# SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
-
-# SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
-
-# SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
-
-// SAGE PATCH for N/A:
-aiohttp>=3.14.0
-
+# Tor / SOCKS support
+requests>=2.32.4
+PySocks>=1.7.1
+stem>=1.8.2
+aiohttp_socks>=0.10.0  # SOCKS5 connector for aiohttp — routes .onion via Tor

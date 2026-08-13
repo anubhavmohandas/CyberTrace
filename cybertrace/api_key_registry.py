@@ -6,7 +6,7 @@ still run. Keys unlock rate-limited or paywalled APIs.
 
 To configure: copy .env.example -> .env and fill in what you have.
 Check status at runtime:
-    from cybertrace.api_keys import API_KEYS
+    from cybertrace.api_key_registry import API_KEYS
     API_KEYS.print_status()
 """
 

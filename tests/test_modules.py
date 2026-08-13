@@ -128,6 +128,47 @@ class TestDarkwebModule:
         assert 'darkweb' in module.supported_types
 
 
+class TestDarkwebOperatorIntel:
+    """De-anonymisation signal extraction from a live onion page (pure logic)."""
+
+    def test_public_ipv4_drops_private_and_reserved(self):
+        ips = ['192.168.1.1', '10.0.0.5', '127.0.0.1', '8.8.8.8', '203.0.113.9', 'not-an-ip']
+        # 203.0.113.0/24 is TEST-NET-3 (reserved) — must be dropped too.
+        assert DarkwebModule._public_ipv4(ips) == ['8.8.8.8']
+
+    def test_artifact_regexes_extract_operator_pii(self):
+        html = (
+            "contact admin@example.com pay bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq "
+            "eth 0x742d35Cc6634C0532925a3b844Bc9e7595f12345 ga UA-1234567-8 "
+            "leak 8.8.8.8"
+        )
+        assert 'admin@example.com' in DarkwebModule._RE_EMAIL.findall(html)
+        assert 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq' in DarkwebModule._RE_BTC.findall(html)
+        assert '0x742d35Cc6634C0532925a3b844Bc9e7595f12345' in DarkwebModule._RE_ETH.findall(html)
+        assert 'UA-1234567-8' in DarkwebModule._RE_ANALYTICS.findall(html)
+        assert DarkwebModule._public_ipv4(DarkwebModule._RE_IPV4.findall(html)) == ['8.8.8.8']
+
+    def test_pivot_targets_caps_and_labels(self):
+        data = {
+            'emails': ['a@x.com', 'b@x.com', 'c@x.com', 'd@x.com'],
+            'bitcoin_addresses': ['1abc'],
+            'ethereum_addresses': ['0xdef'],
+        }
+        jobs = DarkwebModule._pivot_targets(data, cap=3)
+        assert ('email', 'a@x.com') in jobs
+        assert ('email', 'd@x.com') not in jobs  # capped at 3 per kind
+        assert ('bitcoin', '1abc') in jobs and ('bitcoin', '0xdef') in jobs
+
+    def test_pivot_targets_empty_when_no_artifacts(self):
+        assert DarkwebModule._pivot_targets({}) == []
+
+    def test_favicon_hash_matches_shodan_scheme(self):
+        import base64, mmh3
+        # Shodan's http.favicon.hash = mmh3.hash(base64.encodebytes(icon_bytes)).
+        icon = b'\x00\x01\x02\x03fake-icon'
+        assert mmh3.hash(base64.encodebytes(icon)) == mmh3.hash(base64.encodebytes(icon))
+
+
 class TestIndianModule:
     """Test Indian module."""
 
@@ -188,3 +229,30 @@ class TestDataClasses:
         result.sources['s3'] = SourceResult(source='s3', success=True)
         assert result.success_count == 2
         assert result.total_count == 3
+
+
+class TestMaigretReportParsing:
+    """maigret's 'simple' report nests status inside a dict, not a bare string."""
+
+    def test_nested_status_dict(self):
+        data = {
+            'GitHub': {
+                'status': {'status': 'Claimed', 'site_name': 'GitHub'},
+                'url_user': 'https://github.com/torvalds',
+            },
+            'Nowhere': {'status': {'status': 'Available'}, 'url_user': None},
+        }
+        found = UsernameModule._parse_maigret_report(data)
+        assert found == [{
+            'site': 'GitHub',
+            'url': 'https://github.com/torvalds',
+            'status': 'Claimed',
+        }]
+
+    def test_plain_string_status_still_works(self):
+        data = {'X': {'status': 'Claimed', 'url_user': 'https://x.com/a'}}
+        assert len(UsernameModule._parse_maigret_report(data)) == 1
+
+    def test_ignores_malformed_entries(self):
+        data = {'a': 'not-a-dict', 'b': {'status': None}, 'c': {}}
+        assert UsernameModule._parse_maigret_report(data) == []

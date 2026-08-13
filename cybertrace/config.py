@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
 
-from cybertrace.api_keys import APIKeys, API_KEYS  # noqa: F401
+from cybertrace.api_key_registry import APIKeys, API_KEYS  # noqa: F401
 
 # Load .env from project root
 load_dotenv()
@@ -56,6 +56,9 @@ class Config:
     # Settings
     cache_ttl_hours: int = 24
     request_timeout: int = 30
+    # Budget for external CLI tools (maigret/sherlock/holehe). Maigret sweeps
+    # 3000+ sites; under ~120s it returns only a fraction of them.
+    tool_timeout: int = 300
     max_concurrent: int = 10
     user_agent: str = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     
@@ -72,6 +75,7 @@ class Config:
             tor=TorConfig.from_env(),
             cache_ttl_hours=int(os.getenv('CACHE_TTL_HOURS', '24')),
             request_timeout=int(os.getenv('REQUEST_TIMEOUT', '30')),
+            tool_timeout=int(os.getenv('TOOL_TIMEOUT', '300')),
             max_concurrent=int(os.getenv('MAX_CONCURRENT', '10')),
         )
     

@@ -73,9 +73,15 @@ class TestDetectInputType:
         assert module == "phone"
 
     def test_ipv4_detection(self):
+        # IPs route to the dedicated ip module (geo/ASN/abuse/Shodan), not domain.
         specific, module = detect_input_type("192.168.1.1")
         assert specific == "ipv4"
-        assert module == "domain"
+        assert module == "ip"
+
+    def test_ipv6_detection(self):
+        specific, module = detect_input_type("2001:4860:4860::8888")
+        assert specific == "ipv6"
+        assert module == "ip"
 
     def test_url_detection(self):
         specific, module = detect_input_type("https://example.com/path")

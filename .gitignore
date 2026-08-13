@@ -60,6 +60,8 @@ Thumbs.db
 data/
 *.db
 *.sqlite
+# Any file actually holding keys. The tracked cybertrace/api_key_registry.py is
+# only a loader — it reads os.getenv and stores nothing.
 api_keys.py
 
 # OSINT output files — never commit investigation results

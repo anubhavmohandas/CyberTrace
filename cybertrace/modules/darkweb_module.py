@@ -1,12 +1,18 @@
 """Dark web OSINT module."""
 
 import asyncio
+import base64
+import ipaddress
+import logging
 import re
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote_plus, unquote
 
 from .base import BaseModule, ModuleResult, SourceResult
+
+logger = logging.getLogger(__name__)
 
 
 class DarkwebModule(BaseModule):
@@ -60,14 +66,23 @@ class DarkwebModule(BaseModule):
 
         result = ModuleResult(
             target=target,
-            target_type=options.get('target_type', 'unknown'),
+            # Hardcoded like domain_module does with 'domain' — CLI never
+            # threads a target_type option through to modules, so relying on
+            # options.get() here always fell back to 'unknown' regardless of
+            # what the detector actually identified.
+            target_type='darkweb',
             module=self.name,
         )
 
+        # Phase 0: If the target IS an onion address, visit it directly over Tor.
+        # fetch() auto-routes .onion through Tor (needs a running Tor proxy).
+        onion_host = target.replace('http://', '').replace('https://', '').split('/')[0].lower()
+        sources = []
+        if onion_host.endswith('.onion'):
+            sources.append(('target_onion', self._fetch_target_onion(onion_host)))
+
         # Phase 1: Fetch current onion directories (for reference)
-        sources = [
-            ('onion_directories', self._fetch_onion_directories()),
-        ]
+        sources.append(('onion_directories', self._fetch_onion_directories()))
 
         # Phase 2: Search dark web indexes
         sources.extend([
@@ -105,11 +120,279 @@ class DarkwebModule(BaseModule):
             onion_result = await self._search_onion_lookup(list(discovered_onions))
             result.sources['onion_lookup'] = onion_result
 
+        # Phase 7: Auto-pivot operator artifacts (emails, crypto) found on the
+        # live onion into their own modules for a one-command operator profile.
+        live = result.sources.get('target_onion')
+        if live and live.success:
+            pivot = await self._pivot_operator_artifacts(live.data)
+            if pivot:
+                result.sources['operator_pivot'] = pivot
+
         # Build summary
         result.summary = self._build_summary(result)
         result.end_time = datetime.utcnow()
 
         return result
+
+    # --- Operator de-anonymisation: artifacts a live onion site leaks ---
+    _RE_URL = re.compile(r'https?://([a-zA-Z0-9._~-]+(?::\d+)?)')
+    _RE_EMAIL = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+    _RE_IPV4 = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b')
+    _RE_BTC = re.compile(r'\b(?:bc1[a-z0-9]{25,62}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b')
+    _RE_ETH = re.compile(r'\b0x[a-fA-F0-9]{40}\b')
+    _RE_XMR = re.compile(r'\b4[0-9AB][1-9A-HJ-NP-Za-km-z]{93}\b')
+    _RE_ANALYTICS = re.compile(r'\b(?:UA-\d{4,}-\d+|G-[A-Z0-9]{6,}|GTM-[A-Z0-9]{4,})\b')
+    _RE_ONION = re.compile(r'[a-z2-7]{56}\.onion', re.IGNORECASE)
+    _RE_TITLE = re.compile(r'<title[^>]*>([^<]+)</title>', re.IGNORECASE)
+    # Endpoints that commonly leak the real backend IP when misconfigured.
+    _MISCONFIG_PATHS = (
+        '/server-status', '/server-info', '/.git/config', '/.env',
+        '/phpinfo.php', '/info.php', '/status', '/robots.txt',
+    )
+
+    @staticmethod
+    def _public_ipv4(candidates) -> List[str]:
+        """Keep only routable public IPv4s — drop private/loopback/reserved."""
+        out = []
+        for ip in candidates:
+            try:
+                addr = ipaddress.ip_address(ip)
+            except ValueError:
+                continue
+            if addr.version == 4 and not (
+                addr.is_private or addr.is_loopback or addr.is_reserved
+                or addr.is_multicast or addr.is_link_local or addr.is_unspecified
+            ):
+                out.append(str(addr))
+        return sorted(set(out))
+
+    async def _fetch_full(self, url: str) -> Tuple[Optional[int], Dict[str, str], str]:
+        """Fetch url (.onion auto-routes through Tor) returning status, headers,
+        text. Unlike fetch(), this preserves response headers — needed for the
+        server fingerprint and clock-skew signals. Returns (None, {}, '') on error."""
+        try:
+            session = await self._session_for(url)
+            async with session.request('GET', url, allow_redirects=False) as resp:
+                text = await resp.text(errors='ignore')
+                return resp.status, dict(resp.headers), text
+        except Exception as e:  # unreachable / Tor down / timeout
+            logger.debug("onion fetch failed [%s]: %s", url, e)
+            return None, {}, ''
+
+    async def _fetch_bytes(self, url: str) -> Optional[bytes]:
+        """Fetch raw bytes (used for favicon hashing). None on non-200/error."""
+        try:
+            session = await self._session_for(url)
+            async with session.request('GET', url, allow_redirects=False) as resp:
+                return await resp.read() if resp.status == 200 else None
+        except Exception:
+            return None
+
+    async def _fetch_target_onion(self, onion_host: str) -> SourceResult:
+        """
+        Visit the target .onion directly over Tor and mine it for operator
+        de-anonymisation signals — the core of the problem statement.
+
+        fetch auto-routes .onion through Tor (BaseModule._session_for), so a
+        running Tor proxy (SOCKS 127.0.0.1:9050) is required. Extracts:
+          - server/framework fingerprint (Server, X-Powered-By, cookies, ETag…)
+          - clock skew: the onion's Date header vs our UTC (correlation signal)
+          - clearnet hosts referenced in the page (leaked operator infra)
+          - operator PII/financial/tracking: emails, BTC/ETH/XMR, GA/GTM IDs, PGP
+          - leaked public IPv4 in headers or body (a real-host slip)
+          - common server misconfigs (/server-status, /.git/config …) that leak IPs
+          - favicon -> Shodan pivot: candidate CLEARNET IPs serving the same icon
+
+        Candidate operator IPs (leaked + favicon pivot) are surfaced so the
+        analyst can pivot into the ip/domain modules.
+        """
+        base = f"http://{onion_host}"
+        status, headers, html = await self._fetch_full(f"{base}/")
+
+        if status is None:
+            return SourceResult(
+                source='target_onion',
+                success=False,
+                error=(
+                    'Onion unreachable — site is down, or Tor is not running. '
+                    f'Start Tor (SOCKS on {self.config.tor.socks_host}:'
+                    f'{self.config.tor.socks_port}) and retry.'
+                ),
+            )
+
+        title_m = self._RE_TITLE.search(html)
+        title = title_m.group(1).strip()[:200] if title_m else ''
+
+        # Server / framework fingerprint from response headers.
+        fingerprint = {
+            k: headers[k] for k in (
+                'Server', 'X-Powered-By', 'Via', 'X-Runtime', 'X-Generator',
+                'X-AspNet-Version', 'ETag', 'Last-Modified',
+            ) if headers.get(k)
+        }
+        cookie_names = re.findall(r'(\w+)=', headers.get('Set-Cookie', ''))
+        if cookie_names:
+            fingerprint['cookie_names'] = list(dict.fromkeys(cookie_names))
+
+        # Clock skew: onion server's clock vs ours. A stable non-zero skew is a
+        # correlation signal against clearnet hosts with the same drift.
+        clock_skew = None
+        if headers.get('Date'):
+            try:
+                server_dt = parsedate_to_datetime(headers['Date'])
+                clock_skew = round(
+                    (datetime.now(server_dt.tzinfo) - server_dt).total_seconds(), 1
+                )
+            except Exception:
+                pass
+
+        # Clearnet hosts referenced on the page (leaked operator infrastructure).
+        clearnet_hosts = sorted({
+            h.split(':')[0].lower() for h in self._RE_URL.findall(html)
+            if not h.lower().endswith('.onion')
+        })
+
+        # Operator artifacts. Drop BTC matches that are actually a slice of an
+        # onion address (base32 overlaps base58) to avoid false positives.
+        onion_tokens = ''.join(self._RE_ONION.findall(html))
+        btc = sorted({
+            a for a in self._RE_BTC.findall(html) if a not in onion_tokens
+        })
+        emails = sorted(set(self._RE_EMAIL.findall(html)))
+        eth = sorted(set(self._RE_ETH.findall(html)))
+        xmr = sorted(set(self._RE_XMR.findall(html)))
+        analytics = sorted(set(self._RE_ANALYTICS.findall(html)))
+
+        # Leaked public IPv4 in headers or body — a direct real-host slip.
+        header_blob = ' '.join(str(v) for v in headers.values())
+        leaked_ips = self._public_ipv4(
+            self._RE_IPV4.findall(header_blob) + self._RE_IPV4.findall(html)
+        )
+
+        # Misconfig probes + favicon/Shodan pivot (each best-effort).
+        misconfigs = await self._probe_misconfigs(base)
+        favicon = await self._favicon_pivot(base, html)
+
+        candidate_ips = sorted(
+            set(leaked_ips)
+            | {m['ip'] for m in favicon.get('shodan_matches', []) if m.get('ip')}
+            | {ip for mc in misconfigs for ip in mc.get('leaked_ips', [])}
+        )
+
+        onion_links = [
+            a.lower() for a in dict.fromkeys(self._RE_ONION.findall(html))
+            if a.lower() != onion_host
+        ]
+
+        return SourceResult(
+            source='target_onion',
+            success=True,
+            data={
+                'online': True,
+                'url': f"{base}/",
+                'http_status': status,
+                'title': title,
+                'page_bytes': len(html),
+                'server_fingerprint': fingerprint,
+                'clock_skew_seconds': clock_skew,
+                'clearnet_hosts_referenced': clearnet_hosts[:40],
+                'emails': emails[:20],
+                'bitcoin_addresses': btc[:20],
+                'ethereum_addresses': eth[:20],
+                'monero_addresses': xmr[:20],
+                'analytics_ids': analytics[:20],
+                'pgp_key_present': 'BEGIN PGP' in html,
+                'leaked_public_ipv4': leaked_ips,
+                'misconfigurations': misconfigs,
+                'favicon': favicon,
+                'candidate_operator_ips': candidate_ips,
+                'onion_links_found': len(onion_links),
+                'onion_addresses_found': onion_links[:10],
+            },
+        )
+
+    async def _probe_misconfigs(self, base: str) -> List[Dict[str, Any]]:
+        """Probe common info-leak endpoints; report any that return 200 and the
+        public IPs found in their bodies. Runs concurrently over Tor."""
+        async def probe(path: str) -> Optional[Dict[str, Any]]:
+            status, _headers, body = await self._fetch_full(f"{base}{path}")
+            if status == 200 and body:
+                return {
+                    'path': path,
+                    'status': status,
+                    'bytes': len(body),
+                    'leaked_ips': self._public_ipv4(self._RE_IPV4.findall(body)),
+                }
+            return None
+
+        results = await asyncio.gather(*(probe(p) for p in self._MISCONFIG_PATHS))
+        return [r for r in results if r]
+
+    async def _favicon_pivot(self, base: str, html: str) -> Dict[str, Any]:
+        """
+        Hash the site's favicon (Shodan's mmh3-of-base64 scheme) and search
+        Shodan for clearnet hosts serving the same icon. A match is a strong
+        candidate for the operator's real (de-anonymised) server.
+
+        Classic hidden-service de-anon: operators reuse the same favicon on a
+        misconfigured clearnet box that Shodan has already indexed.
+        """
+        m = re.search(
+            r'<link[^>]+rel=["\'][^"\']*icon[^"\']*["\'][^>]*href=["\']([^"\']+)["\']',
+            html, re.IGNORECASE,
+        )
+        href = m.group(1) if m else '/favicon.ico'
+        if href.startswith('http') and '.onion' not in href.lower():
+            return {'note': 'favicon served from external host; pivot skipped', 'declared': href}
+        if href.startswith('http'):
+            fav_url = href
+        elif href.startswith('//'):
+            fav_url = 'http:' + href
+        else:
+            fav_url = base + (href if href.startswith('/') else '/' + href)
+
+        fav = await self._fetch_bytes(fav_url)
+        if not fav:
+            return {'favicon_url': fav_url, 'note': 'no favicon retrieved'}
+
+        try:
+            import mmh3  # Shodan's exact hash; correct-on-edge-cases beats reimplementing
+        except ImportError:
+            return {'favicon_url': fav_url, 'note': 'mmh3 not installed (pip install mmh3)'}
+
+        fav_hash = mmh3.hash(base64.encodebytes(fav))
+        out = {
+            'favicon_url': fav_url,
+            'favicon_mmh3': fav_hash,
+            'shodan_query': f'http.favicon.hash:{fav_hash}',
+        }
+
+        key = self.config.api_keys.get('shodan')
+        if not key:
+            out['note'] = 'no Shodan key — run the shodan_query manually at shodan.io'
+            return out
+
+        sd = await self.fetch_json(
+            f"https://api.shodan.io/shodan/host/search?key={key}"
+            f"&query=http.favicon.hash:{fav_hash}"
+        )
+        if not sd:
+            out['note'] = 'Shodan returned nothing (or plan lacks the search API)'
+            return out
+
+        out['shodan_total'] = sd.get('total', 0)
+        out['shodan_matches'] = [
+            {
+                'ip': h.get('ip_str'),
+                'port': h.get('port'),
+                'org': h.get('org'),
+                'isp': h.get('isp'),
+                'hostnames': h.get('hostnames', []),
+                'country': (h.get('location') or {}).get('country_name'),
+            }
+            for h in sd.get('matches', [])[:10]
+        ]
+        return out
 
     async def _fetch_onion_directories(self) -> SourceResult:
         """
@@ -165,23 +448,21 @@ class DarkwebModule(BaseModule):
 
         services = {}
 
-        # Pattern to extract service names and onion addresses
-        # dark.fail format: service name followed by .onion link
-        patterns = [
-            # Standard v3 onion (56 chars)
-            r'([A-Za-z0-9\s]+)[\s\S]*?([a-z2-7]{56}\.onion)',
-            # With href
-            r'href="[^"]*([a-z2-7]{56}\.onion)[^"]*"[^>]*>([^<]+)',
-        ]
+        # Only trust anchor tags that link directly to a valid v3 onion
+        # address. The previous version also ran an unanchored proximity
+        # pattern (`([A-Za-z0-9\s]+)[\s\S]*?([a-z2-7]{56}\.onion)`) meant to
+        # catch "service name ... onion address" pairs outside <a> tags.
+        # Because `[\s\S]*?` matches across the whole document lazily, it
+        # regularly grabbed unrelated page text as the "name" — in practice
+        # this was seen capturing '<!DOCTYPE html>' itself as a service name.
+        # Anchor-tag extraction is the only reliable signal here.
+        pattern = r'<a[^>]+href="[^"]*?([a-z2-7]{56}\.onion)[^"]*"[^>]*>([^<]+)</a>'
+        matches = re.findall(pattern, html, re.IGNORECASE)
 
-        for pattern in patterns:
-            matches = re.findall(pattern, html, re.IGNORECASE)
-            for match in matches:
-                if len(match) == 2:
-                    name = match[0].strip() if not match[0].endswith('.onion') else match[1].strip()
-                    onion = match[0] if match[0].endswith('.onion') else match[1]
-                    if len(onion) >= 56:  # Valid v3 onion
-                        services[name[:50]] = onion
+        for onion, name in matches:
+            clean_name = self._clean_scraped_name(name)
+            if clean_name:
+                services[clean_name] = onion
 
         return services
 
@@ -200,11 +481,32 @@ class DarkwebModule(BaseModule):
         matches = re.findall(pattern, html, re.IGNORECASE)
 
         for onion, title in matches:
-            clean_title = title.strip()[:50]
-            if clean_title and len(onion) >= 56:
+            clean_title = self._clean_scraped_name(title)
+            if clean_title:
                 services[clean_title] = onion
 
         return services
+
+    _SCRAPED_NAME_DENYLIST = {
+        'doctype html', 'html', 'head', 'body', 'script', 'style', 'title',
+        'home', 'search', 'about', 'next', 'prev', 'previous', 'menu',
+    }
+
+    def _clean_scraped_name(self, raw: str, max_len: int = 50) -> Optional[str]:
+        """
+        Normalize a name/title scraped from HTML and reject obvious junk.
+
+        Regex-scraped anchor text can pick up markup boilerplate (e.g. a
+        stray '<!DOCTYPE html>' match) or bare navigation labels ('Home',
+        'Search'). This filters those out so callers don't store garbage as
+        a legitimate service/result name.
+        """
+        clean = re.sub(r'\s+', ' ', raw).strip()
+        if len(clean) < 2:
+            return None
+        if clean.lower() in self._SCRAPED_NAME_DENYLIST:
+            return None
+        return clean[:max_len]
 
     async def _search_ahmia(self, query: str) -> SourceResult:
         """
@@ -371,18 +673,29 @@ class DarkwebModule(BaseModule):
             )
 
         results = []
+        seen_onions: set = set()
 
-        # Parse Torch results
-        onion_pattern = r'([a-z2-7]{56}\.onion)'
-        title_pattern = r'<a[^>]*href="[^"]*\.onion[^"]*"[^>]*>([^<]+)</a>'
+        # Pair each onion address with the title from the SAME anchor tag.
+        # The previous version scraped onions and titles with two independent
+        # regex passes, then zipped them positionally by index — since
+        # `onions` came from iterating a `set` (unordered) and `titles` came
+        # from a completely separate pass over the whole page, the title
+        # attached to a given onion had no real relationship to it. Site nav
+        # links ('Clearnet', 'Search - Amnesia') ended up attached to
+        # unrelated onion addresses, including the search mirror's own UI.
+        link_pattern = r'<a[^>]+href="[^"]*?([a-z2-7]{56}\.onion)[^"]*"[^>]*>([^<]{1,120})</a>'
+        matches = re.findall(link_pattern, html, re.IGNORECASE)
 
-        onions = re.findall(onion_pattern, html, re.IGNORECASE)
-        titles = re.findall(title_pattern, html)
-
-        for i, onion in enumerate(set(onions[:20])):
+        for onion, title in matches:
+            clean_title = self._clean_scraped_name(title, max_len=100)
+            if not clean_title:
+                continue
+            if onion in seen_onions:
+                continue
+            seen_onions.add(onion)
             results.append({
                 'onion_url': f"http://{onion}",
-                'title': titles[i] if i < len(titles) else 'Unknown',
+                'title': clean_title,
             })
 
         return SourceResult(
@@ -390,7 +703,12 @@ class DarkwebModule(BaseModule):
             success=len(results) > 0,
             data={
                 'result_count': len(results),
-                'results': results,
+                'results': results[:20],
+                # Previously omitted — meant the phase-6 onion validation
+                # step in search() had to fall back to re-deriving addresses
+                # from results[].onion_url instead of this field, and the
+                # summary's unique_onion_addresses never included torch hits.
+                'onion_addresses_found': list(seen_onions)[:10],
             },
         )
 
@@ -634,6 +952,53 @@ class DarkwebModule(BaseModule):
 
         return None
 
+    @staticmethod
+    def _pivot_targets(data: Dict[str, Any], cap: int = 3) -> List[Tuple[str, str]]:
+        """Pick operator artifacts worth pivoting into other modules, capped per
+        kind to bound external calls. ETH addresses go to the bitcoin module too
+        (it auto-detects the coin)."""
+        emails = (data.get('emails') or [])[:cap]
+        crypto = (
+            (data.get('bitcoin_addresses') or []) + (data.get('ethereum_addresses') or [])
+        )[:cap]
+        return [('email', e) for e in emails] + [('bitcoin', c) for c in crypto]
+
+    async def _pivot_operator_artifacts(self, data: Dict[str, Any]) -> Optional[SourceResult]:
+        """
+        Feed emails / crypto addresses found on the live onion into their own
+        modules and collect a compact profile — the one-command operator sweep.
+
+        Only runs when artifacts exist, so a clean/hardened target adds no cost.
+        """
+        jobs = self._pivot_targets(data)
+        if not jobs:
+            return None
+
+        from . import get_module  # lazy: avoids modules/__init__ import cycle
+
+        async def run(kind: str, target: str) -> Dict[str, Any]:
+            module = get_module(kind)
+            if module is None:
+                return {'target': target, 'type': kind, 'error': 'no module'}
+            try:
+                async with module as m:
+                    r = await m.search(target)
+                return {
+                    'target': target,
+                    'type': r.target_type,
+                    'sources_ok': f"{r.success_count}/{r.total_count}",
+                    'summary': r.summary,
+                }
+            except Exception as e:
+                return {'target': target, 'type': kind, 'error': str(e)}
+
+        results = await asyncio.gather(*(run(k, t) for k, t in jobs))
+        return SourceResult(
+            source='operator_pivot',
+            success=True,
+            data={'pivoted': len(results), 'results': results},
+        )
+
     def _build_summary(self, result: ModuleResult) -> Dict[str, Any]:
         """Build summary from all source results."""
         total_mentions = 0
@@ -707,5 +1072,33 @@ class DarkwebModule(BaseModule):
 
         if onion_validation:
             summary['onion_validation'] = onion_validation
+
+        # Operator de-anonymisation intel from the live onion visit — the headline
+        # result for this tool. Surfaced up top so candidate IPs aren't buried.
+        live = result.sources.get('target_onion')
+        if live and live.success:
+            d = live.data
+            summary['operator_intel'] = {
+                'live_url': d.get('url'),
+                'title': d.get('title'),
+                'candidate_operator_ips': d.get('candidate_operator_ips'),
+                'server_fingerprint': d.get('server_fingerprint'),
+                'clock_skew_seconds': d.get('clock_skew_seconds'),
+                'clearnet_hosts_referenced': d.get('clearnet_hosts_referenced'),
+                'emails': d.get('emails'),
+                'crypto': {
+                    'bitcoin': d.get('bitcoin_addresses'),
+                    'ethereum': d.get('ethereum_addresses'),
+                    'monero': d.get('monero_addresses'),
+                },
+                'analytics_ids': d.get('analytics_ids'),
+                'pgp_key_present': d.get('pgp_key_present'),
+                'favicon_shodan': d.get('favicon', {}).get('shodan_matches'),
+                'misconfigurations': d.get('misconfigurations'),
+            }
+
+        pivot = result.sources.get('operator_pivot')
+        if pivot and pivot.success:
+            summary['operator_pivots'] = pivot.data.get('results')
 
         return summary

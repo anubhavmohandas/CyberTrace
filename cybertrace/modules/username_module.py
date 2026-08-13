@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import shutil
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -79,8 +78,8 @@ class UsernameModule(BaseModule):
         return result
     
     def _tool_available(self, tool: str) -> bool:
-        """Check if a tool is available in PATH."""
-        return shutil.which(tool) is not None
+        """Check if a bundled tool is installed (PATH or alongside the venv python)."""
+        return self.which(tool) is not None
     
     async def _check_key_platforms(self, username: str) -> SourceResult:
         """Quick check of key platforms via HTTP."""
@@ -207,44 +206,63 @@ class UsernameModule(BaseModule):
             },
         )
     
+    @staticmethod
+    def _parse_maigret_report(data: dict) -> List[Dict[str, Any]]:
+        """
+        Extract claimed accounts from a maigret 'simple' JSON report.
+
+        Each value carries a nested 'status' dict ({'status': 'Claimed', ...}),
+        not a bare string — comparing info['status'] to 'Claimed' directly never
+        matches. Older/other report types use a plain string, so accept both.
+        """
+        found = []
+        for site, info in data.items():
+            if not isinstance(info, dict):
+                continue
+            raw = info.get('status')
+            status = raw.get('status') if isinstance(raw, dict) else raw
+            if status == 'Claimed':
+                found.append({
+                    'site': site,
+                    'url': info.get('url_user'),
+                    'status': status,
+                })
+        return found
+
     async def _run_maigret(self, username: str) -> SourceResult:
         """Run Maigret tool (3000+ sites)."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            output_file = Path(tmpdir) / 'results.json'
-            
-            # Run maigret
+            # -o/--folderoutput is a DIRECTORY, not a file: maigret picks the
+            # filename itself (report_<username>_simple.json), so glob for it.
             cmd = [
-                'maigret', username,
+                self.which('maigret'), username,
                 '--json', 'simple',
-                '-o', str(output_file),
+                '-fo', tmpdir,
                 '--timeout', '10',
                 '--no-color',
+                '--no-progressbar',
             ]
-            
+
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-                
-                if output_file.exists():
-                    with open(output_file) as f:
-                        data = json.load(f)
-                    
-                    # Parse maigret output
-                    found = []
-                    for site, info in data.items():
-                        if isinstance(info, dict) and info.get('status'):
-                            # Status can be 'Claimed', 'Available', etc.
-                            if info.get('status') == 'Claimed':
-                                found.append({
-                                    'site': site,
-                                    'url': info.get('url_user'),
-                                    'status': info.get('status'),
-                                })
-                    
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.tool_timeout)
+
+                reports = sorted(Path(tmpdir).glob('*.json'))
+                if reports:
+                    # maigret recursively searches IDs it extracts along the way
+                    # (a steam_id discovered from the username, say) and writes
+                    # one report per search. Merge them all: they're findings on
+                    # the same target, and reading only the first drops the bulk
+                    # of the results — filenames sort by ID, not by relevance.
+                    data = {}
+                    for report in reports:
+                        data.update(json.loads(report.read_text()))
+                    found = self._parse_maigret_report(data)
+
                     return SourceResult(
                         source='maigret',
                         success=True,
@@ -258,14 +276,14 @@ class UsernameModule(BaseModule):
                     return SourceResult(
                         source='maigret',
                         success=False,
-                        error='No output file generated',
+                        error=f'No report written. maigret stderr: {stderr.decode()[-300:].strip()}',
                     )
-                    
+
             except asyncio.TimeoutError:
                 return SourceResult(
                     source='maigret',
                     success=False,
-                    error='Maigret timed out after 120s',
+                    error=f'Maigret timed out after {self.config.tool_timeout}s',
                 )
             except Exception as e:
                 return SourceResult(
@@ -280,7 +298,7 @@ class UsernameModule(BaseModule):
             output_file = Path(tmpdir) / f'{username}.txt'
             
             cmd = [
-                'sherlock', username,
+                self.which('sherlock'), username,
                 '--output', str(output_file),
                 '--timeout', '10',
                 '--print-found',
@@ -293,7 +311,7 @@ class UsernameModule(BaseModule):
                     stderr=asyncio.subprocess.PIPE,
                     cwd=tmpdir,
                 )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.tool_timeout)
                 
                 # Parse stdout for found sites
                 found = []
@@ -324,7 +342,7 @@ class UsernameModule(BaseModule):
                 return SourceResult(
                     source='sherlock',
                     success=False,
-                    error='Sherlock timed out after 120s',
+                    error=f'Sherlock timed out after {self.config.tool_timeout}s',
                 )
             except Exception as e:
                 return SourceResult(

@@ -11,6 +11,40 @@ from .detector import detect_input_type, normalize_input
 from .modules import get_module, list_modules, TYPE_TO_MODULE
 from .output import print_result, save_result
 
+LOGO = r"""
+   ██████╗██╗   ██╗██████╗ ███████╗██████╗ ████████╗██████╗  █████╗  ██████╗███████╗
+  ██╔════╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝
+  ██║      ╚████╔╝ ██████╔╝█████╗  ██████╔╝   ██║   ██████╔╝███████║██║     █████╗
+  ██║       ╚██╔╝  ██╔══██╗██╔══╝  ██╔══██╗   ██║   ██╔══██╗██╔══██║██║     ██╔══╝
+  ╚██████╗   ██║   ██████╔╝███████╗██║  ██║   ██║   ██║  ██║██║  ██║╚██████╗███████╗
+   ╚═════╝   ╚═╝   ╚═════╝ ╚══════╝╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝"""
+
+
+def show_banner() -> None:
+    """
+    Clear the screen and print the banner, giving each run a clean workspace.
+
+    Interactive terminals only. When stdout is redirected — piping JSON into a
+    file or through jq — the screen is left alone and nothing is drawn, and the
+    banner is written to stderr regardless so it can never contaminate captured
+    results.
+    """
+    if not sys.stdout.isatty():
+        return
+    # -q/--quiet is defined on the subcommand, so Click hasn't parsed it yet at
+    # group level; read argv directly rather than plumbing state through.
+    if {'-q', '--quiet'}.intersection(sys.argv):
+        return
+
+    click.clear()
+    click.echo(click.style(LOGO, fg='cyan', bold=True), err=True)
+    click.echo(click.style(
+        "  🔎 Multi-Layer OSINT Investigation Tool  ·  Surface · Deep · Dark",
+        dim=True), err=True)
+    click.echo(click.style(
+        "\n  ────────────────⟡  A N U B H A V   M O H A N D A S  ⟡────────────────\n",
+        fg=214, bold=True), err=True)
+
 
 @click.group()
 @click.version_option(version='1.0.0', prog_name='CyberTrace')
@@ -30,7 +64,7 @@ def cli():
         
         cybertrace search "example.com" --save report.json
     """
-    pass
+    show_banner()
 
 
 @cli.command()
@@ -58,7 +92,7 @@ def search(target: str, input_type: str, output_format: str, save_path: Optional
     if input_type == 'auto':
         specific_type, module_type = detect_input_type(target)
         if not quiet:
-            click.echo(f"[*] Detected type: {specific_type} → module: {module_type}")
+            click.echo(f"[*] Detected type: {specific_type} → module: {module_type}", err=True)
     else:
         module_type = input_type
         specific_type = input_type
@@ -66,7 +100,7 @@ def search(target: str, input_type: str, output_format: str, save_path: Optional
     # Normalize input
     normalized = normalize_input(target, module_type)
     if normalized != target and not quiet:
-        click.echo(f"[*] Normalized: {target} → {normalized}")
+        click.echo(f"[*] Normalized: {target} → {normalized}", err=True)
     
     # Get module
     module = get_module(module_type)
@@ -76,14 +110,14 @@ def search(target: str, input_type: str, output_format: str, save_path: Optional
         sys.exit(1)
     
     if not quiet:
-        click.echo(f"[*] Using module: {module.name}")
-        click.echo(f"[*] Searching...")
+        click.echo(f"[*] Using module: {module.name}", err=True)
+        click.echo(f"[*] Searching...", err=True)
     
     # Run search
     try:
         result = asyncio.run(_run_search(module, normalized, deep=deep, tor=tor, timeout=timeout))
     except KeyboardInterrupt:
-        click.echo("\n[!] Search interrupted")
+        click.echo("\n[!] Search interrupted", err=True)
         sys.exit(1)
     except Exception as e:
         click.echo(f"[!] Error during search: {e}", err=True)
@@ -95,7 +129,7 @@ def search(target: str, input_type: str, output_format: str, save_path: Optional
     # Save if requested
     if save_path:
         save_result(result, save_path, format='json')
-        click.echo(f"\n[+] Results saved to: {save_path}")
+        click.echo(f"\n[+] Results saved to: {save_path}", err=True)
 
 
 async def _run_search(module, target: str, **options):
