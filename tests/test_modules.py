@@ -128,6 +128,25 @@ class TestDarkwebModule:
         assert module.name == 'darkweb'
         assert 'darkweb' in module.supported_types
 
+    def test_tor_socks_up_detects_listener(self):
+        """Tor-down vs onion-down must not collapse into one error."""
+        import asyncio
+        import socket
+
+        module = DarkwebModule()
+
+        async def probe(port):
+            module.config.tor.socks_port = port
+            return await module._tor_socks_up()
+
+        with socket.socket() as sock:
+            sock.bind(('127.0.0.1', 0))
+            sock.listen(1)
+            module.config.tor.socks_host = '127.0.0.1'
+            assert asyncio.run(probe(sock.getsockname()[1])) is True
+            closed_port = sock.getsockname()[1]
+        assert asyncio.run(probe(closed_port)) is False
+
 
 class TestDarkwebOperatorIntel:
     """De-anonymisation signal extraction from a live onion page (pure logic)."""

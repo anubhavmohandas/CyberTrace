@@ -23,7 +23,8 @@ PATTERNS = {
     'ethereum': re.compile(r'^0x[a-fA-F0-9]{40}$'),
     
     # Domains & URLs
-    'onion': re.compile(r'^[a-z2-7]{16,56}\.onion$'),
+    # Onion — bare host, or the full URL users actually paste (scheme/port/path)
+    'onion': re.compile(r'^(?:https?://)?[a-z2-7]{16,56}\.onion(?::\d+)?(?:/.*)?$', re.IGNORECASE),
     'domain': re.compile(r'^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'),
     'url': re.compile(r'^https?://[^\s]+$'),
     
@@ -120,6 +121,12 @@ def normalize_input(input_str: str, input_type: str) -> str:
             return '+' + digits
         return digits
     
+    if input_type == 'darkweb':
+        # Bare onion host — drop scheme, port and path so evidence artifacts
+        # from a pasted URL match those from a bare address.
+        host = re.sub(r'^https?://', '', cleaned, flags=re.IGNORECASE).split('/')[0]
+        return host.split(':')[0].lower()
+
     if input_type == 'domain':
         # Remove protocol if present
         cleaned = re.sub(r'^https?://', '', cleaned)
@@ -134,6 +141,12 @@ def normalize_input(input_str: str, input_type: str) -> str:
 
 
 if __name__ == '__main__':
+    v3 = 'a' * 56 + '.onion'
+    for form in (v3, f'http://{v3}', f'https://{v3}/market/vendor', f'HTTP://{v3.upper()}:8080'):
+        assert detect_input_type(form) == ('onion', 'darkweb'), form
+        assert normalize_input(form, 'darkweb') == v3, form
+    assert detect_input_type('https://example.com/path') == ('url', 'domain')
+
     # Quick test
     tests = [
         'test@example.com',

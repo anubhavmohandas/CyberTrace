@@ -307,8 +307,23 @@ def norm_username(value: str) -> Optional[str]:
     return value if re.fullmatch(r"[A-Za-z0-9._-]{3,64}", value) else None
 
 
+def norm_asn(value: str) -> Optional[str]:
+    """`AS15169`, `15169` and `AS15169 Google LLC` are one network, and the
+    enrichment sources disagree on which form they hand back — collapse them so a
+    provider doesn't become three nodes that never converge.
+
+    Anchored on purpose: a bare digit anywhere in a company name ('Level 3
+    Parent, LLC') is not an AS number.
+    """
+    value = (value or "").strip()
+    m = re.fullmatch(r"(?:AS)?(\d{1,10})", value, re.I) or \
+        re.match(r"AS(\d{1,10})\b", value, re.I)
+    return f"AS{int(m.group(1))}" if m else None
+
+
 NORMALIZERS = {
     "PGP_KEY": norm_pgp,
+    "ASN": norm_asn,
     "BTC_ADDRESS": norm_btc,
     "XMR_ADDRESS": norm_xmr,
     "ETH_ADDRESS": norm_eth,

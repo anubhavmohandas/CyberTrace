@@ -294,6 +294,21 @@ class DarkwebModule(BaseModule):
         except Exception:
             return None
 
+    async def _tor_socks_up(self) -> bool:
+        """True if something is listening on the configured Tor SOCKS port.
+        Separates 'Tor is down' from 'the onion is down' — opposite conclusions
+        for the analyst, and the fetch error alone can't tell them apart."""
+        try:
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection(self.config.tor.socks_host,
+                                        self.config.tor.socks_port),
+                timeout=3,
+            )
+            writer.close()
+            return True
+        except Exception:
+            return False
+
     async def _fetch_target_onion(self, onion_host: str) -> SourceResult:
         """
         Visit the target .onion directly over Tor and mine it for operator
@@ -316,13 +331,16 @@ class DarkwebModule(BaseModule):
         status, headers, html = await self._fetch_full(f"{base}/")
 
         if status is None:
+            socks = f'{self.config.tor.socks_host}:{self.config.tor.socks_port}'
             return SourceResult(
                 source='target_onion',
                 success=False,
                 error=(
-                    'Onion unreachable — site is down, or Tor is not running. '
-                    f'Start Tor (SOCKS on {self.config.tor.socks_host}:'
-                    f'{self.config.tor.socks_port}) and retry.'
+                    f'Onion unreachable via Tor ({socks} is up) — the site is '
+                    'down, gone, or refusing us.'
+                    if await self._tor_socks_up() else
+                    f'Tor is NOT running — nothing listening on {socks}. '
+                    'Start Tor and retry; this says nothing about the target.'
                 ),
             )
 

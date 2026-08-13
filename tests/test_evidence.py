@@ -8,8 +8,9 @@ import pytest
 
 from cybertrace.evidence import EvidenceStore, ingest, detect_clones, page_similarity
 from cybertrace.modules.base import ModuleResult, SourceResult
+from cybertrace.modules.email_module import EmailModule
 from cybertrace.normalize import (
-    norm_btc, norm_domain, norm_email, norm_eth, norm_ip, norm_onion,
+    norm_asn, norm_btc, norm_domain, norm_email, norm_eth, norm_ip, norm_onion,
     norm_pgp, norm_username, norm_xmr,
 )
 
@@ -121,6 +122,104 @@ def _result(target, seen=datetime(2026, 1, 10, tzinfo=timezone.utc), **onion_dat
         data={'online': True, **onion_data},
     )
     return r
+
+
+# --- M4 enrichment routing ---------------------------------------------------
+
+def _ip_summary(**over):
+    return {'ip': '5.5.5.5', 'org': 'DigitalOcean LLC', 'asn': 'AS14061',
+            'hostname': 'vps.example.com', 'is_hosting': True, **over}
+
+
+def _pivot_result(target, pivots, seen=datetime(2026, 1, 12, tzinfo=timezone.utc)):
+    r = ModuleResult(target=target, target_type='darkweb', module='darkweb')
+    r.sources['operator_pivot'] = SourceResult(
+        source='operator_pivot', success=True, timestamp=seen,
+        data={'pivoted': len(pivots), 'results': pivots})
+    return r
+
+
+def test_norm_asn_collapses_forms_and_rejects_company_digits():
+    assert norm_asn('AS15169') == norm_asn('15169') == norm_asn('AS15169 Google LLC')
+    # A digit inside a company name is not an AS number.
+    assert norm_asn('Level 3 Parent, LLC') is None
+    assert norm_asn('DigitalOcean') is None
+
+
+def test_pivot_enrichment_lands_on_the_ip_entity(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_pivot_result(ONION_A, [
+            {'target': '5.5.5.5', 'type': 'ip', 'summary': _ip_summary()},
+        ]), store)
+
+        ip = store.find_entity("IP", "5.5.5.5")
+        meta = store.metadata(ip)
+        assert meta["ip_class"] == "INFRA_IP"      # from the source's own flag
+        assert meta["asn"] == "AS14061" and meta["org"] == "DigitalOcean LLC"
+
+        # ASN and provider are shared nodes, not just attributes.
+        asn = store.find_entity("ASN", "AS14061")
+        assert store._one("SELECT 1 FROM relationships WHERE source_entity_id=? "
+                          "AND target_entity_id=? AND rtype='BELONGS_TO_ASN'", (ip, asn))
+        assert store.find_entity("DOMAIN", "vps.example.com")
+
+
+def test_pivot_enrichment_never_mints_a_market(tmp_path):
+    """An enriched IP is a host, not a storefront — a MARKET node here would put
+    a phantom market into every correlation."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        r = ModuleResult(target='5.5.5.5', target_type='ip', module='ip')
+        r.sources['ipinfo'] = SourceResult(source='ipinfo', success=True,
+                                           timestamp=datetime(2026, 1, 12, tzinfo=timezone.utc),
+                                           data={})
+        r.summary = _ip_summary(is_hosting=False, is_proxy=True)
+        assert ingest(r, store)
+
+        assert store.find_entity("MARKET", "5.5.5.5") is None
+        assert store.metadata(store.find_entity("IP", "5.5.5.5"))["ip_class"] == "VPN_IP"
+
+
+def test_keyserver_fingerprint_links_email_to_key(tmp_path):
+    fpr = "a" * 40
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_pivot_result(ONION_A, [
+            {'target': 'op@proton.me', 'type': 'email',
+             'summary': {'has_pgp_key': True, 'pgp_fingerprints': [fpr]}},
+        ]), store)
+
+        email = store.find_entity("EMAIL", "op@proton.me")
+        key = store.find_entity("PGP_KEY", fpr)
+        assert email and key
+        rel = store._one("SELECT rel_id FROM relationships WHERE source_entity_id=? "
+                         "AND target_entity_id=? AND rtype='ASSOCIATED_WITH'", (email, key))
+        assert rel
+        # Provenance survives the pivot: the edge is backed by evidence.
+        assert store._one("SELECT 1 FROM evidence WHERE relationship_id=?",
+                          (rel["rel_id"],))
+
+
+def test_mr_index_parse_keeps_uids_drops_revoked():
+    text = ("info:1:2\n"
+            "pub:" + "b" * 40 + ":1:4096:1700000000::\n"
+            "uid:Dark Op <op%40proton.me>:1700000000::\n"
+            "pub:" + "c" * 40 + ":1:4096:1600000000::r\n"
+            "uid:Old Key <old%40proton.me>:1600000000::r\n")
+    parsed = EmailModule._parse_mr_index(text)
+    assert parsed == [("b" * 40, ["op@proton.me"])]
+
+
+def test_ingest_classifies_ip_owner(tmp_path):
+    """A VPN egress must not reach the dossier looking like an origin host."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, favicon={'shodan_matches': [
+            {'ip': '1.1.1.1', 'org': 'M247 Europe SRL', 'isp': 'Mullvad VPN'},
+            {'ip': '2.2.2.2', 'org': 'ExampleHost BV'},
+        ]}), store)
+
+        assert store.metadata(store.find_entity("IP", "1.1.1.1")) == {
+            "org": "M247 Europe SRL", "isp": "Mullvad VPN", "ip_class": "VPN_IP"}
+        # Unknown stays unknown: a hosting name is not proof of an origin host.
+        assert store.metadata(store.find_entity("IP", "2.2.2.2"))["ip_class"] == "UNKNOWN"
 
 
 def test_ingest_builds_provenance_chain(tmp_path):

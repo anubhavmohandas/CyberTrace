@@ -155,6 +155,38 @@ RELATIONSHIP_TYPES = {
 
 IP_CLASSES = {"INFRA_IP", "PERSONAL_IP", "VPN_IP", "EXCHANGE_IP", "UNKNOWN"}
 
+# Netblock owners that are anonymity egress rather than origin hosting. The
+# distinction changes the next investigative step, not the score: for a tunnel
+# exit the subscriber logs may never have existed, so a candidate built on one
+# needs that caveat before anyone files for retention.
+# occam: substring match on netblock owner. Swap for an ASN lookup against a
+# maintained VPN/hosting dataset once a corpus shows exits this list misses.
+_VPN_ORGS = ("nordvpn", "expressvpn", "mullvad", "protonvpn", "surfshark",
+             "cyberghost", "windscribe", "ivpn", "private internet access",
+             "vpn", "tor exit")
+
+
+def classify_ip(org: str, isp: Optional[str] = None,
+                flags: Optional[dict] = None) -> str:
+    """Classify a host, preferring the enrichment source's own flags.
+
+    ip-api resolves proxy/hosting from its own dataset, so when that ran its
+    verdict is real evidence and outranks anything read off a company name. The
+    name match is only the fallback for the favicon->Shodan path, which returns
+    an owner string and nothing else.
+
+    Everything unmatched stays UNKNOWN on purpose: an org name alone cannot
+    separate a rented VPS from a residential line, and guessing that difference
+    is how an investigation attributes a market to the wrong address.
+    """
+    flags = flags or {}
+    if flags.get("is_tor") or flags.get("is_proxy"):
+        return "VPN_IP"
+    if flags.get("is_hosting"):
+        return "INFRA_IP"
+    haystack = f"{org or ''} {isp or ''}".lower()
+    return "VPN_IP" if any(k in haystack for k in _VPN_ORGS) else "UNKNOWN"
+
 # Which SourceResult.data keys carry which artifacts, and the edge each earns
 # from the target. The one place the collector vocabulary meets the graph
 # vocabulary — a new extractor becomes ingestable by adding a row here.
@@ -456,6 +488,18 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
     if not target_url:
         return []
 
+    # A module run against an IP or an email is enrichment about that thing, not
+    # the discovery of a marketplace. Routing it through the market path below
+    # would mint a MARKET entity for an address and put a fake storefront in
+    # every correlation.
+    ttype = (data.get("target_type") or "").lower()
+    if ttype in _ENRICHERS:
+        tid = store.upsert_target(target_url)
+        sid = _ingest_enrichment(store, target_url, ttype, data.get("summary") or {},
+                                 data.get("module") or ttype,
+                                 _result_time(data) or utcnow(), tid)
+        return [sid] if sid else []
+
     target_id = store.upsert_target(target_url)
     market_id = store.upsert_entity("MARKET", target_url)
     onion = store.upsert_entity("ONION_ADDRESS", target_url)
@@ -499,6 +543,11 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
             ip_id = _link(store, sid, market_id, "IP", "CANDIDATE_IP", str(match.get("ip") or ""),
                           name, section="favicon", confidence=0.5, observed_at=observed_at)
             if ip_id and match.get("org"):
+                # The owner is evidence about the host, so it belongs on the IP
+                # entity too — correlate reads org/ip_class off metadata when it
+                # builds an IP candidate.
+                store.set_metadata(ip_id, org=str(match["org"]), isp=match.get("isp"),
+                                   ip_class=classify_ip(str(match["org"]), match.get("isp")))
                 org = store.upsert_entity("HOSTING_PROVIDER", str(match["org"]))
                 if org:
                     store.upsert_relationship(ip_id, org, "OWNED_BY", source_label=name,
@@ -510,7 +559,120 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
                       section=f"misconfig{mc.get('path', '')}", confidence=0.9,
                       observed_at=observed_at)
 
+        # The onion visit pivots its artifacts through the ip/email modules and
+        # carries each summary back here. Those are already-paid-for enrichment
+        # lookups, so they become evidence on the artifact's own entity — the
+        # pivot's whole point is that the market and the enrichment end up on one
+        # graph instead of in two unrelated reports.
+        for pivot in (payload.get("results") or []) if name == "operator_pivot" else []:
+            sub = _ingest_enrichment(store, str(pivot.get("target") or ""),
+                                     str(pivot.get("type") or "").lower(),
+                                     pivot.get("summary") or {},
+                                     f"{name}:pivot", observed_at, target_id)
+            if sub:
+                snapshot_ids.append(sub)
+
     return snapshot_ids
+
+
+def _result_time(data: dict) -> Optional[str]:
+    """Earliest source timestamp — provenance for a standalone module run, which
+    has no page capture of its own to date it by."""
+    stamps = [s.get("timestamp") for s in (data.get("sources") or {}).values()
+              if s.get("success") and s.get("timestamp")]
+    return min(stamps) if stamps else None
+
+
+def enrich_ip(store: EvidenceStore, snapshot_id: str, ip_id: str, summary: dict,
+              collector: str, observed_at: Optional[str] = None) -> None:
+    """Attach an ip module summary to an IP already in the store.
+
+    RDAP/ASN answers arrive as attributes of a host, not as new artifacts, so
+    they land two ways: the operational verdict (ip_class, org, abuse score) as
+    metadata correlate reads when ranking, and the network itself as real ASN /
+    provider nodes, because those are shared — two markets on one AS is a
+    convergence the graph should be able to show.
+    """
+    org, asn = summary.get("org"), summary.get("asn")
+    store.set_metadata(
+        ip_id,
+        **{k: v for k, v in (("org", org), ("asn", asn),
+                             ("hostname", summary.get("hostname")),
+                             ("country", summary.get("country")),
+                             ("abuse_score", summary.get("abuse_score"))) if v},
+        ip_class=classify_ip(org or "", summary.get("isp"), summary),
+    )
+
+    for etype, rtype, value in (("ASN", "BELONGS_TO_ASN", asn),
+                                ("HOSTING_PROVIDER", "OWNED_BY", org)):
+        if not value:
+            continue
+        node = store.upsert_entity(etype, str(value), observed_at=observed_at)
+        if not node:
+            continue                        # not an AS number, just a company name
+        obs = store.insert_observation(snapshot_id, node, method=f"{collector}:enrichment",
+                                       section="enrichment", context=str(value),
+                                       confidence=0.9, observed_at=observed_at)
+        rel = store.upsert_relationship(ip_id, node, rtype, source_label=collector,
+                                        observed_at=observed_at)
+        store.add_evidence(rel, [obs], note=f"{collector} enrichment for this host")
+
+    # A hostname is a real clearnet name for the host, and the pivot most worth
+    # having: passive DNS on it outlives the IP lease.
+    if summary.get("hostname"):
+        _link(store, snapshot_id, ip_id, "DOMAIN", "RESOLVES_TO",
+              str(summary["hostname"]), collector, section="enrichment",
+              confidence=0.8, observed_at=observed_at)
+
+
+def enrich_email(store: EvidenceStore, snapshot_id: str, email_id: str, summary: dict,
+                 collector: str, observed_at: Optional[str] = None) -> None:
+    """Attach an email module summary — keyserver keys and discovered handles.
+
+    The keyserver edge is the valuable one: it ties an address to a fingerprint
+    independently of the market page, so a key found on two markets and a key
+    published under an operator's address are the same node rather than two
+    coincidences.
+    """
+    for fpr in summary.get("pgp_fingerprints") or []:
+        _link(store, snapshot_id, email_id, "PGP_KEY", "ASSOCIATED_WITH", str(fpr),
+              collector, section="keyserver", confidence=0.85, observed_at=observed_at)
+
+    for user in summary.get("github_usernames") or []:
+        _link(store, snapshot_id, email_id, "USERNAME", "USES_USERNAME", str(user),
+              collector, section="github", confidence=0.75, observed_at=observed_at)
+
+
+# Which pivot/module target types have an enrichment router, and the entity each
+# one anchors to. Adding a module here is what makes its output evidence.
+_ENRICHERS = {
+    "ip":    ("IP", enrich_ip),
+    "email": ("EMAIL", enrich_email),
+}
+
+
+def _ingest_enrichment(store: EvidenceStore, target: str, ttype: str, summary: dict,
+                       collector: str, observed_at: str, target_id: str) -> Optional[str]:
+    """Route one enrichment summary onto its subject entity. Returns snapshot id.
+
+    The subject is upserted rather than required to exist: enrichment may arrive
+    before the market that mentions the address, and the store dedupes either
+    way, so ordering never decides whether the evidence lands.
+    """
+    entry = _ENRICHERS.get(ttype)
+    if not entry or not summary:
+        return None
+    etype, enricher = entry
+    subject = store.upsert_entity(etype, target, observed_at=observed_at)
+    if subject is None:
+        return None
+    sid = store.insert_snapshot(target_id, summary, collector=collector,
+                                observed_at=observed_at)
+    store.insert_observation(sid, subject, method=f"{collector}:enrichment",
+                             section="enrichment", context=target,
+                             confidence=0.9, observed_at=observed_at)
+    enricher(store, sid, subject, summary, collector, observed_at)
+    return sid
 
 
 def _link(store: EvidenceStore, snapshot_id: str, source_entity: Optional[str],

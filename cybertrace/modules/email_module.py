@@ -2,7 +2,8 @@
 
 import asyncio
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import unquote
 import json
 import re
 
@@ -173,33 +174,54 @@ class EmailModule(BaseModule):
         )
     
     async def _check_pgp_keyservers(self, email: str) -> SourceResult:
-        """Search PGP keyservers for public keys."""
+        """Search PGP keyservers, keeping the key identity rather than a boolean.
+
+        "This address has a key" is not evidence anyone can pivot on. The
+        fingerprint is: it is what links this email to a key seen on a market
+        page, and it survives re-export, so it is the strongest cross-market
+        signal the graph carries. Both endpoints already return it — openpgp.org
+        as armor (parsed by the same normalizer the page extractor uses), ubuntu
+        as a machine-readable index.
+
+        Not returned: certifying signatures. keys.openpgp.org strips third-party
+        sigs by policy and the ubuntu index omits them, so key-to-key SIGNED_BY
+        has no source here and is left unasserted rather than guessed.
+        """
         servers = [
             f"https://keys.openpgp.org/vks/v1/by-email/{email}",
             f"https://keyserver.ubuntu.com/pks/lookup?search={email}&op=index&options=mr",
         ]
-        
+
         keys_found = []
-        
+
         for server_url in servers:
             try:
-                text = await self.fetch(server_url)
-                if text:
-                    # OpenPGP returns key directly
-                    if 'BEGIN PGP PUBLIC KEY' in str(text):
-                        keys_found.append({
-                            'server': 'keys.openpgp.org',
-                            'has_key': True,
-                        })
-                    # Ubuntu keyserver returns index
-                    elif 'pub:' in str(text):
+                text = str(await self.fetch(server_url) or '')
+                if not text:
+                    continue
+                # OpenPGP returns the key itself: take the true fingerprint.
+                if 'BEGIN PGP PUBLIC KEY' in text:
+                    from ..normalize import norm_pgp
+                    fpr = norm_pgp(text)
+                    keys_found.append({
+                        'server': 'keys.openpgp.org',
+                        'has_key': True,
+                        'fingerprint': fpr.removeprefix('PGP:') if fpr else None,
+                        'armored': text if fpr else None,
+                        'uid_emails': [email],
+                    })
+                # Ubuntu returns an index: pub:<fpr>:...  /  uid:<uid>:...
+                elif 'pub:' in text:
+                    for fpr, uids in self._parse_mr_index(text):
                         keys_found.append({
                             'server': 'keyserver.ubuntu.com',
                             'has_key': True,
+                            'fingerprint': fpr,
+                            'uid_emails': uids or [email],
                         })
             except Exception:
                 pass
-        
+
         return SourceResult(
             source='pgp_keys',
             success=True,
@@ -208,6 +230,33 @@ class EmailModule(BaseModule):
                 'keys': keys_found,
             },
         )
+
+    @staticmethod
+    def _parse_mr_index(text: str) -> List[Tuple[str, List[str]]]:
+        """Parse the HKP machine-readable index into (fingerprint, uid emails).
+
+        Format is colon-delimited, uids follow the pub line they belong to:
+            pub:<fingerprint>:<algo>:<keylen>:<created>:<expires>:<flags>
+            uid:<percent-encoded uid>:<created>:<expires>:<flags>
+
+        Revoked and expired keys are skipped — flag 'r' or 'e' in the last
+        field — because a dead key is a weak identity anchor and would still
+        merge two markets into one operator node if reused.
+        """
+        out: List[Tuple[str, List[str]]] = []
+        for line in text.splitlines():
+            parts = line.split(':')
+            if parts[0] == 'pub' and len(parts) >= 7:
+                if any(f in parts[6].lower() for f in ('r', 'e', 'd')):
+                    out.append(('', []))          # placeholder: uids still skipped
+                    continue
+                out.append((parts[1].strip().lower(), []))
+            elif parts[0] == 'uid' and out and out[-1][0]:
+                uid = unquote(parts[1])
+                found = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', uid)
+                if found:
+                    out[-1][1].append(found.group(0).lower())
+        return [(f, u) for f, u in out if f]
     
     async def _run_holehe(self, email: str) -> SourceResult:
         """Run Holehe tool to check 120+ sites."""
@@ -510,6 +559,12 @@ class EmailModule(BaseModule):
 
             elif source == 'pgp_keys':
                 summary['has_pgp_key'] = data.get('has_pgp_key', False)
+                # Fingerprints ride in the summary because that is all the
+                # darkweb pivot carries back — without them the keyserver hit
+                # reaches the evidence store as an unpivotable boolean.
+                summary['pgp_fingerprints'] = [
+                    k['fingerprint'] for k in data.get('keys', []) if k.get('fingerprint')
+                ]
 
             elif source == 'emailrep':
                 summary['reputation'] = data.get('reputation')
