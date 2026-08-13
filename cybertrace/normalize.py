@@ -575,7 +575,15 @@ def dom_simhash(html: str) -> Optional[str]:
 
 
 def simhash_similarity(a: Optional[str], b: Optional[str]) -> float:
-    """1.0 identical structure, 0.0 nothing in common. None on either side -> 0."""
+    """1.0 identical structure, 0.0 nothing in common. None on either side -> 0.
+
+    The floor is not 0 in practice. Every HTML document shares html/head/body/a
+    shingles, so unrelated real pages measure around 0.62 — on the corpus,
+    unrelated sites landed at 0.62-0.64 and two onions of one service at 0.68.
+    Read this as a *relative* measure inside that band, never as a percentage of
+    shared content, and calibrate any threshold against a corpus rather than
+    against intuition about what 0.6 ought to mean.
+    """
     if not a or not b:
         return 0.0
     try:
