@@ -89,6 +89,41 @@ def test_operator_candidates_ranked_and_filtered(tmp_path):
         assert candidate_operators(store, min_conf=0.999) == []
 
 
+def test_single_market_artifact_is_evidence_but_not_an_operator(tmp_path):
+    """The structural rule: convergence is what makes an artifact an attribution
+    claim. A strong key on one site stays a first-class entity with its
+    observations intact — it just isn't a candidate operator, because there is
+    no second market for it to be the link to."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, emails=['op@proton.me'],
+                       pgp_keys=[{'armored': KEY_A}]), store)
+        key = store.find_entity("PGP_KEY", KEY_A)
+
+        assert key is not None                                # entity: yes
+        assert entity_funnel_profile(store, key)["total_conf"] > 0.35   # scores well
+        assert candidate_operators(store) == []               # candidate: no
+
+        ingest(_result(ONION_B, pgp_keys=[{'armored': KEY_A}]), store)
+        assert key in {c["entity_id"] for c in candidate_operators(store)}
+
+
+def test_market_floor_counts_a_key_cited_by_id_on_the_second_market(tmp_path):
+    """The alias fold has to carry observations, not just score. Market A
+    publishes the key, market B cites only its long id — that is exactly the
+    cross-market convergence the floor exists to catch, so folding the alias
+    away without its market would turn the fix into a false negative."""
+    from cybertrace.normalize import norm_pgp
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        fpr = norm_pgp(KEY_A).removeprefix("PGP:")
+        ingest(_result(ONION_A, pgp_keys=[{'armored': KEY_A}]), store)
+        ingest(_result(ONION_B, pgp_keys=[{'key_id': fpr[-16:]}]), store)
+
+        real = store.find_entity("PGP_KEY", KEY_A)
+        cand = next((c for c in candidate_operators(store) if c["entity_id"] == real), None)
+        assert cand is not None and cand["n_markets"] == 2
+
+
 def test_infra_requires_two_markets(tmp_path):
     with EvidenceStore(str(tmp_path / "e.db")) as store:
         ingest(_result(ONION_A, clearnet_hosts_referenced=['shared.example.com',

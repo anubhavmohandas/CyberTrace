@@ -6,10 +6,11 @@ import hashlib
 import ipaddress
 import logging
 import re
+import time
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote_plus, unquote
+from urllib.parse import quote_plus, unquote, urljoin, urlsplit, urlunsplit
 
 from ..normalize import (
     norm_btc, norm_domain, norm_email, norm_eth, norm_onion, norm_pgp, norm_xmr,
@@ -182,6 +183,19 @@ class DarkwebModule(BaseModule):
         '/phpinfo.php', '/info.php', '/status', '/robots.txt',
     )
 
+    # Bounded same-onion crawl. Budget is wall-clock for the whole crawl; each
+    # request is separately capped by config.request_timeout.
+    MAX_CRAWL_PAGES = 8
+    MAX_CRAWL_DEPTH = 2
+    CRAWL_BUDGET_SECONDS = 180
+    _RE_HREF = re.compile(r'''href\s*=\s*["']([^"'>]+)''', re.I)
+    _SKIP_EXT = re.compile(
+        r'\.(?:png|jpe?g|gif|svg|ico|css|js|pdf|zip|gz|7z|exe|mp4|webm|woff2?)$', re.I)
+    # Crawled before generic pages: this is where operators put the artifacts.
+    _PRIORITY_PATH = re.compile(
+        r'contact|pgp|gpg|key|about|vendor|profile|support|faq|rule|help|abuse'
+        r'|donat|payment|wallet', re.I)
+
     @staticmethod
     def _validated(html: str, pattern: 're.Pattern', normalizer,
                    exclude: str = '') -> Tuple[List[str], Dict[str, Dict[str, str]]]:
@@ -319,6 +333,99 @@ class DarkwebModule(BaseModule):
         except Exception:
             return False
 
+    @classmethod
+    def _same_onion_links(cls, page_url: str, html: str, onion_host: str) -> List[str]:
+        """Links on the page that stay on THIS onion host, absolute and deduped.
+
+        Leaving the host would attribute another site's emails and wallets to
+        this operator, which is exactly the false link the evidence model exists
+        to prevent — so the host check is the gate, not a filter to relax.
+        """
+        links: List[str] = []
+        for href in cls._RE_HREF.findall(html):
+            href = href.strip().replace('&amp;', '&')
+            if not href or href.startswith(('mailto:', 'javascript:', 'tel:', 'data:', '#')):
+                continue
+            parts = urlsplit(urljoin(page_url, href))
+            if parts.scheme not in ('http', 'https'):
+                continue
+            if (parts.hostname or '') != onion_host:
+                continue
+            if cls._SKIP_EXT.search(parts.path):
+                continue
+            # Fragment dropped: /vendor and /vendor#top are one page, one fetch.
+            links.append(urlunsplit(('http', onion_host, parts.path or '/', parts.query, '')))
+        return list(dict.fromkeys(links))
+
+    async def _crawl_pages(self, base: str, onion_host: str,
+                           root_html: str) -> List[Tuple[str, int, str]]:
+        """Breadth-first crawl of the target's own pages. Returns (url, status, html).
+
+        Fetching only "/" is why sparse landings and login walls looked like
+        artifact-free sites: the contact, vendor, rules and PGP pages are where
+        the operator's email, wallet and key actually live.
+        """
+        # occam: sequential fetches — one Tor circuit, in-order BFS, and a slow
+        # hidden service is the bottleneck anyway. Parallelise per depth level
+        # only if crawl time becomes the limit on corpus size.
+        seen = {f"{base}/"}
+        frontier = [(u, 1) for u in self._same_onion_links(f"{base}/", root_html, onion_host)]
+        deadline = time.monotonic() + self.CRAWL_BUDGET_SECONDS
+        out: List[Tuple[str, int, str]] = []
+
+        while frontier and len(out) < self.MAX_CRAWL_PAGES - 1:
+            if time.monotonic() > deadline:
+                logger.debug("crawl budget spent on %s after %d pages", onion_host, len(out))
+                break
+            # Shallow first, artifact-bearing paths ahead of generic ones: the
+            # page budget is normally much smaller than the site.
+            frontier.sort(key=lambda p: (p[1], not self._PRIORITY_PATH.search(p[0])))
+            url, depth = frontier.pop(0)
+            if url in seen:
+                continue
+            seen.add(url)
+            status, _headers, html = await self._fetch_full(url)
+            if status is None or not html:
+                continue          # unreachable, or a bodyless redirect to a login
+            out.append((url, status, html))
+            if depth < self.MAX_CRAWL_DEPTH:
+                frontier.extend(
+                    (u, depth + 1)
+                    for u in self._same_onion_links(url, html, onion_host)
+                    if u not in seen
+                )
+        return out
+
+    def _extract_artifacts(self, html: str, onion_host: str) -> Dict[str, Any]:
+        """Operator artifacts on one page. Every value is gated by its normalizer
+        (base58check, bech32, RFC-shaped mail) so only things that actually
+        validate can become graph entities."""
+        # BTC matches that are really a slice of an onion address (base32 overlaps
+        # base58) are excluded before validation.
+        onion_tokens = ''.join(self._RE_ONION.findall(html))
+        btc, ev_btc = self._validated(html, self._RE_BTC, norm_btc, exclude=onion_tokens)
+        emails, ev_email = self._validated(html, self._RE_EMAIL, norm_email)
+        eth, ev_eth = self._validated(html, self._RE_ETH, norm_eth)
+        xmr, ev_xmr = self._validated(html, self._RE_XMR, norm_xmr)
+        return {
+            'emails': emails,
+            'bitcoin_addresses': btc,
+            'ethereum_addresses': eth,
+            'monero_addresses': xmr,
+            'analytics_ids': sorted(set(self._RE_ANALYTICS.findall(html))),
+            'pgp_keys': self._extract_pgp_keys(html),
+            # norm_domain rejects onions and anything that isn't a real hostname.
+            'clearnet_hosts_referenced': sorted({
+                d for d in (norm_domain(h) for h in self._RE_URL.findall(html)) if d
+            }),
+            'onion_addresses_found': [
+                a for a in dict.fromkeys(norm_onion(x) for x in self._RE_ONION.findall(html))
+                if a and a != onion_host
+            ],
+            'leaked_public_ipv4': self._public_ipv4(self._RE_IPV4.findall(html)),
+            'artifact_evidence': {**ev_btc, **ev_email, **ev_eth, **ev_xmr},
+        }
+
     async def _fetch_target_onion(self, onion_host: str) -> SourceResult:
         """
         Visit the target .onion directly over Tor and mine it for operator
@@ -380,28 +487,59 @@ class DarkwebModule(BaseModule):
             except Exception:
                 pass
 
-        # Clearnet hosts referenced on the page (leaked operator infrastructure).
-        # norm_domain rejects onions and anything that isn't a real hostname.
-        clearnet_hosts = sorted({
-            d for d in (norm_domain(h) for h in self._RE_URL.findall(html)) if d
-        })
+        # Crawl the site's own pages before extracting: a login wall or a sparse
+        # landing page otherwise reports an artifact-free operator.
+        pages = [(f"{base}/", status, html)] + \
+            await self._crawl_pages(base, onion_host, html)
 
-        # Operator artifacts, each gated by its normalizer so only values that
-        # actually validate (base58check, bech32, block-base58, RFC-shaped mail)
-        # can become graph entities. Drop BTC matches that are really a slice of
-        # an onion address (base32 overlaps base58) before validating.
-        onion_tokens = ''.join(self._RE_ONION.findall(html))
-        btc, ev_btc = self._validated(html, self._RE_BTC, norm_btc, exclude=onion_tokens)
-        emails, ev_email = self._validated(html, self._RE_EMAIL, norm_email)
-        eth, ev_eth = self._validated(html, self._RE_ETH, norm_eth)
-        xmr, ev_xmr = self._validated(html, self._RE_XMR, norm_xmr)
-        analytics = sorted(set(self._RE_ANALYTICS.findall(html)))
-        artifact_evidence = {**ev_btc, **ev_email, **ev_eth, **ev_xmr}
+        agg: Dict[str, List[str]] = {
+            k: [] for k in (
+                'emails', 'bitcoin_addresses', 'ethereum_addresses', 'monero_addresses',
+                'analytics_ids', 'clearnet_hosts_referenced', 'onion_addresses_found',
+                'leaked_public_ipv4',
+            )
+        }
+        pgp_keys: Dict[str, Dict[str, str]] = {}
+        artifact_evidence: Dict[str, Dict[str, str]] = {}
+        page_records: List[Dict[str, Any]] = []
 
-        # Leaked public IPv4 in headers or body — a direct real-host slip.
+        for page_url, page_status, page_html in pages:
+            found = self._extract_artifacts(page_html, onion_host)
+            for key, values in agg.items():
+                values.extend(v for v in found[key] if v not in values)
+            for key in found['pgp_keys']:
+                pgp_keys.setdefault(key['key_id'], key)
+            path = urlsplit(page_url).path or '/'
+            # First sighting wins: the page an artifact was published on, not the
+            # last page that happened to repeat it in a nav bar or footer.
+            for raw, where in found['artifact_evidence'].items():
+                artifact_evidence.setdefault(raw, {**where, 'page': path})
+            page_title = self._RE_TITLE.search(page_html)
+            page_records.append({
+                'url': page_url,
+                'path': path,
+                'status': page_status,
+                'bytes': len(page_html),
+                'title': page_title.group(1).strip()[:120] if page_title else '',
+                'artifacts': {k: len(v) for k, v in found.items()
+                              if k != 'artifact_evidence' and v},
+            })
+
+        # Sorted so a re-crawl in a different order still hashes to the same
+        # snapshot — evidence.insert_snapshot diffs on the canonical payload.
+        clearnet_hosts = sorted(agg['clearnet_hosts_referenced'])
+        emails = sorted(agg['emails'])
+        btc = sorted(agg['bitcoin_addresses'])
+        eth = sorted(agg['ethereum_addresses'])
+        xmr = sorted(agg['monero_addresses'])
+        analytics = sorted(agg['analytics_ids'])
+        onion_links = sorted(agg['onion_addresses_found'])
+
+        # Leaked public IPv4 in headers or any crawled body — a real-host slip.
         header_blob = ' '.join(str(v) for v in headers.values())
-        leaked_ips = self._public_ipv4(
-            self._RE_IPV4.findall(header_blob) + self._RE_IPV4.findall(html)
+        leaked_ips = sorted(
+            set(agg['leaked_public_ipv4'])
+            | set(self._public_ipv4(self._RE_IPV4.findall(header_blob)))
         )
 
         # Misconfig probes + favicon/Shodan pivot (each best-effort).
@@ -414,12 +552,6 @@ class DarkwebModule(BaseModule):
             | {ip for mc in misconfigs for ip in mc.get('leaked_ips', [])}
         )
 
-        onion_links = [
-            a for a in dict.fromkeys(
-                norm_onion(x) for x in self._RE_ONION.findall(html)
-            ) if a and a != onion_host
-        ]
-
         return SourceResult(
             source='target_onion',
             success=True,
@@ -429,6 +561,11 @@ class DarkwebModule(BaseModule):
                 'http_status': status,
                 'title': title,
                 'page_bytes': len(html),
+                'pages_fetched': len(pages),
+                # Per-page provenance: which URL each artifact class came from.
+                # Lands in the target_onion snapshot, so a leak that appeared on
+                # one crawl and vanished on the next is provable per page.
+                'pages': page_records,
                 'server_fingerprint': fingerprint,
                 'clock_skew_seconds': clock_skew,
                 'clearnet_hosts_referenced': clearnet_hosts[:40],
@@ -437,7 +574,7 @@ class DarkwebModule(BaseModule):
                 'ethereum_addresses': eth[:20],
                 'monero_addresses': xmr[:20],
                 'analytics_ids': analytics[:20],
-                'pgp_keys': self._extract_pgp_keys(html),
+                'pgp_keys': list(pgp_keys.values()),
                 'leaked_public_ipv4': leaked_ips,
                 'misconfigurations': misconfigs,
                 'favicon': favicon,
@@ -1228,6 +1365,8 @@ class DarkwebModule(BaseModule):
             summary['operator_intel'] = {
                 'live_url': d.get('url'),
                 'title': d.get('title'),
+                'pages_fetched': d.get('pages_fetched'),
+                'pages': d.get('pages'),
                 'candidate_operator_ips': d.get('candidate_operator_ips'),
                 'server_fingerprint': d.get('server_fingerprint'),
                 'clock_skew_seconds': d.get('clock_skew_seconds'),

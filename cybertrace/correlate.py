@@ -227,16 +227,35 @@ def _candidate(store: EvidenceStore, role: str, row, profile: dict) -> dict:
     }
 
 
-def candidate_operators(store: EvidenceStore, min_conf: float = 0.35) -> List[dict]:
-    """Ranked OPERATOR candidates: keys, emails, handles."""
+def candidate_operators(store: EvidenceStore, min_conf: float = 0.35,
+                        min_markets: int = 2) -> List[dict]:
+    """Ranked OPERATOR candidates: keys, emails, handles.
+
+    Convergence across markets is what makes an artifact an attribution claim.
+    A strong key on one site is evidence about that site and nothing more — it
+    stays in the graph as an entity, but promoting it to an operator candidate
+    asserts a link between markets on the strength of a single observation.
+    """
+    rows = store._all("SELECT entity_id, etype, normalized_value FROM entities "
+                      "WHERE etype IN ('PGP_KEY','EMAIL','USERNAME')")
+    # The fold has to carry observations, not just score. A market that cited a
+    # key only by its long id is still a market that saw that key, and counting
+    # it against the alias node instead of the fingerprint would let the market
+    # floor discard exactly the cross-market convergence it exists to find.
+    canon = {r["entity_id"]: canonical_entity_key(store, r["entity_id"]) for r in rows}
+    folded = defaultdict(list)
+    for entity_id, key in canon.items():
+        folded[key].append(entity_id)
+
     out = []
-    for row in store._all(
-            "SELECT entity_id, etype, normalized_value FROM entities "
-            "WHERE etype IN ('PGP_KEY','EMAIL','USERNAME')"):
-        if canonical_entity_key(store, row["entity_id"]) != row["entity_id"]:
+    for row in rows:
+        entity_id = row["entity_id"]
+        if canon[entity_id] != entity_id:
             continue                        # alias: score belongs to the fingerprint
-        profile = entity_funnel_profile(store, row["entity_id"])
-        if profile["total_conf"] >= min_conf and profile["markets"]:
+        profile = entity_funnel_profile(store, entity_id)
+        profile["markets"] = sorted({m for eid in folded[entity_id]
+                                     for m in markets_for_entity(store, eid)})
+        if profile["total_conf"] >= min_conf and len(profile["markets"]) >= min_markets:
             out.append(_candidate(store, "OPERATOR", row, profile))
     return sorted(out, key=lambda c: (-c["score"], -c["n_funnels"]))
 

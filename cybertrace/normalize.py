@@ -278,6 +278,31 @@ py rb sh txt md yml yaml toml lock
 # never reaches the extension list because the shape already fails.
 _EMAIL_RE = re.compile(r"[^@\s]+@(?:[^@\s.]+\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})")
 
+# RFC 2606 reserved names plus the placeholder domains that actually appear in
+# signup instructions on these sites. Rejecting them here rather than at scoring
+# time is the point: an accepted `mail@example.org` is pivoted into a keyserver
+# lookup, and the real people whose keys carry that documentation address get
+# pulled into the case as operator candidates. A false artifact must never reach
+# enrichment, because enrichment turns it into someone else's identity.
+_PLACEHOLDER_DOMAINS = frozenset("""
+example.com example.net example.org example.edu esample.org
+domain.tld domain.com yourdomain.com mydomain.com site.com
+""".split())
+_PLACEHOLDER_TLDS = frozenset("example test invalid localhost local tld".split())
+# `test1@`, `user2@` — a trailing digit is how a doc example enumerates accounts.
+_PLACEHOLDER_LOCAL_RE = re.compile(
+    r"(?:test|example|sample|user|username|youremail|your-email|yourname|email"
+    r"|someone|somebody|foo|bar|baz|firstname|lastname|changeme|placeholder"
+    r"|john\.?doe|jane\.?doe)\d*"
+)
+
+
+def _registrable(domain: str) -> str:
+    """Last two labels. Not a PSL lookup — `foo.co.uk` reads as `co.uk` — which
+    is fine for both callers: they compare against explicit stoplists, so an
+    over-broad suffix simply fails to match rather than banning a real host."""
+    return ".".join(domain.rsplit(".", 2)[-2:])
+
 
 def norm_email(value: str) -> Optional[str]:
     """A plausible domain is required, not merely `something@something.tld`.
@@ -290,8 +315,14 @@ def norm_email(value: str) -> Optional[str]:
     value = value.strip().strip(".,;:<>()[]").lower()
     if not _EMAIL_RE.fullmatch(value) or len(value) > 254:
         return None
-    domain = value.rsplit("@", 1)[1]
+    local, domain = value.rsplit("@", 1)
     if domain.rpartition(".")[2] in _NON_TLD:
+        return None
+    # Documentation, not a mailbox — never let it reach the keyserver pivot.
+    if (domain in _PLACEHOLDER_DOMAINS
+            or _registrable(domain) in _PLACEHOLDER_DOMAINS
+            or domain.rpartition(".")[2] in _PLACEHOLDER_TLDS
+            or _PLACEHOLDER_LOCAL_RE.fullmatch(local)):
         return None
     # An onion mailbox is a real operator pivot, so it is accepted — but only for
     # an address that is actually an onion. `user@example.onion` is documentation.
@@ -320,6 +351,21 @@ _DOMAIN_RE = re.compile(
 )
 
 
+# Standards bodies, code hosts, CDNs, browsers, the Tor Project itself: page
+# furniture that any two sites cite without being related. Admitting them as
+# DOMAIN entities is what manufactures "shared infrastructure" between markets
+# and then a SUCCESSOR hypothesis on top of it, so the stoplist has to apply
+# before the entity exists, not at scoring time where the edge already ranks.
+_BOILERPLATE_DOMAINS = frozenset("""
+w3.org w.org wordpress.org wordpress.com schema.org unicode.org ietf.org
+torproject.org getmonero.org bitcoin.org gnupg.org openpgp.org letsencrypt.org
+github.com github.io gitlab.com sourceforge.net npmjs.com jquery.com
+google.com googleapis.com gstatic.com googletagmanager.com google-analytics.com
+mozilla.org wikipedia.org wikimedia.org archive.org archive.is creativecommons.org
+cloudflare.com jsdelivr.net unpkg.com bootstrapcdn.com fontawesome.com
+""".split())
+
+
 def norm_domain(value: str) -> Optional[str]:
     value = value.strip().lower()
     if "://" in value:
@@ -327,7 +373,11 @@ def norm_domain(value: str) -> Optional[str]:
     value = value.split("/", 1)[0].split(":", 1)[0].rstrip(".")
     if value.endswith(".onion"):
         return None                                   # an onion is not a domain entity
-    return value if _DOMAIN_RE.fullmatch(value) else None
+    if not _DOMAIN_RE.fullmatch(value):
+        return None
+    if value in _BOILERPLATE_DOMAINS or _registrable(value) in _BOILERPLATE_DOMAINS:
+        return None
+    return value
 
 
 def norm_username(value: str) -> Optional[str]:

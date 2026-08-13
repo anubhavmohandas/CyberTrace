@@ -82,14 +82,18 @@ def test_rejects_are_counted():
 
 
 def test_misc_normalizers():
-    assert norm_email("  BOSS@Example.COM.") == "boss@example.com"
+    # A real domain on purpose: reserved names are rejected outright now, so
+    # using one here would test the placeholder guard instead of the casing and
+    # trailing-punctuation stripping this line is actually for.
+    assert norm_email("  BOSS@Morke.RU.") == "boss@morke.ru"
     assert norm_email("not-an-email") is None
     # Asset filenames are the false-positive family seen in the wild (Blockchair
     # served logo_dark_48@2x.webp, which minted an EMAIL and a USERNAME node).
     assert norm_email("logo_dark_48@2x.webp") is None
     assert norm_email("image@2x.png") is None
     assert norm_email("sprite@3x.svg") is None
-    assert norm_email("foo@bar.com") == "foo@bar.com"
+    assert norm_email("op@proton.me") == "op@proton.me"
+    assert norm_email("foo@bar.com") is None       # metasyntactic, i.e. documentation
     assert norm_email(f"admin@{ONION_A}") == f"admin@{ONION_A}"   # real onion mailbox
     assert norm_email("admin@example.onion") is None              # placeholder onion
     assert norm_ip(" 1.2.3.4 ") == "1.2.3.4"
@@ -100,6 +104,31 @@ def test_misc_normalizers():
     assert norm_domain(ONION_A) is None                # an onion is not a domain
     assert norm_username("Agent_Zero") == "Agent_Zero"
     assert norm_username("a") is None
+
+
+def test_placeholder_emails_never_reach_enrichment():
+    """Rejected at normalize, not at scoring, because the email pivot runs a
+    keyserver lookup: an accepted `mail@example.org` returns the PGP keys of
+    whoever used that address in documentation, and those unrelated people
+    become operator candidates in the case."""
+    for value in ("mail@example.org", "admin@esample.org", "user@example.com",
+                  "sysop@domain.tld", "test@onionmail.info", "test1@onionmail.info",
+                  "youremail@gmail.com", "someone@host.invalid"):
+        assert norm_email(value) is None, value
+    # Role mailboxes on real domains are the genuine article and must survive.
+    for value in ("abuse@morke.ru", "support@dnmx.cc", "admin@mail2tor.com"):
+        assert norm_email(value) == value, value
+
+
+def test_boilerplate_domains_are_not_infrastructure():
+    """Two markets both linking github.com share page furniture, not hosting.
+    Admitted as DOMAIN entities these mint INFRA candidates and then SUCCESSOR
+    hypotheses, so the stoplist applies before the entity exists."""
+    for value in ("github.com", "www.w3.org", "www.torproject.org", "s.w.org",
+                  "wordpress.org", "drive.google.com", "cdn.jsdelivr.net"):
+        assert norm_domain(value) is None, value
+    for value in ("riseup.net", "mail.riseup.net", "dnmx.cc", "cock.li"):
+        assert norm_domain(value) == value, value
 
 
 def test_pgp_fingerprint_survives_rearmoring():
@@ -197,7 +226,7 @@ def test_index_hits_do_not_become_target_links():
     r = ModuleResult(target=ONION_A, target_type='darkweb', module='darkweb')
     r.sources['torch'] = SourceResult(
         source='torch', success=True, timestamp=datetime(2026, 1, 10, tzinfo=timezone.utc),
-        data={'onion_addresses_found': others + [ONION_A], 'emails': ['op@example.com']})
+        data={'onion_addresses_found': others + [ONION_A], 'emails': ['op@morke.ru']})
 
     store = EvidenceStore(":memory:")
     assert ingest(r, store), "the index snapshot itself must still be recorded"
@@ -205,7 +234,7 @@ def test_index_hits_do_not_become_target_links():
         "SELECT COUNT(*) c FROM relationships WHERE rtype='LINKS_TO'").fetchone()["c"]
     assert links == 0
     # Non-onion artifacts from an index hit are still evidence about the target.
-    assert store.find_entity("EMAIL", "op@example.com") is not None
+    assert store.find_entity("EMAIL", "op@morke.ru") is not None
     store.close()
 
     visited = _result(ONION_A, onion_addresses_found=others + [ONION_A])

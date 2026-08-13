@@ -180,15 +180,15 @@ class TestDarkwebOperatorIntel:
         assert '1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN3' not in evidence
 
     def test_validated_records_section_and_context(self):
-        html = ('<div class="footer">seen at admin@example.com</div>'
+        html = ('<div class="footer">seen at admin@morke.ru</div>'
                 + '<p>filler prose that separates the two blocks.</p>' * 3
-                + '<div id="donate">pay support@shop.example</div>')
+                + '<div id="donate">pay support@shop.li</div>')
         _values, evidence = DarkwebModule._validated(
             html, DarkwebModule._RE_EMAIL, norm_email)
-        assert evidence['admin@example.com']['section'] == 'footer'
-        assert evidence['support@shop.example']['section'] == 'wallet'
+        assert evidence['admin@morke.ru']['section'] == 'footer'
+        assert evidence['support@shop.li']['section'] == 'wallet'
         # context is the tag-stripped window the artifact was seen in
-        assert 'pay' in evidence['support@shop.example']['context']
+        assert 'pay' in evidence['support@shop.li']['context']
 
     def test_validated_excludes_onion_slices(self):
         onion = 'a' * 56 + '.onion'
@@ -268,6 +268,60 @@ class TestDarkwebOperatorIntel:
         # Shodan's http.favicon.hash = mmh3.hash(base64.encodebytes(icon_bytes)).
         icon = b'\x00\x01\x02\x03fake-icon'
         assert mmh3.hash(base64.encodebytes(icon)) == mmh3.hash(base64.encodebytes(icon))
+
+
+class TestDarkwebCrawl:
+    """Bounded same-onion crawl: only "/" made a login wall look artifact-free."""
+
+    HOST = 'a' * 56 + '.onion'
+    OTHER = 'b' * 56 + '.onion'
+
+    def test_links_stay_on_the_target_onion(self):
+        html = (
+            f'<a href="/contact">c</a><a href="rules.html#top">r</a>'
+            f'<a href="http://{self.OTHER}/vendor">other onion</a>'
+            f'<a href="https://evil.example/x">clearnet</a>'
+            f'<a href="mailto:op@example.com">mail</a>'
+            f'<a href="/logo.png">img</a><a href="/contact#again">dup</a>'
+        )
+        links = DarkwebModule._same_onion_links(f'http://{self.HOST}/', html, self.HOST)
+        # Off-host links would attribute another site's artifacts to this operator.
+        assert links == [f'http://{self.HOST}/contact', f'http://{self.HOST}/rules.html']
+
+    def test_crawl_is_bounded_and_aggregates_artifacts_across_pages(self):
+        import asyncio
+
+        # A landing page with nothing on it — the exact case that used to report
+        # zero artifacts — linking to pages that each carry one.
+        pages = {
+            '/': '<a href="/contact">c</a><a href="/vendor">v</a><a href="/faq">f</a>'
+                 '<a href="/a">a</a><a href="/b">b</a><a href="/c">c</a>'
+                 '<a href="/d">d</a><a href="/e">e</a><a href="/f">f</a>',
+            '/contact': 'mail <a href="/deep">deep</a> support@shop.li',
+            '/vendor': 'pay 1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2',
+            '/faq': 'nothing here',
+        }
+        module = DarkwebModule()
+        fetched = []
+
+        async def fake_fetch_full(url):
+            path = url.split(self.HOST, 1)[1] or '/'
+            fetched.append(path)
+            return (200, {}, pages.get(path, 'filler')) if path in pages or path.startswith('/') \
+                else (None, {}, '')
+
+        module._fetch_full = fake_fetch_full
+        crawled = asyncio.run(module._crawl_pages(f'http://{self.HOST}', self.HOST, pages['/']))
+
+        assert len(crawled) == DarkwebModule.MAX_CRAWL_PAGES - 1  # "/" is the caller's
+        assert len(set(fetched)) == len(fetched), 'a URL must not be fetched twice'
+        # Artifact-bearing paths are crawled ahead of generic ones.
+        assert set(fetched[:3]) == {'/contact', '/vendor', '/faq'}
+
+        found = [module._extract_artifacts(html, self.HOST) for _u, _s, html in crawled]
+        assert 'support@shop.li' in [e for f in found for e in f['emails']]
+        assert '1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2' in \
+            [b for f in found for b in f['bitcoin_addresses']]
 
 
 class TestIndianModule:

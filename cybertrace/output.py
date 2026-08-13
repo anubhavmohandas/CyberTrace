@@ -34,6 +34,16 @@ def _format_operator_intel(intel: Dict[str, Any], width: int) -> list:
     if intel.get('clock_skew_seconds') is not None:
         lines.append(f"  Clock skew: {intel['clock_skew_seconds']}s vs UTC")
 
+    pages = intel.get('pages') or []
+    if pages:
+        lines.append(f"  Pages crawled: {len(pages)}")
+        for p in pages:
+            found = ', '.join(
+                f"{k.replace('_addresses', '').replace('_found', '').replace('clearnet_hosts_referenced', 'clearnet')} x{n}"
+                for k, n in (p.get('artifacts') or {}).items()
+            )
+            lines.append(f"      {(p.get('path') or '/')[:34]:<34} {found or 'no artifacts'}")
+
     fp = intel.get('server_fingerprint') or {}
     if fp:
         lines.append(f"  Server:     {', '.join(f'{k}={v}' for k, v in fp.items())[:200]}")
