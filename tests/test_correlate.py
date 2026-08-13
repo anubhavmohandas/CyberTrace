@@ -7,14 +7,15 @@ under test is the same path a real crawl takes.
 from datetime import datetime, timezone
 
 from cybertrace.correlate import (
-    canonical_entity_key, candidate_infra, candidate_operators, confidence_level,
-    detect_successors, entity_funnel_profile, render_html, render_markdown,
-    run_correlation,
-    username_aliases,
+    COMMON_ARTIFACT_FLOOR, canonical_entity_key, candidate_infra, candidate_operators,
+    confidence_level, contradictions_from_identity, crypto_clusters, detect_successors,
+    entity_discrimination, entity_funnel_profile, render_dossier_html, render_html,
+    render_markdown, run_correlation, username_aliases,
 )
 from cybertrace.evidence import EvidenceStore, ingest
+from cybertrace.monitor import candidate_deltas
 
-from .test_evidence import BTC_VALID, KEY_A, ONION_A, ONION_B, _result
+from .test_evidence import BTC_VALID, KEY_A, KEY_B, ONION_A, ONION_B, _result
 
 JAN = datetime(2026, 1, 10, tzinfo=timezone.utc)
 AUG = datetime(2026, 8, 2, tzinfo=timezone.utc)
@@ -22,9 +23,19 @@ AUG = datetime(2026, 8, 2, tzinfo=timezone.utc)
 
 def _two_markets(store, *, clone: bool):
     """Two markets sharing a key. `clone` decides whether the later site is a
-    copy of the earlier one or an unrelated-looking rebuild."""
+    copy of the earlier one or an unrelated-looking rebuild.
+
+    The first market is recorded dark before the second appears, which is what
+    makes this a succession scenario rather than merely two linked sites: a gap
+    between captures is collection order, and only an observed takedown turns it
+    into a handoff.
+    """
     ingest(_result(ONION_A, seen=JAN, title='OldShop', emails=['op@proton.me'],
                    bitcoin_addresses=[BTC_VALID], pgp_keys=[{'armored': KEY_A}]), store)
+    store.record_down(store._one("SELECT target_id FROM targets WHERE url=?",
+                                 (ONION_A,))["target_id"],
+                      collector='target_onion', note='Onion unreachable via Tor',
+                      observed_at=datetime(2026, 6, 1, tzinfo=timezone.utc).isoformat())
     later = (dict(title='OldShop', emails=['op@proton.me'], bitcoin_addresses=[BTC_VALID])
              if clone else dict(title='NewPlace', analytics_ids=['UA-1234-1']))
     ingest(_result(ONION_B, seen=AUG, pgp_keys=[{'armored': KEY_A}], **later), store)
@@ -124,11 +135,20 @@ def test_market_floor_counts_a_key_cited_by_id_on_the_second_market(tmp_path):
         assert cand is not None and cand["n_markets"] == 2
 
 
-def test_infra_requires_two_markets(tmp_path):
+def test_infra_requires_two_markets_and_more_than_a_reference(tmp_path):
+    """Both floors, and why the second one exists: a host two markets merely
+    link to satisfies the market floor while being nobody's infrastructure. It
+    becomes a candidate only when an edge implies control — here, resolution."""
     with EvidenceStore(str(tmp_path / "e.db")) as store:
         ingest(_result(ONION_A, clearnet_hosts_referenced=['shared.example.com',
                                                            'only-a.example.com']), store)
         ingest(_result(ONION_B, clearnet_hosts_referenced=['shared.example.com']), store)
+        assert candidate_infra(store, min_markets=2) == []       # referenced only
+
+        host = store.find_entity("DOMAIN", 'shared.example.com')
+        for onion in (ONION_A, ONION_B):
+            store.upsert_relationship(store.find_entity("MARKET", onion), host,
+                                      "RESOLVES_TO", source_label="test", weight=0.8)
         values = {c["value"] for c in candidate_infra(store, min_markets=2)}
         assert values == {'shared.example.com'}
 
@@ -197,11 +217,20 @@ def test_handoff_is_read_in_time_order_not_pair_order(tmp_path):
 
     Both orderings are exercised by swapping which onion is captured first, so
     the test cannot pass by accident on one hash ordering.
+
+    The predecessor is recorded dark before the successor appears, because a
+    handoff now requires that: a gap alone only says we visited one site before
+    the other.
     """
     for first_seen, second_seen in ((ONION_A, ONION_B), (ONION_B, ONION_A)):
         with EvidenceStore(str(tmp_path / f"{first_seen[:4]}.db")) as store:
             ingest(_result(first_seen, seen=JAN, title='OldShop',
                            pgp_keys=[{'armored': KEY_A}]), store)
+            store.record_down(
+                store._one("SELECT target_id FROM targets WHERE url=?",
+                           (first_seen,))["target_id"],
+                collector='target_onion', note='Onion unreachable via Tor',
+                observed_at=datetime(2026, 3, 1, tzinfo=timezone.utc).isoformat())
             ingest(_result(second_seen, seen=datetime(2026, 3, 20, tzinfo=timezone.utc),
                            title='NewPlace', pgp_keys=[{'armored': KEY_A}]), store)
 
@@ -263,7 +292,7 @@ def test_markdown_brief_carries_evidence_and_limits(tmp_path):
         results = run_correlation(store)
         text = render_markdown(results["dossiers"], results)
         assert "# CyberTrace — correlation brief" in text
-        assert "Successor hypotheses" in text and "Limitations" in text
+        assert "Market relationships" in text and "Limitations" in text
         assert "probabilistic" in text                  # the caveat is never optional
 
 
@@ -302,3 +331,170 @@ def test_empty_store_yields_nothing(tmp_path):
         assert all(results[k] == [] for k in
                    ("operators", "infra", "ips", "successors", "clones",
                     "contradictions", "dossiers"))
+
+
+# --- commonness: the ecosystem-vs-operator separation ------------------------
+
+def _onion(n: int) -> str:
+    return chr(ord('c') + n) * 56 + ".onion"
+
+
+def test_platform_furniture_is_discounted_and_a_rare_artifact_is_not(tmp_path):
+    """The OnionMail case in miniature. Six sites of one family share the
+    family's contact address; two of them also share something only they have.
+    The shared address must not score like the shared secret."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        for i in range(6):
+            ingest(_result(_onion(i), emails=['support@platformmail.org']), store)
+        for i in (0, 1):
+            ingest(_result(_onion(i), emails=['support@platformmail.org',
+                                              'private@rarehost.net']), store)
+
+        weights = entity_discrimination(store)
+        common = weights[store.find_entity("EMAIL", 'support@platformmail.org')]
+        rare = weights[store.find_entity("EMAIL", 'private@rarehost.net')]
+        assert common < COMMON_ARTIFACT_FLOOR < rare
+
+        # The address six sites publish is on two of them together as well, so
+        # the market floor alone would let it through as an operator candidate.
+        # Commonness is what keeps it out while the rare one still qualifies.
+        values = {c["value"] for c in candidate_operators(store, discrimination=weights)}
+        assert values == {'private@rarehost.net'}
+        assert 'support@platformmail.org' in {
+            c["value"] for c in candidate_operators(store)}      # unweighted: it passes
+
+
+def test_a_two_market_corpus_keeps_its_only_signal(tmp_path):
+    """With two markets, 'on both' IS the evidence. Dividing it away as common
+    would silence the only thing a small case has to go on."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        for onion in (ONION_A, ONION_B):
+            ingest(_result(onion, emails=['op@proton.me']), store)
+        assert set(entity_discrimination(store).values()) == {1.0}
+
+
+def test_shared_platform_is_recorded_as_an_objection(tmp_path):
+    """Same software family, different operators: the pair must be reported as
+    ecosystem, not quietly rescored into an operator claim."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        for i in range(5):
+            ingest(_result(_onion(i), emails=['support@platformmail.org'],
+                           analytics_ids=['UA-9-9']), store)
+        results = run_correlation(store)
+
+        rules = {c["rule"] for c in results["contradictions"]}
+        assert "shared_platform_not_shared_control" in rules
+        assert not [s for s in results["successors"] if not s["suppressed"]]
+
+
+# --- crypto clustering -------------------------------------------------------
+
+BTC_OTHER = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+
+
+def test_cospend_addresses_form_one_wallet(tmp_path):
+    """Co-spending proves one party held both keys, and ownership is transitive,
+    so A~B and B~C must resolve to a single cluster."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        a = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        b = store.upsert_entity("BTC_ADDRESS", BTC_OTHER)
+        c = store.upsert_entity("BTC_ADDRESS", "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
+        store.upsert_relationship(a, b, "PART_OF_CLUSTER")
+        store.upsert_relationship(b, c, "PART_OF_CLUSTER")
+
+        clusters = crypto_clusters(store)
+        assert len({clusters[x] for x in (a, b, c)}) == 1
+
+        lone = store.upsert_entity("BTC_ADDRESS", "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy")
+        assert lone not in clusters      # a component of one is not a wallet claim
+
+
+# --- broadened contradictions ------------------------------------------------
+
+def test_two_uncertified_keys_for_one_identity_contradict_each_other(tmp_path):
+    """Anyone can upload a key under someone else's address. Two keys answering
+    for one mailbox with no certification between them is an objection, not a
+    richer profile."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, emails=['op@proton.me']), store)
+        email = store.find_entity("EMAIL", 'op@proton.me')
+        for key in (KEY_A, KEY_B):
+            key_id = store.upsert_entity("PGP_KEY", key)
+            store.upsert_relationship(email, key_id, "ASSOCIATED_WITH")
+
+        flags = contradictions_from_identity(store)
+        assert [f["rule"] for f in flags] == ["identity_bound_to_uncertified_keys"]
+
+        # Certify one with the other and the conflict resolves to a rotation.
+        store.upsert_relationship(store.find_entity("PGP_KEY", KEY_A),
+                                  store.find_entity("PGP_KEY", KEY_B), "SIGNED_BY")
+        assert contradictions_from_identity(store) == []
+
+
+def test_overlapping_lifetimes_downgrade_succession_to_a_link(tmp_path):
+    """Both live at once means neither replaced the other, however much they
+    share. The link survives — one operator running two sites is ordinary — but
+    the directional claim does not, and the objection is recorded."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        for onion in (ONION_A, ONION_B):
+            ingest(_result(onion, seen=JAN, pgp_keys=[{'armored': KEY_A}]), store)
+            ingest(_result(onion, seen=AUG, pgp_keys=[{'armored': KEY_A}]), store)
+        results = run_correlation(store)
+
+        assert [s["relation"] for s in results["successors"]] == ["LINKED_TO"]
+        assert store._all("SELECT 1 FROM relationships WHERE rtype='SUCCESSOR_OF'") == []
+        assert store._all("SELECT 1 FROM relationships WHERE rtype='LINKED_TO'")
+        assert "overlap_contradicts_succession" in {c["rule"] for c in
+                                                    results["contradictions"]}
+
+
+def test_timing_alone_never_makes_a_successor(tmp_path):
+    """Two markets that share nothing but happen to have been visited in order
+    are not a hypothesis — this is the corpus-collection artefact that produced
+    eight false successor edges before the rule existed."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, seen=JAN, emails=['a@onehost.net']), store)
+        store.record_down(store._one("SELECT target_id FROM targets WHERE url=?",
+                                     (ONION_A,))["target_id"],
+                          collector='target_onion', note='Onion unreachable via Tor')
+        ingest(_result(ONION_B, seen=AUG, emails=['b@twohost.net']), store)
+        assert detect_successors(store, min_score=0.1) == []
+
+
+def test_a_contradicted_candidate_cannot_be_reported_high():
+    """The objection is a competing explanation, not a footnote — a reader who
+    only sees the label must not be told HIGH while the body says 'clone'."""
+    assert confidence_level("OPERATOR", 0.95, 3) == "HIGH"
+    assert confidence_level("OPERATOR", 0.95, 3, contradicted=True) == "MEDIUM"
+
+
+# --- case file ---------------------------------------------------------------
+
+def test_dossier_html_is_self_contained_and_leads_with_objections(tmp_path):
+    out = tmp_path / "case.html"
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        _two_markets(store, clone=True)
+        results = run_correlation(store)
+        render_dossier_html(results, str(out))
+
+    page = out.read_text()
+    assert "<script" not in page                    # native <details>, no JS
+    assert "http://" not in page.split("<body>")[0]  # nothing fetched remotely
+    # Contradictions are rendered above the candidate list, not inside it.
+    assert page.index("Contradictions") < page.index("<h2>Candidates</h2>")
+    assert "not calibrated probabilities" in page
+
+
+# --- monitoring --------------------------------------------------------------
+
+def test_candidate_deltas_report_only_movement():
+    before = [{"candidate_id": "OP-1", "confidence": 0.5, "assessment": "x"},
+              {"candidate_id": "OP-2", "confidence": 0.7, "assessment": "y"}]
+    after = [{"candidate_id": "OP-1", "confidence": 0.5, "assessment": "x"},
+             {"candidate_id": "OP-2", "confidence": 0.9, "assessment": "y"},
+             {"candidate_id": "OP-3", "confidence": 0.6, "assessment": "z"}]
+    changes = {d["candidate_id"]: d["change"] for d in candidate_deltas(before, after)}
+    assert changes == {"OP-2": "MOVED", "OP-3": "NEW"}   # OP-1 unchanged: not news
+    # A candidate that stopped clearing the bar is news too, in the other direction.
+    reverse = {d["candidate_id"]: d["change"] for d in candidate_deltas(after, before)}
+    assert reverse == {"OP-2": "MOVED", "OP-3": "GONE"}

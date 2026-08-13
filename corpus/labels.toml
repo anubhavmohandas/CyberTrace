@@ -1,0 +1,170 @@
+# Ground truth for the CyberTrace evaluation corpus.
+#
+# Every claim the correlation engine makes is about a PAIR of targets, so this
+# file labels the *targets* and lets tools/eval_corpus.py derive all pair labels
+# from them:
+#
+#   same operator, different operator, same platform  ->  SAME_OPERATOR
+#   different operator, same platform                 ->  SAME_ECOSYSTEM
+#   different operator, different platform            ->  UNRELATED
+#   either side has operator = ""                     ->  unlabeled, not scored
+#
+# Deriving pairs beats enumerating them: 17 targets are 136 pairs, and a
+# hand-written pair list goes stale the moment a target is added.
+#
+# `basis` is the rule that makes this a ground truth rather than another guess:
+# it must cite something checkable outside the tool's own output — the site's
+# own published mirror list, a directory that PGP-verifies its entries, or
+# infrastructure the site itself names. If the only reason to believe two
+# targets are related is that CyberTrace said so, the label is not evidence, it
+# is the tool grading its own homework, and it does not belong here.
+#
+# SAME_ECOSYSTEM is the label that matters most. Several servers of one mail
+# platform share the platform's domain, its documentation addresses and its
+# software banner while being run by different people. An engine that cannot
+# separate those from a shared operator is not solving the attribution problem,
+# it is counting coincidences — so those pairs are labeled explicitly and the
+# eval reports them as their own class instead of folding them into UNRELATED.
+
+[corpus]
+name = "cybertrace-eval-v1"
+collected = "2026-08-13"
+note = "Live Tor captures; see runs/raw/ for the saved --save JSON each row came from."
+
+# --- Riseup: one operator, two onion services -------------------------------
+
+[[target]]
+name = "riseup-main"
+onion = "vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.onion"
+operator = "riseup"
+platform = "riseup"
+basis = "dark.fail publishes this as Riseup's onion under its PGP-signed listing"
+
+[[target]]
+name = "riseup-account"
+onion = "3xeiol2bnhrsqhcsaifwtnlqkylrerdspzua7bcjrh26qlrrrctfobid.onion"
+operator = "riseup"
+platform = "riseup"
+basis = "the page is Riseup's own account settings UI and references account/mail/lists/pad/share.riseup.net"
+
+# --- Endchan: one operator, two onion services ------------------------------
+
+[[target]]
+name = "endchan"
+onion = "enxx3byspwsdo446jujc52ucy2pf5urdbhqw3kbsfhlfjwmbpj5smdad.onion"
+operator = "endchan"
+platform = "lynxchan"
+basis = "dark.fail publishes this as Endchan; the site itself links the endchancxfb address as its own mirror"
+
+[[target]]
+name = "endchan-alt"
+onion = "endchancxfbnrfgauuxlztwlckytq7rgeo5v6pc2zd4nyqo3khfam4ad.onion"
+operator = "endchan"
+platform = "lynxchan"
+basis = "published as an alternate address on Endchan's own enxx3 landing page"
+
+# --- OnionMail family: one platform, independent operators ------------------
+# The negative control the whole engine has to pass. These servers legitimately
+# share onionmail.info, the platform's documentation mailboxes and the
+# `Server: OnionMail` banner, and are run by different people.
+
+[[target]]
+name = "onionmail-xyrasoru"
+onion = "ygtgpwxfhp7bpggqvjunbeulfxcmgfby4yrh3tlbtpvtwfkpajiw4hqd.onion"
+operator = "xyrasoru"
+platform = "onionmail"
+basis = "titles itself 'xyrasoru OnionMail Server' and answers with Server: OnionMail"
+
+[[target]]
+name = "mail2tor"
+onion = "mail2torjgmxgexntbrmhvgluavhj7ouul5yar6ylbvjkxwqf6ixkwyd.onion"
+operator = "mail2tor"
+platform = "mail2tor"
+basis = "independent Tor mail service; nginx, its own template, no OnionMail banner"
+
+# --- Independent mail providers ---------------------------------------------
+
+[[target]]
+name = "dnmx"
+onion = "dnmxjaitaiafwmss2lx7tbs5bv66l7vjdmb5mtb3yqpxqhk3it5zivad.onion"
+operator = "dnmx"
+platform = "dnmx"
+basis = "Dark Net Mail Exchange, self-hosted Apache/PHP stack under its own brand"
+
+[[target]]
+name = "elude"
+onion = "eludemailxhnqzfmxehy3bk5guyhlxbunfyhkcksv4gvx6d3wcf6smad.onion"
+operator = "elude"
+platform = "elude"
+basis = "Elude.in mail service under its own brand"
+
+[[target]]
+name = "protonmail"
+onion = "protonmailrmez3lotccipshtkleegetolb73fuirgj7r4o4vfu7ozyd.onion"
+operator = "proton"
+platform = "proton"
+basis = "dark.fail publishes this as Proton Mail's onion; Proton operates it as a company"
+
+[[target]]
+name = "morke-anonymous-email"
+onion = "6n5nbusxgyw46juqo3nt5v4zuivdbc7mzm74wlhg7arggetaui4yp4id.onion"
+operator = "morke"
+platform = "unknown"
+basis = "the service's only contact is abuse@morke.ru, its own clearnet domain"
+
+# --- Unrelated services, different categories -------------------------------
+
+[[target]]
+name = "torproject"
+onion = "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion"
+operator = "torproject"
+platform = "torproject"
+basis = "dark.fail publishes this as The Tor Project's own onion"
+
+[[target]]
+name = "keys-openpgp"
+onion = "zkaan2xfbuxia2wpf7ofnkbz6r5zdbbvxbunvp5g2iebopbfc4iqmbad.onion"
+operator = "keys.openpgp.org"
+platform = "hagrid"
+basis = "dark.fail publishes this as the keys.openpgp.org keyserver onion"
+
+[[target]]
+name = "blockchair"
+onion = "blkchairbknpn73cfjhevhla7rkp4ed5gg2knctvv7it4lioy22defid.onion"
+operator = "blockchair"
+platform = "blockchair"
+basis = "dark.fail publishes this as Blockchair's block explorer onion"
+
+[[target]]
+name = "dread"
+onion = "dreadytofatroptsdj6io7l3xptbet6onoyno2yv7jicoxknyazubrad.onion"
+operator = "dread"
+platform = "dread"
+basis = "dark.fail publishes this as the Dread forum onion"
+
+[[target]]
+name = "darkforest"
+onion = "dkforestseeaaq2dqz2uflmlsybvnq2irzn4ygyvu53oazyorednviid.onion"
+operator = "darkforest"
+platform = "darkforest"
+basis = "self-branded DarkForest board, custom stack (X-Powered-By: the almighty n0tr1v)"
+
+[[target]]
+name = "blackhat-chat"
+onion = "blkhatjxlrvc5aevqzz5t6kxldayog6jlx5h7glnu44euzongl4fh5ad.onion"
+operator = "blackhat-chat"
+platform = "unknown"
+basis = "self-branded Black Hat Chat with its own published PGP key page"
+
+# --- Unlabeled: kept in the corpus, excluded from scoring -------------------
+# No checkable public statement ties these to an operator. They still exercise
+# collection and still contribute their artifacts to the commonness model —
+# they are simply never counted as a hit or a miss, because a guessed label
+# would make the precision number fiction.
+
+[[target]]
+name = "sector-city"
+onion = "sector2nyjrxphgrj3cvnueanomz4trvgyxofvu3cexltoxuegtlmzid.onion"
+operator = ""
+platform = ""
+basis = "unidentified; no public operator statement found"

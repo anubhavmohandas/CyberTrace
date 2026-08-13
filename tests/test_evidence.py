@@ -1,6 +1,7 @@
 """Evidence-model tests: normalization gate, provenance chain, clone guard."""
 
 import base64
+import json
 import struct
 from datetime import datetime, timezone
 
@@ -8,12 +9,14 @@ import pytest
 
 from cybertrace.evidence import (
     EvidenceStore, ingest, detect_clones, fingerprint_signature, page_similarity,
+    structural_similarity,
 )
 from cybertrace.modules.base import ModuleResult, SourceResult
 from cybertrace.modules.email_module import EmailModule
 from cybertrace.normalize import (
-    norm_asn, norm_btc, norm_domain, norm_email, norm_eth, norm_ip, norm_onion,
-    norm_pgp, norm_username, norm_xmr,
+    dom_simhash, norm_asn, norm_btc, norm_domain, norm_email, norm_eth, norm_ip,
+    norm_onion, norm_pgp, norm_username, norm_xmr, pgp_certifiers,
+    pgp_signature_issuers, simhash_similarity,
 )
 
 # A real mainnet address (block 170 coinbase) and the BIP-173 P2WPKH vector.
@@ -450,6 +453,173 @@ def test_page_similarity_bounds():
     assert page_similarity(a, a) == 1.0
     assert page_similarity(a, {'title': 'Other', 'emails': ['q@z.com']}) < 0.3
     assert page_similarity({}, {}) == 0.0
+
+
+# --- structural fingerprints -------------------------------------------------
+
+SHOP_HTML = ("<html><body><div class='wrap nav'><ul><li>a</li><li>b</li></ul>"
+             "<p>Buy things here</p><table><tr><td>x</td></tr></table></div></body></html>")
+REWORDED = SHOP_HTML.replace("Buy things here", "Completely different wording")
+OTHER_HTML = "<html><section><h1>Hi</h1><article><span>y</span></article></section></html>"
+
+
+def test_dom_simhash_tracks_structure_not_wording():
+    """The signal a clone cannot rewrite away. A copycat changes the prose; the
+    template survives, and that is what this has to see."""
+    assert dom_simhash(SHOP_HTML) == dom_simhash(REWORDED)
+    assert simhash_similarity(dom_simhash(SHOP_HTML), dom_simhash(OTHER_HTML)) < 0.8
+    assert dom_simhash("") is None
+    assert simhash_similarity(None, "abc") == 0.0      # missing side never scores
+
+
+def test_structural_similarity_prefers_pages_but_degrades(tmp_path):
+    """Captures older than per-page fingerprints must fall back to the artifact
+    bag, not read a missing field as 'these sites look nothing alike'."""
+    with_pages = {'title': 'Shop', 'pages': [{'dom_simhash': dom_simhash(SHOP_HTML)}]}
+    same = {'title': 'Shop', 'pages': [{'dom_simhash': dom_simhash(REWORDED)}]}
+    assert structural_similarity(with_pages, same) == 1.0
+    assert structural_similarity(with_pages, {'title': 'Shop'}) is None
+    assert page_similarity(with_pages, {'title': 'Shop'}) > 0     # fallback path
+    # Structure dominates once both sides have it: same artifacts, different build.
+    unlike = {'title': 'Shop', 'pages': [{'dom_simhash': dom_simhash(OTHER_HTML)}]}
+    assert page_similarity(with_pages, unlike) < page_similarity(with_pages, same)
+
+
+# --- PGP roles and certifications --------------------------------------------
+
+def test_signing_role_becomes_a_different_edge(tmp_path):
+    """Displaying a key is what a clone does; signing with it needs the secret
+    half. The two must not land on the same relationship type."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=[{'armored': KEY_A, 'role': 'signing'}]), store)
+        ingest(_result(ONION_B, pgp_keys=[{'armored': KEY_A, 'role': 'displayed'}]), store)
+
+        types = {r["rtype"] for r in store._all(
+            "SELECT rtype FROM relationships WHERE rtype IN ('USES_PGP','SIGNS_WITH')")}
+        assert types == {"USES_PGP", "SIGNS_WITH"}
+        key = store.find_entity("PGP_KEY", KEY_A)
+        assert store.metadata(key)["role"] in ("signing", "displayed")
+
+
+def test_certifiers_become_signed_by_edges(tmp_path):
+    """A third-party certification inside a published key block is the strongest
+    successor signal the graph has, and it must point signer -> signed."""
+    signer = "AA" * 20
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=[{'armored': KEY_A, 'certifiers': [signer]}]),
+               store)
+        row = store._one(
+            "SELECT s.normalized_value AS src, t.normalized_value AS dst "
+            "FROM relationships r JOIN entities s ON s.entity_id = r.source_entity_id "
+            "JOIN entities t ON t.entity_id = r.target_entity_id WHERE r.rtype='SIGNED_BY'")
+        assert row["src"] == f"pgp:{signer.lower()}"
+        assert row["dst"] == norm_pgp(KEY_A).lower()
+
+
+def test_real_key_block_yields_its_certifiers():
+    """Parsed from packets, not from armor text: exercises subpacket walking on
+    a block built here, so it cannot pass by matching a hex string in the ASCII."""
+    from tests.test_evidence import _armor
+    sig = _signature_packet(sig_type=0x13, issuer=bytes.fromhex("1122334455667788"))
+    block = _armor(_pubkey_packet((1 << 2047) | 0xABCDEF) + sig)
+    assert pgp_certifiers(block) == ["1122334455667788"]
+    # A self-signature is not a certification by anyone else.
+    own = norm_pgp(_armor(_pubkey_packet((1 << 2047) | 0xABCDEF))).removeprefix("PGP:")
+    self_sig = _signature_packet(sig_type=0x13, issuer=bytes.fromhex(own[-16:]))
+    assert pgp_certifiers(_armor(_pubkey_packet((1 << 2047) | 0xABCDEF) + self_sig)) == []
+
+
+def _signature_packet(sig_type: int, issuer: bytes) -> bytes:
+    """v4 signature packet carrying an issuer key-id subpacket (RFC 4880 5.2.3)."""
+    subpacket = bytes([len(issuer) + 1, 16]) + issuer          # len, type 16, key id
+    body = (struct.pack(">BBBB", 4, sig_type, 1, 8)            # version, type, RSA, SHA-256
+            + struct.pack(">H", 0)                             # no hashed subpackets
+            + struct.pack(">H", len(subpacket)) + subpacket
+            + b"\x00\x00" + b"\x00\x10" + b"\x00" * 2)         # hash prefix + tiny MPI
+    return bytes([0x88]) + bytes([len(body)]) + body           # old-format tag 2
+
+
+# --- page lineage and discovery provenance -----------------------------------
+
+def test_pages_get_their_own_snapshots(tmp_path):
+    """An observation must resolve to the hash of the page it was read off, not
+    to the whole visit — that is the difference between 'the site changed' and
+    'this key left /contact'."""
+    pages = [{'path': '/', 'sha256': 'a' * 64, 'dom_simhash': '1' * 16},
+             {'path': '/contact', 'sha256': 'b' * 64, 'dom_simhash': '2' * 16}]
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pages=pages, emails=['op@proton.me'],
+                       artifact_evidence={'op@proton.me': {'section': 'contact',
+                                                           'page': '/contact'}}), store)
+        target = store._one("SELECT target_id FROM targets WHERE url=?",
+                            (ONION_A,))["target_id"]
+        collectors = {r["collector"] for r in store.page_snapshots(target)}
+        assert collectors == {'target_onion:page:/', 'target_onion:page:/contact'}
+        # The email was published on /contact, so its observation hangs there.
+        row = store._one(
+            "SELECT s.collector FROM observations o JOIN snapshots s "
+            "ON s.snapshot_id = o.snapshot_id JOIN entities e ON e.entity_id = o.entity_id "
+            "WHERE e.normalized_value='op@proton.me'")
+        assert row["collector"] == 'target_onion:page:/contact'
+        # Site-level queries must not pick a page record up by accident.
+        assert ':page:' not in store.latest_snapshot(target)["collector"]
+
+
+def test_index_hits_are_discovery_not_links(tmp_path):
+    """An index co-ranking two onions says they ranked together, nothing more.
+    Recorded as DISCOVERED_VIA so it can never be read as the site linking out."""
+    result = ModuleResult(target=ONION_A, target_type='darkweb', module='darkweb')
+    result.sources['torch'] = SourceResult(
+        source='torch', success=True, data={'onion_addresses_found': [ONION_B]})
+    result.sources['target_onion'] = SourceResult(
+        source='target_onion', success=True,
+        data={'online': True, 'onion_addresses_found': [ONION_B]})
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(result, store)
+        types = {r["rtype"] for r in store._all(
+            "SELECT rtype FROM relationships WHERE rtype IN ('LINKS_TO','DISCOVERED_VIA')")}
+        assert types == {"LINKS_TO", "DISCOVERED_VIA"}
+
+
+def test_change_detection_ignores_per_visit_noise(tmp_path):
+    """Clock skew differs on every fetch. Reporting that as a change would mark
+    every target CHANGED on every re-check and bury the one that really moved —
+    while the stored hash still covers the full payload, skew included."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        target = store.upsert_target(ONION_A)
+        first = store.insert_snapshot(target, {'title': 'Shop', 'clock_skew_seconds': -810.9},
+                                      collector='watch')
+        same = store.insert_snapshot(target, {'title': 'Shop', 'clock_skew_seconds': 12.4},
+                                     collector='watch')
+        moved = store.insert_snapshot(target, {'title': 'Shop v2', 'clock_skew_seconds': 12.4},
+                                      collector='watch')
+
+        def changed(sid):
+            row = store._one("SELECT diff_summary FROM snapshots WHERE snapshot_id=?", (sid,))
+            return json.loads(row["diff_summary"])["changed"]
+
+        assert changed(same) is False and changed(moved) is True
+        # Provenance is not selective: the skew is still inside the hashed payload.
+        hashes = {store._one("SELECT sha256 FROM snapshots WHERE snapshot_id=?",
+                             (s,))["sha256"] for s in (first, same)}
+        assert len(hashes) == 2
+
+
+def test_a_dark_site_is_evidence_but_a_dead_proxy_is_not(tmp_path):
+    """'Tor is not running' is a fact about us. Recording it as the site being
+    down would let a local misconfiguration manufacture a takedown."""
+    for error, expected in (
+            ('Onion unreachable via Tor (127.0.0.1:9050 is up) — the site is down', 1),
+            ('Tor is NOT running — nothing listening on 127.0.0.1:9050', 0)):
+        with EvidenceStore(":memory:") as store:
+            result = ModuleResult(target=ONION_A, target_type='darkweb', module='darkweb')
+            result.sources['target_onion'] = SourceResult(
+                source='target_onion', success=False, error=error)
+            ingest(result, store)
+            assert len(store.down_windows()) == expected
+            active = store._one("SELECT active FROM targets WHERE url=?",
+                                (ONION_A,))["active"]
+            assert active == (0 if expected else 1)
 
 
 if __name__ == "__main__":

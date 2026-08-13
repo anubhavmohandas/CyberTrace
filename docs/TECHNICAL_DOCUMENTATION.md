@@ -6,9 +6,9 @@
 |-------|-------|
 | Version | 1.0.0 |
 | Status | IMPLEMENTED & FUNCTIONAL |
-| Lines of Code | ~3,000 |
+| Lines of Code | ~9,000 (tool) + ~1,700 (tests) |
 | Author | Anubhav Mohandas |
-| Last Updated | January 2026 |
+| Last Updated | August 2026 |
 
 ---
 
@@ -35,6 +35,13 @@
 13. [Troubleshooting](#13-troubleshooting)
 14. [Development Guide](#14-development-guide)
 15. [Future Roadmap](#15-future-roadmap)
+16. [Operator Attribution Pipeline](#16-operator-attribution-pipeline)
+    - 16.1 [Evidence Model](#161-evidence-model)
+    - 16.2 [What Makes a Candidate](#162-what-makes-a-candidate)
+    - 16.3 [Guards Against False Attribution](#163-guards-against-false-attribution)
+    - 16.4 [Monitoring](#164-monitoring)
+    - 16.5 [Evaluation Against Ground Truth](#165-evaluation-against-ground-truth)
+    - 16.6 [What the Scores Do Not Mean](#166-what-the-scores-do-not-mean)
 
 ---
 
@@ -1845,11 +1852,23 @@ pytest tests/test_detector.py -v
 
 #### Phase 4: Advanced Features
 
-- [ ] Direct Tor integration
-- [ ] Correlation engine (link analysis)
+- [x] Direct Tor integration — live `.onion` visit plus a bounded same-host crawl
+- [x] Correlation engine (link analysis) — see section 16
+- [x] Evidence graph with provenance (SQLite store, hashed snapshots)
+- [x] Standalone HTML case file and evidence graph (offline, no remote assets)
+- [x] Monitoring (`cybertrace watch`) with dark-site detection and candidate deltas
+- [x] Ground-truth corpus and evaluation harness (`tools/eval_corpus.py`)
 - [ ] PDF report generation
-- [ ] Web UI dashboard
 - [ ] API server mode
+
+#### Phase 5: Attribution science (next)
+
+- [ ] Calibrated confidence — the scores are ranked priors, not probabilities
+      (section 16.6). Needs a labelled corpus far larger than the current 17.
+- [ ] Stylometry / language profiling for sites with no shared artifacts
+- [ ] Exchange tagging and change-address heuristics on top of the co-spend
+      clusters, so a cluster can say "not an exchange" rather than "one wallet"
+- [ ] Browser-assisted collection for JS-rendered pages
 
 ### 15.2 Module Priority
 
@@ -1863,11 +1882,196 @@ pytest tests/test_detector.py -v
 
 ### 15.3 Known Limitations
 
-1. Phone module not implemented (Truecaller is anti-bot)
+1. Phone module is metadata only (Truecaller is anti-bot)
 2. Vahan requires captcha + OTP (manual workaround)
 3. Some social media platforms block scraping
 4. Breach data requires paid APIs for comprehensive results
-5. Direct Tor access not implemented (clearnet gateways only)
+5. Collection is HTML/request based — artifacts a site only reveals after
+   JavaScript runs are invisible to the crawler
+6. Monero validation is structural only: a well-formed address passes without a
+   checksum, and no transaction graph is built (see `normalize.norm_xmr`)
+7. Crypto clusters use common-input-ownership alone. An exchange's hot wallet
+   co-spending a deposit address will pull unrelated customers into one cluster
+8. Confidence scores are ranked priors, not calibrated probabilities (16.6)
+9. The evaluation corpus is 17 targets. It is large enough to catch systematic
+   failures — it has caught several — and far too small to state an accuracy
+   figure for the tool
+
+---
+
+## 16. OPERATOR ATTRIBUTION PIPELINE
+
+Everything in sections 1-15 answers "what can be found about this target". This
+section is the other half: given several dark web targets, **which of them are
+run by the same people, and what evidence supports saying so**.
+
+```
+       ANY .onion
+           │
+           ▼
+   ┌───────────────┐   live visit over Tor + bounded same-host crawl
+   │  COLLECTION   │   (8 pages, depth 2, wall-clock budget)
+   └───────┬───────┘   per page: sha256 + DOM simhash + artifacts
+           ▼
+   ┌───────────────┐   PGP fingerprint, BTC base58check/bech32, XMR structure,
+   │ NORMALIZATION │   email shape, onion v3, ASN, domain
+   └───────┬───────┘   NO NORMALIZED VALUE -> NO ENTITY -> NO EDGE
+           ▼
+   ┌───────────────┐   targets, snapshots (site + per page), entities,
+   │ EVIDENCE STORE│   observations, relationships, evidence, findings
+   └───────┬───────┘   every claim walks back to a hashed snapshot
+           ▼
+   ┌───────────────┐   IP -> ASN/provider/class · email -> keyserver keys,
+   │  ENRICHMENT   │   handles · BTC -> co-spend cluster edges
+   └───────┬───────┘
+           ▼
+   ┌───────────────┐   commonness (IDF) × relationship context × funnel prior
+   │  CORRELATION  │   clone guard · contradictions · successor vs link
+   └───────┬───────┘
+           ▼
+   ┌───────────────┐   ranked candidates, evidence chain, timeline,
+   │   CASE FILE   │   objections, next steps, limitations
+   └───────────────┘
+```
+
+```bash
+cybertrace search "<onion>" --save runs/raw/market-a.json
+cybertrace correlate runs/raw/*.json --db case.db --html graph.html --dossier case.html
+cybertrace watch --db case.db --discover          # later: what changed
+python tools/eval_corpus.py runs/raw/*.json       # score against ground truth
+```
+
+### 16.1 Evidence Model
+
+`cybertrace/evidence.py`. Six tables carry the chain, and the chain is the
+product:
+
+```
+relationship -> evidence -> observation -> snapshot(sha256) -> target
+```
+
+Two properties are load-bearing:
+
+**Provenance.** Every relationship resolves through evidence to the exact
+observations behind it, each to a hashed, timestamped capture. Page-level
+snapshots (`target_onion:page:/contact`) mean an artifact is anchored to the
+page it was read off, so "this key left /contact" is provable, not anecdotal.
+
+**Identity before correlation.** Entities are unique on
+`(etype, normalized_value)` and normalization runs at write time. A value that
+fails validation is not an entity, so two markets quoting the same malformed
+string can never correlate into a shared "operator".
+
+Relationship directions worth stating once, because reading them backwards
+inverts an attribution:
+
+| Edge | Means |
+|------|-------|
+| `USES_PGP` | market -> key the page displayed |
+| `SIGNS_WITH` | market -> key that signed something on the page (control) |
+| `SIGNED_BY` | signer key -> key it certified (from packets in the key block) |
+| `LINKS_TO` | market -> onion the page links to |
+| `DISCOVERED_VIA` | market -> onion an INDEX returned beside it (provenance only) |
+| `PART_OF_CLUSTER` | address -> address co-spent in one transaction |
+| `SUCCESSOR_OF` | market -> market that replaced it (needs directional evidence) |
+| `LINKED_TO` | market -> market joined by controlled artifacts, order unknown |
+
+### 16.2 What Makes a Candidate
+
+`cybertrace/correlate.py`. A candidate's score is a noisy-OR over five
+independent funnels — contact, PGP reuse, crypto, cross-platform, clearnet — so
+three mediocre convergent signals outrank one loud one. Each funnel's
+contribution is scaled by two multipliers that decide most real cases:
+
+**Commonness (`entity_discrimination`).** Inverse document frequency over
+targets. An artifact on 2 of 17 sites is nearly unique; one on 9 is furniture —
+a platform's documentation mailbox, a keyserver's key. This is what separates a
+software family from an operator, and it replaces the reflex of maintaining a
+stoplist: commonness is measured from the corpus in front of it, so a new
+platform's boilerplate is discounted the first time it appears widely. Corpora
+under three targets skip the scaling entirely, because with two markets "on
+both" is the signal.
+
+**Relationship context (`CONTEXT_WEIGHT`).** Sharing something you *control* is
+evidence; sharing something you *link to* is not. A referenced clearnet host
+counts at 0.15, an index co-ranking at 0.0, a published key or address at 1.0.
+This was added after two unrelated sites scored 0.51 as a successor pair
+because both donation pages linked to `www.paypal.com` and `en.bitcoin.it`.
+
+Shared domains are additionally grouped by registrable domain before scoring:
+nine hosts under one organisation are one fact, and the noisy-OR assumes
+independent evidence.
+
+An OPERATOR candidate additionally requires **two or more markets**. A strong
+key on one site is evidence about that site; promoting it to an operator claim
+asserts a link that no second observation supports.
+
+### 16.3 Guards Against False Attribution
+
+Each of these exists because the absence of it produced a wrong answer on real
+data:
+
+| Guard | Prevents |
+|-------|----------|
+| Clone guard (`detect_clones`) | "Same PGP key" reading as same operator when a copycat republished the victim's key. Weighs temporal precedence and page similarity, and now DOM structure, which a clone cannot rewrite away |
+| PGP role | A displayed key scoring like a key the site actually signed with |
+| Handoff needs darkness | Sequential collection faking takedown-and-relaunch. A gap between captures is our schedule; a handoff needs the predecessor observed dark |
+| Temporal overlap | Succession claimed between markets that were live at once; the link survives as `LINKED_TO`, the direction does not |
+| Timing is never sufficient | Two markets sharing nothing but a schedule cannot become a hypothesis |
+| Index provenance | A search engine co-ranking two onions reading as one linking to the other |
+| Contradiction rules | Attribution presented without its competing explanation. Four rules: cloning, identity bound to uncertified keys, shared platform, temporal overlap. A contradicted candidate can never be reported HIGH |
+
+### 16.4 Monitoring
+
+`cybertrace watch --db case.db` re-visits every target in a case, chains each
+capture to the previous one for that page, and reports CHANGED / UNCHANGED /
+DARK / BACK_UP, then re-correlates and diffs the candidate table. A site that
+stops answering is recorded as a hashed DOWN snapshot — that record is what
+later lets a relaunch read as a successor instead of as an unrelated market.
+`--discover` additionally lists directory services not yet in the case.
+
+Failure to reach Tor is never recorded as a site being dark. That distinction
+is deliberate: a local proxy outage would otherwise manufacture the takedown
+that a successor hypothesis then explains.
+
+### 16.5 Evaluation Against Ground Truth
+
+`corpus/labels.toml` labels each target with its operator and platform, citing
+a basis outside the tool's own output — the site's published mirror list, a
+PGP-verified directory, or infrastructure the site names itself. Pair labels
+are derived from those (same operator / same platform / unrelated), so adding a
+target relabels every pair it belongs to.
+
+`python tools/eval_corpus.py runs/raw/*.json --pairs` ingests the corpus, runs
+correlation and reports:
+
+- **operator precision / recall** on labeled pairs
+- **ecosystem leakage** — same-platform pairs called same-operator, the failure
+  the corpus exists to catch
+- **false attribution** — unrelated pairs called same-operator
+- **leads surfaced** — pairs ranked but not asserted
+- **unevaluable** — pairs where a target was dark, so the engine had nothing to
+  work with; counting those as misses would grade the engine on Tor's weather
+
+Exit code 1 if any same-platform or unrelated pair was called same-operator, so
+a change to the scoring model can be gated on it.
+
+### 16.6 What the Scores Do Not Mean
+
+A score of 0.91 does **not** mean a 91% probability that a person operates a
+market. The funnel weights and signal priors are hand-set domain judgements,
+and nothing in the system has been fitted to labelled outcomes. What a score
+supports is **ranking** — this candidate rests on more converging evidence than
+that one — and nothing further.
+
+Calibration would need a labelled corpus of known outcomes far larger than the
+one here. Until then the confidence levels (LOW / MEDIUM / HIGH) are the
+intended reading, HIGH is deliberately hard to reach, and a contradicted
+candidate is capped below it.
+
+Nothing in this pipeline identifies a person. It links sites to shared
+artifacts and shared artifacts to each other; every candidate ships with the
+limitations that say so.
 
 ---
 

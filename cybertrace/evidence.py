@@ -31,7 +31,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from .normalize import normalize
+from .normalize import normalize, simhash_similarity
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -153,8 +153,24 @@ RELATIONSHIP_TYPES = {
     "USES_CERT", "USES_NS", "USES_ANALYTICS", "CANDIDATE_IP", "LINKS_TO",
     "HAS_FINGERPRINT",
     "COPIES", "CROSS_SIGNS", "SIGNED_BY", "SIMILAR_TO", "SUCCESSOR_OF",
-    "LINKED_TO", "ASSOCIATED_WITH_IP",
+    "LINKED_TO", "ASSOCIATED_WITH_IP", "DISCOVERED_VIA",
 }
+
+# Directional conventions worth stating once, because reading them backwards
+# inverts an attribution:
+#
+#   SIGNED_BY       signer -> signed key. The source key's holder certified the
+#                   target key. Written from certification packets inside a
+#                   published key block (normalize.pgp_certifiers).
+#   SIGNS_WITH      market -> key, where the page carried a signature that key
+#                   issued. Distinct from USES_PGP (market -> key merely shown),
+#                   because only the signature needs the secret half.
+#   DISCOVERED_VIA  market -> onion that an INDEX returned beside it. NOT a link
+#                   the market published; it carries no funnel weight and exists
+#                   so "Torch ranked these together" stays distinguishable from
+#                   "this market links there".
+#   PART_OF_CLUSTER address -> address co-spent in one transaction (undirected in
+#                   meaning; correlate takes connected components).
 
 IP_CLASSES = {"INFRA_IP", "PERSONAL_IP", "VPN_IP", "EXCHANGE_IP", "UNKNOWN"}
 
@@ -251,12 +267,45 @@ _INDEX_SOURCES = {"ahmia", "torch", "dargle", "intelx", "onion_directories",
                   "paste_sites", "ransomwhat", "onion_lookup"}
 
 
+# Collectors that actually visit the site, so their failure says something about
+# the site rather than about an index.
+_SITE_COLLECTORS = {"target_onion", "operator_pivot", "watch"}
+
+
+def _site_was_down(error: Optional[str]) -> bool:
+    """True when a failed visit is evidence about the SITE, not about us.
+
+    The collector deliberately separates the two errors, and the difference is
+    load-bearing here: 'Tor is not running' says our proxy is off and implies
+    nothing about the target, while recording it as a down site would let a
+    local misconfiguration manufacture the takedown that a successor hypothesis
+    then explains.
+    """
+    text = (error or "").lower()
+    return "unreachable" in text and "tor is not running" not in text
+
+
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def _canon_json(payload: Any) -> str:
     return json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+
+
+# Fields that differ on every visit no matter what the site did. They stay in
+# the stored payload — clock skew is a real correlation signal — and are simply
+# not part of the question "did this page change".
+_VOLATILE_FIELDS = frozenset({"clock_skew_seconds"})
+
+
+def _stable(payload: Any) -> Any:
+    """A payload with per-visit noise removed, for change detection only."""
+    if isinstance(payload, dict):
+        return {k: _stable(v) for k, v in payload.items() if k not in _VOLATILE_FIELDS}
+    if isinstance(payload, list):
+        return [_stable(v) for v in payload]
+    return payload
 
 
 class EvidenceStore:
@@ -319,17 +368,36 @@ class EvidenceStore:
     def insert_snapshot(self, target_id: str, payload: Any, collector: str,
                         observed_at: Optional[str] = None,
                         raw_path: Optional[str] = None) -> str:
-        """Hash and store one capture, chained to the previous capture of the
-        same target. The chain is what makes a leak that appeared for one crawl
-        and vanished on the next provable rather than anecdotal."""
+        """Hash and store one capture, chained to the previous capture by the
+        same collector of the same target. The chain is what makes a leak that
+        appeared for one crawl and vanished on the next provable rather than
+        anecdotal.
+
+        Chained per collector, not merely per target: with page-level snapshots
+        (`<collector>:page:/contact`) a per-target chain would link /contact to
+        whichever page happened to be written before it, and `changed` would
+        then flip on every crawl regardless of whether that page moved.
+        """
         blob = _canon_json(payload)
         sha = hashlib.sha256(blob.encode()).hexdigest()
         prev = self._one(
-            "SELECT snapshot_id, sha256 FROM snapshots WHERE target_id=? "
-            "ORDER BY observed_at DESC, rowid DESC LIMIT 1", (target_id,))
+            "SELECT snapshot_id, sha256, payload FROM snapshots WHERE target_id=? "
+            "AND collector=? ORDER BY observed_at DESC, rowid DESC LIMIT 1",
+            (target_id, collector))
         diff = None
         if prev:
-            diff = _canon_json({"changed": prev["sha256"] != sha, "prev": prev["snapshot_id"]})
+            # The stored hash covers the whole payload, because that is what was
+            # collected and provenance must not be selective. `changed` is
+            # computed on a stripped copy: clock skew differs on every single
+            # visit, so hashing it would report every re-check as a change and
+            # bury the one that matters.
+            try:
+                before = _stable(json.loads(prev["payload"] or "{}"))
+            except json.JSONDecodeError:
+                before = None
+            diff = _canon_json({
+                "changed": before != _stable(payload),
+                "prev": prev["snapshot_id"]})
         sid = self._id("snap")
         self.conn.execute(
             "INSERT INTO snapshots (snapshot_id, target_id, observed_at, collector, "
@@ -345,10 +413,53 @@ class EvidenceStore:
         row = self._one("SELECT payload FROM snapshots WHERE snapshot_id=?", (snapshot_id,))
         return json.loads(row["payload"]) if row and row["payload"] else {}
 
-    def latest_snapshot(self, target_id: str) -> Optional[sqlite3.Row]:
+    # Page-level snapshots are written with this marker in the collector name so
+    # site-level queries can exclude them: a page record holds one page's hash
+    # and counts, not the artifact payload callers like the clone guard expect.
+    PAGE_COLLECTOR = ":page:"
+
+    def latest_snapshot(self, target_id: str, include_pages: bool = False,
+                        status: Optional[str] = "OK") -> Optional[sqlite3.Row]:
+        """Most recent capture of a target.
+
+        Successful captures only by default. A DOWN record's payload is an error
+        string, so handing it to anything that reads artifacts — the clone
+        guard's similarity, for one — silently compares a site against its own
+        outage and concludes the two markets look nothing alike.
+        """
         return self._one(
-            "SELECT * FROM snapshots WHERE target_id=? ORDER BY observed_at DESC, rowid DESC LIMIT 1",
-            (target_id,))
+            "SELECT * FROM snapshots WHERE target_id=? "
+            + ("" if include_pages else "AND collector NOT LIKE '%:page:%' ")
+            + ("AND status=? " if status else "")
+            + "ORDER BY observed_at DESC, rowid DESC LIMIT 1",
+            (target_id, status) if status else (target_id,))
+
+    def record_down(self, target_id: str, collector: str, note: str = "",
+                    observed_at: Optional[str] = None) -> str:
+        """Record that the site did not answer, and mark the target inactive.
+
+        Stored as a snapshot like any other capture, so 'this market was dark on
+        this date' carries the same provenance as 'this key was on this page' —
+        it is evidence a successor hypothesis stands on, not a log line.
+        """
+        sid = self.insert_snapshot(target_id, {"online": False, "error": note},
+                                   collector=collector, observed_at=observed_at)
+        self.conn.execute("UPDATE snapshots SET status='DOWN' WHERE snapshot_id=?", (sid,))
+        self.conn.execute("UPDATE targets SET active=0 WHERE target_id=?", (target_id,))
+        self.conn.commit()
+        return sid
+
+    def down_windows(self) -> Dict[str, str]:
+        """target_id -> earliest time the site was observed dark."""
+        return {r["target_id"]: r["first_down"] for r in self._all(
+            "SELECT target_id, MIN(observed_at) AS first_down FROM snapshots "
+            "WHERE status='DOWN' GROUP BY target_id")}
+
+    def page_snapshots(self, target_id: str) -> List[sqlite3.Row]:
+        """Every page-level capture of a target, newest first."""
+        return self._all(
+            "SELECT * FROM snapshots WHERE target_id=? AND collector LIKE '%:page:%' "
+            "ORDER BY observed_at DESC, rowid DESC", (target_id,))
 
     # --- entities ------------------------------------------------------------
 
@@ -562,7 +673,15 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
     snapshot_ids = []
     for name, src in (data.get("sources") or {}).items():
         if not src.get("success"):
-            continue                       # a failed fetch is not an observation
+            # A failed fetch is not an observation OF the site — but a site that
+            # answered nothing when we asked is a fact about the site, and it is
+            # the fact the successor logic turns on: without it, "A stopped and
+            # B started" is indistinguishable from "we looked at A first".
+            if name in _SITE_COLLECTORS and _site_was_down(src.get("error")):
+                snapshot_ids.append(store.record_down(
+                    target_id, collector=name, note=str(src.get("error") or "")[:300],
+                    observed_at=src.get("timestamp")))
+            continue
         payload = src.get("data") or {}
         observed_at = src.get("timestamp") or utcnow()
         sid = store.insert_snapshot(target_id, payload, collector=name,
@@ -577,13 +696,15 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
         # Where on the page each artifact was seen, when the collector recorded
         # it: a contact-block address is better evidence than one in a comment.
         seen_at = payload.get("artifact_evidence") or {}
+        # One snapshot per crawled page, so an observation resolves to the hash
+        # of the page it was actually read off rather than to the whole visit.
+        page_snaps = _ingest_pages(store, target_id, payload, name, observed_at)
 
         for key, (etype, rtype) in ARTIFACT_MAP.items():
             # An index returns what ranked beside the target, not what the target
             # links to. Everything else in its payload still counts: a paste that
             # names this market and an email is real evidence about it.
-            if key == "onion_addresses_found" and name in _INDEX_SOURCES:
-                continue
+            index_hit = key == "onion_addresses_found" and name in _INDEX_SOURCES
             for raw in payload.get(key) or []:
                 # The target's own address is already HAS_ADDRESS; re-adding it as
                 # a link would make every market cite itself as an associate.
@@ -591,8 +712,13 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
                         normalize(etype, str(raw)) == normalize(etype, target_url):
                     continue
                 where = seen_at.get(raw) or {}
-                _link(store, sid, market_id, etype, rtype, str(raw), name,
+                _link(store, page_snaps.get(where.get("page"), sid), market_id, etype,
+                      "DISCOVERED_VIA" if index_hit else rtype, str(raw), name,
                       section=where.get("section") or key,
+                      # An index co-ranking is provenance, not a claim about the
+                      # site, so it is recorded at a confidence that cannot on
+                      # its own carry an edge into a candidate.
+                      confidence=0.3 if index_hit else 0.7,
                       context=where.get("context"), observed_at=observed_at)
 
         # The server's own build signature. Declared in ENTITY_TYPES but never
@@ -609,9 +735,36 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
         # id never merges into a fingerprint's node.
         for key in payload.get("pgp_keys") or []:
             value = key.get("armored") or key.get("fingerprint") or key.get("key_id")
-            if value:
-                _link(store, sid, market_id, "PGP_KEY", "USES_PGP", str(value), name,
-                      section="pgp_keys", observed_at=observed_at)
+            if not value:
+                continue
+            # Role decides the edge type, and the edge type is what stops a
+            # copied key reading like control of a key: SIGNS_WITH means the page
+            # carried a signature this key issued, USES_PGP only that it showed
+            # the block. Cloning reproduces the second and not the first.
+            role = key.get("role") or "displayed"
+            key_id = _link(store, sid, market_id, "PGP_KEY",
+                           "SIGNS_WITH" if role == "signing" else "USES_PGP",
+                           str(value), name, section=f"pgp_keys:{role}",
+                           confidence=0.85 if role == "signing" else 0.7,
+                           observed_at=observed_at)
+            if key_id:
+                store.set_metadata(key_id, role=role)
+            # occam: 20 certifiers per key. A keyring-signed key can carry
+            # hundreds, and past the first few they are web-of-trust background
+            # rather than evidence about this operator. Raise it if a real case
+            # turns on a certifier deep in the list.
+            for certifier in (key.get("certifiers") or [])[:20]:
+                cert_id = store.upsert_entity("PGP_KEY", str(certifier),
+                                              observed_at=observed_at)
+                if not (cert_id and key_id) or cert_id == key_id:
+                    continue
+                obs = store.insert_observation(
+                    sid, cert_id, method=f"{name}:pgp_certification", section="pgp_keys",
+                    context=f"certified {value}", confidence=0.9, observed_at=observed_at)
+                rel = store.upsert_relationship(cert_id, key_id, "SIGNED_BY",
+                                                source_label=name, observed_at=observed_at)
+                store.add_evidence(
+                    rel, [obs], note="third-party certification inside the published key")
 
         for match in ((payload.get("favicon") or {}).get("shodan_matches") or []):
             ip_id = _link(store, sid, market_id, "IP", "CANDIDATE_IP", str(match.get("ip") or ""),
@@ -647,6 +800,27 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
                 snapshot_ids.append(sub)
 
     return snapshot_ids
+
+
+def _ingest_pages(store: EvidenceStore, target_id: str, payload: dict, collector: str,
+                  observed_at: str) -> Dict[str, str]:
+    """One snapshot per crawled page. Returns {path: snapshot_id}.
+
+    Page-level lineage is what makes a claim reproducible at the granularity it
+    was made: "this key was on /contact at this hash" survives the operator
+    editing the landing page, while a single site-level snapshot only shows that
+    *something* changed. Each page also chains to its own previous capture (see
+    insert_snapshot), so a page-level diff is a real before/after.
+    """
+    out: Dict[str, str] = {}
+    for page in payload.get("pages") or []:
+        path = str(page.get("path") or page.get("url") or "")
+        if not path or path in out:
+            continue
+        out[path] = store.insert_snapshot(
+            target_id, page, collector=f"{collector}{EvidenceStore.PAGE_COLLECTOR}{path}",
+            observed_at=observed_at)
+    return out
 
 
 def _result_time(data: dict) -> Optional[str]:
@@ -717,11 +891,53 @@ def enrich_email(store: EvidenceStore, snapshot_id: str, email_id: str, summary:
               collector, section="github", confidence=0.75, observed_at=observed_at)
 
 
+def enrich_bitcoin(store: EvidenceStore, snapshot_id: str, addr_id: str, summary: dict,
+                   collector: str, observed_at: Optional[str] = None) -> None:
+    """Attach a bitcoin module summary to a BTC address already in the store.
+
+    Only co-spend addresses become cluster edges. Under common-input-ownership,
+    signing two addresses into one transaction's inputs proves the same party
+    held both keys — that is a control relation. Being *paid* by an address
+    proves only a transaction happened, so counterparties stay metadata: merging
+    them would put every customer of a market inside the operator's wallet and
+    then hand correlation a cluster shared by every market with a customer in
+    common. Components are assembled at correlation time, so a cluster grows as
+    evidence arrives instead of being frozen at first sight.
+
+    occam: no exchange tagging or change-address heuristics — both need a
+    labelled dataset this tool does not ship. The cluster therefore claims "one
+    wallet", never "not an exchange"; correlate carries that caveat.
+    """
+    store.set_metadata(
+        addr_id,
+        **{k: v for k, v in (("balance", summary.get("balance")),
+                             ("tx_count", summary.get("tx_count")),
+                             ("first_tx", summary.get("first_seen")),
+                             ("last_tx", summary.get("last_seen")),
+                             ("reported_scam", summary.get("reported_scam"))) if v})
+
+    row = store._one("SELECT etype FROM entities WHERE entity_id=?", (addr_id,))
+    etype = row["etype"] if row else "BTC_ADDRESS"
+    for peer in (summary.get("cospend_addresses") or [])[:20]:
+        peer_id = store.upsert_entity(etype, str(peer), observed_at=observed_at)
+        if not peer_id or peer_id == addr_id:
+            continue
+        obs = store.insert_observation(
+            snapshot_id, peer_id, method=f"{collector}:cospend", section="blockchain",
+            context=f"co-spent with {summary.get('address') or ''} in one transaction",
+            confidence=0.85, observed_at=observed_at)
+        rel = store.upsert_relationship(addr_id, peer_id, "PART_OF_CLUSTER",
+                                        source_label=collector, observed_at=observed_at)
+        store.add_evidence(rel, [obs], note="common-input-ownership heuristic")
+
+
 # Which pivot/module target types have an enrichment router, and the entity each
 # one anchors to. Adding a module here is what makes its output evidence.
 _ENRICHERS = {
-    "ip":    ("IP", enrich_ip),
-    "email": ("EMAIL", enrich_email),
+    "ip":       ("IP", enrich_ip),
+    "email":    ("EMAIL", enrich_email),
+    "bitcoin":  ("BTC_ADDRESS", enrich_bitcoin),
+    "ethereum": ("ETH_ADDRESS", enrich_bitcoin),
 }
 
 
@@ -773,13 +989,36 @@ def _link(store: EvidenceStore, snapshot_id: str, source_entity: Optional[str],
 
 # --- clone guard -------------------------------------------------------------
 
+def structural_similarity(a: dict, b: dict) -> Optional[float]:
+    """Template likeness of two captures from their per-page DOM simhashes.
+
+    Compares each page of A against its best match in B, then averages: a clone
+    copies the whole site, so its pages match one-to-one even when paths differ,
+    while a site that merely shares one framework page does not.
+
+    None when either capture predates per-page fingerprints — the caller then
+    falls back to the artifact bag rather than reading a missing field as 0.0
+    and quietly declaring two identical sites dissimilar.
+    """
+    def hashes(d: dict) -> list:
+        return [p["dom_simhash"] for p in (d.get("pages") or []) if p.get("dom_simhash")]
+
+    ha, hb = hashes(a), hashes(b)
+    if not ha or not hb:
+        return None
+    best = [max(simhash_similarity(x, y) for y in hb) for x in ha]
+    return round(sum(best) / len(best), 4)
+
+
 def page_similarity(a: dict, b: dict) -> float:
     """How alike two captures look, from the payloads actually collected.
 
-    occam: Jaccard over artifact values plus a title match — the collector does
-    not retain raw HTML, so real DOM/layout similarity is not computable yet.
-    Upgrade path: hash the DOM structure at collection time and compare that,
-    which is both cheaper and harder for a clone to evade than text diffing.
+    Structure first, artifacts second. Two markets sharing a key look identical
+    to the artifact bag whether one copied the other or the same operator built
+    both; the DOM fingerprint is what separates "copied this site" from "reused
+    this key", and it survives the copycat rewriting every word on the page.
+    The artifact bag remains the fallback for captures collected before
+    fingerprints existed.
     """
     def bag(d: dict) -> set:
         out = set()
@@ -792,7 +1031,15 @@ def page_similarity(a: dict, b: dict) -> float:
     sa, sb = bag(a), bag(b)
     jaccard = len(sa & sb) / len(sa | sb) if (sa or sb) else 0.0
     title_match = bool(a.get("title")) and a.get("title") == b.get("title")
-    return min(1.0, jaccard + (0.2 if title_match else 0.0))
+    artifact_score = min(1.0, jaccard + (0.2 if title_match else 0.0))
+
+    structural = structural_similarity(a, b)
+    if structural is None:
+        return artifact_score
+    # Weighted toward structure without ignoring artifacts: a rebuilt successor
+    # keeps the keys and drops the template, a clone does the reverse, and the
+    # guard has to be able to see both.
+    return round(min(1.0, 0.65 * structural + 0.35 * artifact_score), 4)
 
 
 def detect_clones(store: EvidenceStore) -> List[dict]:
@@ -814,17 +1061,23 @@ def detect_clones(store: EvidenceStore) -> List[dict]:
     Both land as findings, so correlation must reckon with the contradiction
     before it can promote a shared key into an operator claim.
 
-    occam: role (SIGNS vs RECEIVES_FUNDS) would separate these far better than
-    similarity does, since a clone can copy a displayed key but not redirect
-    funds. Extract key role, then branch on it here.
+    Role is the second discriminator. A market that merely DISPLAYS a key proves
+    nothing a copycat could not also do; one that carried a signature the key
+    issued (SIGNS_WITH) demonstrated control of the secret half. So a signing
+    later market has to look almost pixel-identical before it is called a clone.
+
+    occam: a signature is control at *some* time, not necessarily now — the
+    collector does not check the signature's own timestamp against the capture,
+    so a copycat republishing an old signed announcement still reads as signing.
+    Compare the signature creation time to the crawl if that shows up in a case.
     """
     findings = []
     for shared in store.entities_sharing("PGP_KEY"):
         rows = store._all(
-            "SELECT r.rel_id, r.first_seen, e.normalized_value AS market "
+            "SELECT r.rel_id, r.first_seen, r.rtype, e.normalized_value AS market "
             "FROM relationships r JOIN entities e ON e.entity_id = r.source_entity_id "
-            "WHERE r.target_entity_id=? AND r.rtype='USES_PGP' ORDER BY r.first_seen",
-            (shared["entity_id"],))
+            "WHERE r.target_entity_id=? AND r.rtype IN ('USES_PGP','SIGNS_WITH') "
+            "ORDER BY r.first_seen", (shared["entity_id"],))
         if len(rows) < 2:
             continue
         first = rows[0]
@@ -832,7 +1085,7 @@ def detect_clones(store: EvidenceStore) -> List[dict]:
             if later["first_seen"] <= first["first_seen"]:
                 continue                   # no precedence: cannot tell who copied whom
             sim = _similarity_between(store, first["market"], later["market"])
-            clone = sim >= 0.85
+            clone = sim >= (0.95 if later["rtype"] == "SIGNS_WITH" else 0.85)
             findings.append(_record_clone(store, first, later, shared, sim, clone))
     return findings
 

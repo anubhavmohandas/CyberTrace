@@ -22,26 +22,31 @@ contradiction against the candidates that relied on it instead.
 
 from __future__ import annotations
 
+import html
 import json
+import math
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Set
 
-from .evidence import EvidenceStore, detect_clones, utcnow
+from .evidence import _INDEX_SOURCES, EvidenceStore, detect_clones, utcnow
+from .normalize import _registrable
 
 # Which edges count as which funnel. Keyed on the relationship types `ingest()`
 # actually writes — a funnel keyed on a type nothing produces scores every
 # entity at zero while still looking like a working engine.
 FUNNELS: Dict[str, Set[str]] = {
     "f1_contact":   {"USES_EMAIL", "USES_USERNAME", "USES_TELEGRAM", "USES_PHONE"},
-    "f2_pgp_reuse": {"USES_PGP", "SIGNED_BY", "CROSS_SIGNS"},
+    "f2_pgp_reuse": {"USES_PGP", "SIGNS_WITH", "SIGNED_BY", "CROSS_SIGNS"},
     "f3_crypto":    {"USES_BTC", "USES_XMR", "USES_ETH", "PART_OF_CLUSTER"},
     "f4_cross_plat": {"ASSOCIATED_WITH"},
     "f5_clearnet":  {"HOSTED_ON", "CANDIDATE_IP", "RESOLVES_TO", "BELONGS_TO_ASN",
                      "OWNED_BY", "USES_CERT", "USES_NS", "USES_ANALYTICS", "MENTIONS"},
 }
+# DISCOVERED_VIA is in no funnel on purpose: an index co-ranking two onions is
+# provenance about how the address was found, never evidence about the site.
 
 # Relative prior per funnel: a reused key is worth more than a referenced host.
 FUNNEL_WEIGHT = {"f1_contact": 1.0, "f2_pgp_reuse": 1.3, "f3_crypto": 1.2,
@@ -74,12 +79,44 @@ SUCCESSOR_SIGNALS = {
 # market sharing artifacts with every real one and invent successor pairs.
 DERIVED_TARGET = "m5.correlate.local"
 
+SUCCESSOR_SIGNALS["shared_cluster"] = 1.0   # two wallets proven one by co-spend
+
 SHARED_ARTIFACTS = (
     ("shared_pgp_key", "PGP_KEY"), ("shared_btc", "BTC_ADDRESS"),
     ("shared_xmr", "XMR_ADDRESS"), ("shared_email", "EMAIL"),
     ("shared_ip", "IP"), ("shared_username", "USERNAME"),
     ("shared_analytics", "ANALYTICS_ID"), ("shared_domain", "DOMAIN"),
 )
+
+# Below this, an artifact is judged too common in the corpus to evidence shared
+# control — see entity_discrimination. Calibrated to sit just under an artifact
+# on 3 of 15 targets, which is where "several sites in one software family" and
+# "two sites one operator built" separate in practice.
+COMMON_ARTIFACT_FLOOR = 0.5
+
+# How much each relationship implies the market CONTROLS the thing, rather than
+# merely points at it. Sharing something you control is evidence; sharing
+# something you link to is not — every site on earth links to twitter.com, and
+# two of them doing so is not a connection between their operators.
+#
+# Measured, not assumed: before this existed, an Endchan mirror and a Riseup
+# onion scored 0.51 as a successor pair because both donation pages linked to
+# www.paypal.com and en.bitcoin.it. Commonness alone could not catch it — in a
+# 17-target corpus those two domains are genuinely uncommon. The relationship
+# type is what says the link means nothing.
+CONTEXT_WEIGHT = {
+    "MENTIONS": 0.15,          # a clearnet host the page references
+    "LINKS_TO": 0.2,           # an onion the page links to
+    "DISCOVERED_VIA": 0.0,     # an index co-ranking: provenance, never evidence
+    "CANDIDATE_IP": 0.6,       # favicon/Shodan pivot — a lead, not a fact
+}
+DEFAULT_CONTEXT = 1.0          # publishing a key, address or mailbox is control
+
+# Pairs scoring between this and min_score are reported as leads with no edge:
+# visible to an analyst, invisible to anything that reads the graph as fact.
+# A display floor, not a claim boundary — roughly "one moderate weak signal" —
+# so lowering it shows more leads and never turns anything into an assertion.
+LEAD_FLOOR = 0.10
 
 
 def _entity(store: EvidenceStore, entity_id: str):
@@ -128,6 +165,41 @@ def canonical_entity_key(store: EvidenceStore, entity_id: str) -> str:
     return hit["entity_id"] if hit else entity_id
 
 
+def entity_discrimination(store: EvidenceStore) -> Dict[str, float]:
+    """entity_id -> how much sharing it actually distinguishes, in (0, 1].
+
+    Inverse document frequency over targets. An artifact seen on one or two
+    sites in a corpus of fifteen is close to unique and is worth its full weight;
+    one seen on nine is furniture — a mail platform's own domain, a keyserver's
+    key, the software family's contact address — and weighting it the same is
+    exactly how "everyone in this ecosystem" becomes "one operator".
+
+    This replaces the stoplist reflex. A blocklist has to name every piece of
+    furniture in advance and goes stale; commonness is measured from the corpus
+    in front of it, so a new platform's boilerplate is discounted the first time
+    it shows up on enough sites. The two are complementary, not redundant:
+    normalize.py still refuses page furniture that must never become an entity
+    at all, while this decides what an entity's sharing is worth.
+
+    Returns 1.0 for everything when the corpus is too small to judge (< 3
+    targets): with two markets, "on both" is the signal, not a commonness
+    finding, and dividing it away would silence the only evidence there is.
+    """
+    n_targets = (store._one("SELECT COUNT(*) AS n FROM targets WHERE url != ?",
+                            (DERIVED_TARGET,)) or {"n": 0})["n"]
+    rows = store._all(
+        "SELECT o.entity_id, COUNT(DISTINCT s.target_id) AS df FROM observations o "
+        "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
+        "JOIN targets t ON t.target_id = s.target_id "
+        "WHERE t.url != ? GROUP BY o.entity_id", (DERIVED_TARGET,))
+    if n_targets < 3:
+        return {r["entity_id"]: 1.0 for r in rows}
+    scale = math.log(n_targets)
+    return {r["entity_id"]: round(
+        min(1.0, max(0.05, math.log(n_targets / max(1, r["df"])) / scale)), 4)
+        for r in rows}
+
+
 def username_aliases(store: EvidenceStore, min_sim: float = 0.82) -> List[dict]:
     """Near-duplicate handles across markets (casing, leet, typo-squats).
 
@@ -172,12 +244,17 @@ def _observation_confidence(store: EvidenceStore, obs_ids: List[str]) -> Dict[st
         f"WHERE observation_id IN ({marks})", tuple(obs_ids))}
 
 
-def entity_funnel_profile(store: EvidenceStore, entity_id: str) -> dict:
+def entity_funnel_profile(store: EvidenceStore, entity_id: str,
+                          discrimination: Optional[Dict[str, float]] = None) -> dict:
     """Per-funnel best confidence plus the observations backing it.
 
     Strength comes from the observation, not the edge: `_link()` writes edges
     without a weight, so scoring on `relationships.weight` would compare None to
     a float on real ingested data and rank nothing.
+
+    The whole profile is then scaled by how discriminating this entity is across
+    the corpus, so a platform's shared contact address cannot out-score an
+    operator's reused key merely by appearing everywhere.
     """
     rows = store._all(
         "SELECT r.rtype, r.weight, ev.observation_ids FROM relationships r "
@@ -198,6 +275,7 @@ def entity_funnel_profile(store: EvidenceStore, entity_id: str) -> dict:
             continue                        # HAS_ADDRESS etc: definitional, no signal
         confs = [conf_of[o] for o in obs_ids if o in conf_of]
         conf = max(confs) if confs else (weight if weight is not None else DEFAULT_CONF)
+        conf *= CONTEXT_WEIGHT.get(rtype, DEFAULT_CONTEXT)
         slot = funnels[funnel]
         slot["best_conf"] = max(slot["best_conf"], conf)
         slot["evidence_ids"] += obs_ids
@@ -205,9 +283,10 @@ def entity_funnel_profile(store: EvidenceStore, entity_id: str) -> dict:
 
     # noisy-OR: independent funnels compound, so convergent weak signals beat a
     # lone strong claim. Capped per funnel so nothing reaches certainty.
+    weight = 1.0 if discrimination is None else discrimination.get(entity_id, 1.0)
     residual = 1.0
     for name, slot in funnels.items():
-        residual *= 1.0 - min(0.99, slot["best_conf"] * FUNNEL_WEIGHT[name])
+        residual *= 1.0 - min(0.99, slot["best_conf"] * FUNNEL_WEIGHT[name] * weight)
         slot["rel_types"] = sorted(slot["rel_types"])   # keep the result JSON-clean
     active = {f: s for f, s in funnels.items() if s["best_conf"] > 0}
     return {
@@ -215,6 +294,7 @@ def entity_funnel_profile(store: EvidenceStore, entity_id: str) -> dict:
         "markets": markets_for_entity(store, entity_id),
         "total_conf": round(1.0 - residual, 4),
         "n_funnels": len(active),
+        "discrimination": round(weight, 4),
     }
 
 
@@ -224,11 +304,13 @@ def _candidate(store: EvidenceStore, role: str, row, profile: dict) -> dict:
         "value": row["normalized_value"], "score": profile["total_conf"],
         "n_funnels": profile["n_funnels"], "markets": profile["markets"],
         "n_markets": len(profile["markets"]), "funnels": profile["funnels"],
+        "discrimination": profile.get("discrimination", 1.0),
     }
 
 
 def candidate_operators(store: EvidenceStore, min_conf: float = 0.35,
-                        min_markets: int = 2) -> List[dict]:
+                        min_markets: int = 2,
+                        discrimination: Optional[Dict[str, float]] = None) -> List[dict]:
     """Ranked OPERATOR candidates: keys, emails, handles.
 
     Convergence across markets is what makes an artifact an attribution claim.
@@ -252,7 +334,7 @@ def candidate_operators(store: EvidenceStore, min_conf: float = 0.35,
         entity_id = row["entity_id"]
         if canon[entity_id] != entity_id:
             continue                        # alias: score belongs to the fingerprint
-        profile = entity_funnel_profile(store, entity_id)
+        profile = entity_funnel_profile(store, entity_id, discrimination)
         profile["markets"] = sorted({m for eid in folded[entity_id]
                                      for m in markets_for_entity(store, eid)})
         if profile["total_conf"] >= min_conf and len(profile["markets"]) >= min_markets:
@@ -260,33 +342,97 @@ def candidate_operators(store: EvidenceStore, min_conf: float = 0.35,
     return sorted(out, key=lambda c: (-c["score"], -c["n_funnels"]))
 
 
-def candidate_infra(store: EvidenceStore, min_markets: int = 2) -> List[dict]:
-    """Infrastructure shared by 2+ markets — the handoff points worth a warrant."""
+def candidate_infra(store: EvidenceStore, min_markets: int = 2,
+                    discrimination: Optional[Dict[str, float]] = None,
+                    min_conf: float = 0.35) -> List[dict]:
+    """Infrastructure shared by 2+ markets — the handoff points worth a warrant.
+
+    The score floor matters as much as the market floor. Two markets linking to
+    the same payment processor satisfies "shared by 2+ markets" and is not
+    infrastructure either of them runs; without the floor a dossier opens with a
+    page of LOW candidates named twitter.com and t.me, and the reader learns to
+    skim past the section where the real one will eventually appear.
+    """
     out = []
     for row in store._all(
             "SELECT entity_id, etype, normalized_value FROM entities WHERE etype IN "
             "('CERTIFICATE','NAMESERVER','ASN','HOSTING_PROVIDER','DOMAIN','ANALYTICS_ID')"):
-        profile = entity_funnel_profile(store, row["entity_id"])
-        if len(profile["markets"]) >= min_markets:
+        profile = entity_funnel_profile(store, row["entity_id"], discrimination)
+        if len(profile["markets"]) >= min_markets and profile["total_conf"] >= min_conf:
             out.append(_candidate(store, "INFRA", row, profile))
     return sorted(out, key=lambda c: (-c["score"], -c["n_markets"]))
 
 
-def candidate_ips(store: EvidenceStore, min_markets: int = 2) -> List[dict]:
+def candidate_ips(store: EvidenceStore, min_markets: int = 2,
+                  discrimination: Optional[Dict[str, float]] = None,
+                  min_conf: float = 0.35) -> List[dict]:
     """IPs converging across markets. ip_class is carried through from metadata
     because a VPN egress and an origin host warrant very different next steps."""
     out = []
     for row in store._all(
             "SELECT entity_id, etype, normalized_value, metadata FROM entities "
             "WHERE etype='IP'"):
-        profile = entity_funnel_profile(store, row["entity_id"])
-        if len(profile["markets"]) < min_markets:
+        profile = entity_funnel_profile(store, row["entity_id"], discrimination)
+        if len(profile["markets"]) < min_markets or profile["total_conf"] < min_conf:
             continue
         meta = json.loads(row["metadata"] or "{}")
         out.append(_candidate(store, "IP", row, profile) |
                    {"ip_class": meta.get("ip_class", "UNKNOWN"),
                     "asn": meta.get("asn"), "org": meta.get("org")})
     return sorted(out, key=lambda c: (-c["score"], -c["n_markets"]))
+
+
+# --- crypto clusters ---------------------------------------------------------
+
+def crypto_clusters(store: EvidenceStore) -> Dict[str, str]:
+    """address entity_id -> cluster label, over PART_OF_CLUSTER components.
+
+    Co-spend edges are pairwise; ownership is transitive, so the wallet is the
+    connected component. Computed at read time rather than stored as a
+    CRYPTO_CLUSTER node on purpose: a cluster is a *conclusion* that grows every
+    time another transaction is seen, and a persisted node would either freeze
+    at whatever was known first or need merge bookkeeping nothing else here
+    would use. The edges are the evidence; this is the view over them.
+
+    Label is the smallest member's value, so a component reads as a wallet an
+    analyst can look up rather than an opaque id.
+
+    occam: union by chain, no rank/compression — components here are handfuls of
+    addresses. Also no exchange filtering: a deposit address co-spent by an
+    exchange's hot wallet would pull unrelated customers into one component, so
+    every consumer of this must carry that caveat rather than treat a cluster as
+    proof of one operator.
+    """
+    parent: Dict[str, str] = {}
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for r in store._all(
+            "SELECT source_entity_id AS a, target_entity_id AS b FROM relationships "
+            "WHERE rtype='PART_OF_CLUSTER' AND status='ACTIVE'"):
+        ra, rb = find(r["a"]), find(r["b"])
+        if ra != rb:
+            parent[rb] = ra
+
+    members: Dict[str, List[str]] = defaultdict(list)
+    for node in list(parent):
+        members[find(node)].append(node)
+
+    values = {r["entity_id"]: r["normalized_value"] for r in store._all(
+        "SELECT entity_id, normalized_value FROM entities")} if parent else {}
+    out: Dict[str, str] = {}
+    for root, group in members.items():
+        if len(group) < 2:
+            continue
+        label = min(values.get(g, g) for g in group)
+        for node in group:
+            out[node] = f"cluster:{label}"
+    return out
 
 
 # --- successors --------------------------------------------------------------
@@ -305,15 +451,26 @@ def market_artifact_map(store: EvidenceStore) -> Dict[str, Dict[str, Set[str]]]:
 
 
 def market_windows(store: EvidenceStore) -> Dict[str, dict]:
-    """target_id -> url plus the first/last time anything was captured there."""
+    """target_id -> url plus the first/last time the site was seen LIVE.
+
+    Index snapshots are excluded. An index answering for a dead onion dates the
+    index, not the site, and these windows decide succession direction — read
+    off an index, a market that has been down for a year still looks live today
+    and every successor hypothesis about it inverts.
+    """
+    marks = ",".join("?" * len(_INDEX_SOURCES))
+    rows = store._all(
+        "SELECT t.target_id, t.url, MIN(s.observed_at) AS first_seen, "
+        "       MAX(s.observed_at) AS last_seen "
+        "FROM targets t JOIN snapshots s ON s.target_id = t.target_id "
+        f"WHERE t.url != ? AND s.collector NOT IN ({marks}) AND s.status='OK' "
+        "GROUP BY t.target_id", (DERIVED_TARGET, *sorted(_INDEX_SOURCES)))
+    down = store.down_windows()
     return {r["target_id"]: {
         "url": r["url"],
-        "first": _parse_ts(r["first_seen"]), "last": _parse_ts(r["last_seen"])}
-        for r in store._all(
-            "SELECT t.target_id, t.url, MIN(s.observed_at) AS first_seen, "
-            "       MAX(s.observed_at) AS last_seen "
-            "FROM targets t JOIN snapshots s ON s.target_id = t.target_id "
-            "WHERE t.url != ? GROUP BY t.target_id", (DERIVED_TARGET,))}
+        "first": _parse_ts(r["first_seen"]), "last": _parse_ts(r["last_seen"]),
+        "down_since": down.get(r["target_id"])}
+        for r in rows}
 
 
 def _candidate_pairs(artifacts: Dict[str, Dict[str, Set[str]]]) -> List[tuple]:
@@ -337,6 +494,34 @@ def _candidate_pairs(artifacts: Dict[str, Dict[str, Set[str]]]) -> List[tuple]:
     return sorted(pairs)
 
 
+def _domain_groups(store: EvidenceStore, entity_ids: Set[str]) -> List[List[str]]:
+    """Shared DOMAIN entities bucketed by registrable domain, longest first.
+
+    `_registrable` is normalize's own last-two-labels rule, reused rather than
+    re-derived so a host is grouped the same way it was stoplisted.
+    """
+    groups: Dict[str, List[str]] = defaultdict(list)
+    for entity_id in entity_ids:
+        row = _entity(store, entity_id)
+        if row:
+            groups[_registrable(row["normalized_value"])].append(entity_id)
+    return sorted((sorted(g) for g in groups.values()), key=len, reverse=True)
+
+
+def _edge_context(store: EvidenceStore, market_entity: Optional[str],
+                  entity_id: str) -> float:
+    """Strongest control implied by any edge joining this market to this thing."""
+    if not market_entity:
+        return DEFAULT_CONTEXT
+    rows = store._all(
+        "SELECT rtype FROM relationships WHERE status='ACTIVE' "
+        "AND ((source_entity_id=? AND target_entity_id=?) "
+        "  OR (source_entity_id=? AND target_entity_id=?))",
+        (market_entity, entity_id, entity_id, market_entity))
+    return max((CONTEXT_WEIGHT.get(r["rtype"], DEFAULT_CONTEXT) for r in rows),
+               default=DEFAULT_CONTEXT)
+
+
 def _observations_of(store: EvidenceStore, target_id: str, entity_id: str) -> List[str]:
     return [r["observation_id"] for r in store._all(
         "SELECT o.observation_id FROM observations o "
@@ -345,9 +530,20 @@ def _observations_of(store: EvidenceStore, target_id: str, entity_id: str) -> Li
 
 
 def _pair_signals(store: EvidenceStore, artifacts: dict, windows: dict,
-                  a_id: str, b_id: str) -> List[dict]:
-    """Every successor signal joining two markets, with its evidence."""
+                  a_id: str, b_id: str,
+                  discrimination: Optional[Dict[str, float]] = None,
+                  clusters: Optional[Dict[str, str]] = None) -> List[dict]:
+    """Every successor signal joining two markets, with its evidence.
+
+    Each shared artifact's weight is scaled by how discriminating that artifact
+    is across the corpus (see entity_discrimination). Three mail servers in one
+    software family share the family's contact address; two sites one operator
+    built share something only they have. Without the scaling those two look
+    identical here, which is precisely how an ecosystem becomes an "operator".
+    """
     a, b = artifacts[a_id], artifacts[b_id]
+    discrimination = discrimination or {}
+    clusters = clusters or {}
     signals = []
 
     # A key on A signing a key on B is the strongest directional evidence there
@@ -365,14 +561,59 @@ def _pair_signals(store: EvidenceStore, artifacts: dict, windows: dict,
                     "evidence": json.loads(r["observation_ids"] or "[]"),
                     "detail": "a key on A signed a key on B"})
 
+    market_a, market_b = _market_entity(store, a_id), _market_entity(store, b_id)
     for name, etype in SHARED_ARTIFACTS:
-        for entity_id in a.get(etype, set()) & b.get(etype, set()):
+        shared = a.get(etype, set()) & b.get(etype, set())
+        # Nine hosts under one organisation's domain are one fact, not nine.
+        # The noisy-OR below assumes independent evidence, so leaving them
+        # separate compounds a single co-reference into a near-certainty — the
+        # same arithmetic that would rank "both link to mail.example.com and
+        # lists.example.com" above a shared PGP key.
+        for entities in (_domain_groups(store, shared) if etype == "DOMAIN"
+                         else [[e] for e in shared]):
+            entity_id = entities[0]
             row = _entity(store, entity_id)
+            rarity = min(discrimination.get(e, 1.0) for e in entities)
+            # Weakest link: if either market only *references* the thing, the
+            # pair's shared use of it is a reference, whatever the other side did.
+            context = min(_edge_context(store, market_a, entity_id),
+                          _edge_context(store, market_b, entity_id))
+            if len(entities) > 1:
+                # A whole namespace in common is a stronger reference than one
+                # link — an operator's own hosts spread across subdomains, while
+                # a third-party service gets cited once or twice.
+                context = min(1.0, context * (2.0 if len(entities) > 2 else 1.5))
+            if context <= 0:
+                continue
+            label = row["normalized_value"][:48] + (
+                f" (+{len(entities) - 1} more under the same domain)"
+                if len(entities) > 1 else "")
             signals.append({
-                "signal": name, "weight": SUCCESSOR_SIGNALS[name], "direction": None,
-                "evidence": (_observations_of(store, a_id, entity_id)
-                             + _observations_of(store, b_id, entity_id)),
-                "detail": f"{etype} {row['normalized_value'][:48]} on both"})
+                "signal": name, "weight": SUCCESSOR_SIGNALS[name] * rarity * context,
+                "direction": None, "discrimination": round(rarity, 3),
+                "context": round(context, 3),
+                "evidence": [o for e in entities
+                             for o in (_observations_of(store, a_id, e)
+                                       + _observations_of(store, b_id, e))],
+                "detail": f"{etype} {label} on both"
+                          + ("" if rarity >= COMMON_ARTIFACT_FLOOR
+                             else f" (common across the corpus, weight x{rarity:.2f})")})
+
+    # Different addresses, one wallet: co-spend proves the same party signed for
+    # both, which is a financial link between the markets even though neither
+    # published the other's address.
+    if clusters:
+        for etype in ("BTC_ADDRESS", "XMR_ADDRESS", "ETH_ADDRESS"):
+            shared = a.get(etype, set()) & b.get(etype, set())
+            in_a = {clusters[e] for e in a.get(etype, set()) if e in clusters}
+            in_b = {clusters[e] for e in b.get(etype, set()) if e in clusters}
+            for label in (in_a & in_b):
+                if any(clusters.get(e) == label for e in shared):
+                    continue                # already scored as a shared address
+                signals.append({
+                    "signal": "shared_cluster", "weight": SUCCESSOR_SIGNALS["shared_cluster"],
+                    "direction": None, "evidence": [],
+                    "detail": f"addresses on both sides co-spend into {label}"})
 
     # Pairs arrive ordered by target_id, which is a hash — so which market is
     # older has to be decided here. Reading the gap in the arbitrary pair order
@@ -384,18 +625,37 @@ def _pair_signals(store: EvidenceStore, artifacts: dict, windows: dict,
                                    else (wb, wa, "b_to_a"))
         gap = newer["first"] - older["last"]
         if gap > timedelta(0):
-            if gap <= timedelta(days=90):
+            # A handoff needs the predecessor to have actually gone dark. A gap
+            # on its own only means we visited one site before the other, and
+            # scoring that is how a corpus collected alphabetically over an
+            # afternoon produces a chain of successor claims between unrelated
+            # markets — measured, not hypothetical: it produced eight.
+            #
+            # The window runs from the TAKEDOWN, not from our last crawl of the
+            # predecessor: a market last visited in January, seen dark in June
+            # and replaced in August is a two-month handoff, and measuring the
+            # seven months back to our own crawl would discard it.
+            dark = _parse_ts(older.get("down_since"))
+            since = newer["first"] - max(older["last"], dark) if dark else None
+            if since is not None and timedelta(0) < since <= timedelta(days=90):
                 signals.append({
                     "signal": "temporal_handoff",
                     "weight": SUCCESSOR_SIGNALS["temporal_handoff"],
                     "direction": direction, "evidence": [],
-                    "detail": (f"{newer['url']} first captured {gap.days}d after "
-                               f"{older['url']} went quiet")})
+                    "detail": (f"{newer['url']} first captured {since.days}d after "
+                               f"{older['url']} was observed dark on "
+                               f"{older['down_since'][:10]}")})
         else:
+            # Overlap argues AGAINST succession — a market does not succeed one
+            # that was still live — so it carries no score. It stays in the
+            # signal list because detect_successors turns it into a recorded
+            # objection: dropping it here would lose the fact that the pair was
+            # checked and failed the temporal test.
             signals.append({
-                "signal": "temporal_overlap", "weight": SUCCESSOR_SIGNALS["temporal_overlap"],
-                "direction": None, "evidence": [],
-                "detail": "capture windows overlap — both live at once"})
+                "signal": "temporal_overlap", "weight": 0.0,
+                "direction": None, "evidence": [], "contradicts": True,
+                "detail": "capture windows overlap — both live at once, so one "
+                          "cannot be the other's successor"})
     return signals
 
 
@@ -418,28 +678,56 @@ def _derived_snapshot(store: EvidenceStore, payload: Any) -> str:
 
 
 def detect_successors(store: EvidenceStore, min_score: float = 0.5,
-                      clone_pairs: Optional[Set[frozenset]] = None) -> List[dict]:
-    """Ranked successor hypotheses; writes SUCCESSOR_OF edges older -> newer.
+                      clone_pairs: Optional[Set[frozenset]] = None,
+                      discrimination: Optional[Dict[str, float]] = None) -> List[dict]:
+    """Ranked market-to-market hypotheses, each written as the edge its evidence
+    actually supports:
 
-    A pair the clone guard called CLONE_SUSPECT is refused an edge no matter how
+      SUCCESSOR_OF  B replaced A — needs a directional signal: a handoff after A
+                    was observed dark, or A's key certifying B's.
+      LINKED_TO     the two are joined by artifacts one party controls, with
+                    nothing saying which came first. Most real pairs land here,
+                    including two sites one operator runs at the same time.
+
+    A pair the clone guard called CLONE_SUSPECT gets no edge at all, however
     strongly it scores: every artifact it shares is explained by the later site
-    copying the earlier one, and promoting that to succession attributes a
+    copying the earlier one, and promoting that to a relationship attributes a
     clone's activity to its victim.
     """
     artifacts = market_artifact_map(store)
     windows = market_windows(store)
     clone_pairs = clone_pairs or set()
+    clusters = crypto_clusters(store)
     results = []
 
     for a_id, b_id in _candidate_pairs(artifacts):
-        signals = _pair_signals(store, artifacts, windows, a_id, b_id)
-        if not signals:
+        signals = _pair_signals(store, artifacts, windows, a_id, b_id,
+                                discrimination, clusters)
+        # Timing corroborates a successor claim; it never makes one. Two markets
+        # whose windows happen to line up share nothing that could evidence one
+        # operator, so without an artifact in common there is no hypothesis here
+        # to rank — only a coincidence of when we happened to look.
+        if not any(s["signal"] not in ("temporal_handoff", "temporal_overlap")
+                   for s in signals):
             continue
         residual = 1.0
         for s in signals:
             residual *= 1.0 - min(0.99, s["weight"])
         score = round(1.0 - residual, 4)
         if score < min_score:
+            # Too weak to assert, too specific to throw away. A pair joined only
+            # by references — both sites citing one organisation's hosts, say —
+            # is a lead an analyst should see and the graph should not claim.
+            # Reported without an edge, so nothing downstream can read it as a
+            # relationship the tool concluded.
+            if score >= LEAD_FLOOR:
+                results.append({
+                    "source_market": a_id, "target_market": b_id,
+                    "source_url": (windows.get(a_id) or {}).get("url"),
+                    "target_url": (windows.get(b_id) or {}).get("url"),
+                    "score": score, "suppressed": "BELOW_THRESHOLD", "relation": None,
+                    "signals": [s["signal"] for s in signals],
+                    "signals_detail": _signal_summary(signals), "evidence_ids": []})
             continue
 
         urls = frozenset({(windows.get(a_id) or {}).get("url"),
@@ -449,9 +737,12 @@ def detect_successors(store: EvidenceStore, min_score: float = 0.5,
                             "source_url": (windows.get(a_id) or {}).get("url"),
                             "target_url": (windows.get(b_id) or {}).get("url"),
                             "score": score, "suppressed": "CLONE_SUSPECT",
+                            "relation": None,
                             "signals": [s["signal"] for s in signals],
+                            "signals_detail": _signal_summary(signals),
                             "evidence_ids": []})
             continue
+        overlap = any(s.get("contradicts") for s in signals)
 
         # Direction: an explicit directional signal wins; otherwise the market
         # seen first is the predecessor.
@@ -469,23 +760,43 @@ def detect_successors(store: EvidenceStore, min_score: float = 0.5,
         src_entity, dst_entity = _market_entity(store, src), _market_entity(store, dst)
         if not (src_entity and dst_entity):
             continue
+        # Succession is a claim about time: B replaced A. Without evidence of
+        # that — a handoff after the predecessor went dark, or the old key
+        # signing the new one — what the shared artifacts support is only that
+        # the two are linked. Calling that SUCCESSOR_OF would put a story the
+        # evidence does not tell into the graph, and a reader would carry it
+        # into a warrant application.
+        directional = any(s["signal"] in ("temporal_handoff", "signed_by")
+                          for s in signals)
+        relation = "SUCCESSOR_OF" if directional and not overlap else "LINKED_TO"
         snapshot = _derived_snapshot(store, {"pair": [src, dst], "score": score,
+                                             "relation": relation,
                                              "signals": [s["detail"] for s in signals]})
         obs = store.insert_observation(
-            snapshot, dst_entity, method="m5:successor", section="SUCCESSOR",
+            snapshot, dst_entity, method=f"m5:{relation.lower()}", section=relation,
             context="; ".join(s["detail"] for s in signals), confidence=score)
         evidence = list(dict.fromkeys(
             [o for s in signals for o in s["evidence"]] + [obs]))
-        rel = store.upsert_relationship(src_entity, dst_entity, "SUCCESSOR_OF",
+        rel = store.upsert_relationship(src_entity, dst_entity, relation,
                                         source_label="m5:correlate", weight=score)
-        store.add_evidence(rel, evidence, note=f"successor score {score}")
+        store.add_evidence(rel, evidence, note=f"{relation} score {score}")
         results.append({"source_market": src, "target_market": dst,
                         "source_url": (windows.get(src) or {}).get("url"),
                         "target_url": (windows.get(dst) or {}).get("url"),
                         "score": score, "suppressed": None, "rel_id": rel,
+                        "relation": relation,
                         "signals": [s["signal"] for s in signals],
+                        "signals_detail": _signal_summary(signals),
                         "evidence_ids": evidence})
     return sorted(results, key=lambda r: -r["score"])
+
+
+def _signal_summary(signals: List[dict]) -> List[dict]:
+    """Signals without their observation lists — what a reader needs to see why
+    a pair scored, small enough to keep in the result JSON and in a dossier."""
+    return [{"signal": s["signal"], "weight": round(s["weight"], 3),
+             "discrimination": s.get("discrimination"), "detail": s["detail"]}
+            for s in signals]
 
 
 # --- contradictions ----------------------------------------------------------
@@ -498,10 +809,7 @@ def contradictions_from_clones(store: EvidenceStore, clones: List[dict]) -> List
     control. Carried per-candidate so a dossier can never present the inference
     without the objection to it.
 
-    occam: derived entirely from the existing clone guard. The other rules worth
-    having — one identity bound to unrelated keys, one key claiming unrelated
-    handles — need identity-to-key edges (ASSOCIATED_WITH) that no collector
-    writes yet; add them here once a keyserver or forum collector produces them.
+    This is one of four rules; see `contradictions` for the rest.
     """
     flags = []
     for f in clones:
@@ -515,6 +823,133 @@ def contradictions_from_clones(store: EvidenceStore, clones: List[dict]) -> List
                        f"{f['similarity']:.2f}); shared artifacts do not evidence "
                        f"shared control")})
     return flags
+
+
+def contradictions_from_identity(store: EvidenceStore) -> List[dict]:
+    """One identity bound to keys that never certify each other.
+
+    A keyserver answering with two unrelated fingerprints for one address means
+    one of three things — the operator rotated keys, someone else uploaded a key
+    under that address, or the address is a shared role mailbox — and nothing in
+    the graph separates them. Attribution built on "this key is that person"
+    has to state that objection, because an uploaded key is the cheapest way to
+    frame someone in this whole model.
+    """
+    flags = []
+    rows = store._all(
+        "SELECT e.entity_id, e.normalized_value, r.target_entity_id AS key_id, "
+        "       k.normalized_value AS key_value "
+        "FROM entities e JOIN relationships r ON r.source_entity_id = e.entity_id "
+        "JOIN entities k ON k.entity_id = r.target_entity_id "
+        "WHERE e.etype='EMAIL' AND r.rtype='ASSOCIATED_WITH' AND k.etype='PGP_KEY' "
+        "AND r.status='ACTIVE'")
+    by_email: Dict[str, List[tuple]] = defaultdict(list)
+    for r in rows:
+        by_email[r["normalized_value"]].append((r["key_id"], r["key_value"],
+                                                r["entity_id"]))
+    for email, keys in by_email.items():
+        unique = {k[0]: k for k in keys}
+        if len(unique) < 2:
+            continue
+        ids = list(unique)
+        # Certified in either direction means one key vouches for the other, so
+        # the pair is a rotation rather than a conflict.
+        marks = ",".join("?" * len(ids))
+        linked = store._all(
+            f"SELECT 1 FROM relationships WHERE rtype IN ('SIGNED_BY','CROSS_SIGNS') "
+            f"AND source_entity_id IN ({marks}) AND target_entity_id IN ({marks})",
+            tuple(ids) * 2)
+        if linked:
+            continue
+        markets = sorted({m for eid in ids for m in markets_for_entity(store, eid)}
+                         | set(markets_for_entity(store, keys[0][2])))
+        values = sorted(v for _, v, _ in unique.values())
+        fid = store.add_finding(
+            "IDENTITY_KEY_CONFLICT",
+            f"{email} is bound to {len(values)} keys that do not certify each "
+            f"other: {', '.join(v[:24] for v in values)}",
+            severity="MEDIUM", confidence=0.5)
+        flags.append({
+            "rule": "identity_bound_to_uncertified_keys", "severity": "MEDIUM",
+            "markets": markets, "finding_id": fid, "identity": email, "keys": values,
+            "detail": (f"{email} answers to {len(values)} independent keys with no "
+                       f"certification between them — key control is unproven, and "
+                       f"a third party can publish a key under any address")})
+    return flags
+
+
+def contradictions_from_commonness(store: EvidenceStore,
+                                   discrimination: Dict[str, float]) -> List[dict]:
+    """Market pairs joined only by artifacts the whole corpus shares.
+
+    This is the OnionMail case, and the one the engine has to get right to be
+    worth anything: several servers of one mail platform legitimately share the
+    platform's domain, its documentation mailbox and its software banner. Those
+    are shared *ecosystem*, not shared control, and the difference is measurable
+    — every joining artifact is common across the corpus.
+
+    Stated as its own finding rather than derived from the successor list, and
+    that is the point: those pairs score too low to become hypotheses, so a rule
+    that only annotated proposed successors would stay silent exactly where the
+    reader needs to be told "these look related and here is why they are not".
+    """
+    artifacts = market_artifact_map(store)
+    urls = {r["target_id"]: r["url"] for r in
+            store._all("SELECT target_id, url FROM targets")}
+    etypes = [etype for _, etype in SHARED_ARTIFACTS]
+    flags = []
+    for a_id, b_id in _candidate_pairs(artifacts):
+        shared = [e for etype in etypes
+                  for e in artifacts[a_id].get(etype, set()) & artifacts[b_id].get(etype, set())]
+        if not shared:
+            continue
+        if any(discrimination.get(e, 1.0) >= COMMON_ARTIFACT_FLOOR for e in shared):
+            continue                       # something distinctive joins them
+        pair = [urls.get(a_id, a_id), urls.get(b_id, b_id)]
+        fid = store.add_finding(
+            "SHARED_PLATFORM",
+            f"{pair[0]} and {pair[1]} share only artifacts common across the corpus",
+            severity="MEDIUM", confidence=0.5)
+        flags.append({
+            "rule": "shared_platform_not_shared_control", "severity": "MEDIUM",
+            "markets": pair, "finding_id": fid, "shared": len(shared),
+            "detail": (f"all {len(shared)} artifact(s) joining these two are common "
+                       "across the corpus (software family, platform domain, role "
+                       "mailbox) — consistent with running the same software, not "
+                       "with one operator")})
+    return flags
+
+
+def contradictions_from_temporal(store: EvidenceStore, pairs: List[dict]) -> List[dict]:
+    """Linked markets that were live at the same time.
+
+    The link may well be real — one operator running two sites at once is
+    ordinary. What this rules out is the *succession* reading, which is the one
+    an analyst reaches for when two markets share a key, so it is recorded
+    rather than left to inference.
+    """
+    flags = []
+    for pair in pairs:
+        if "temporal_overlap" not in (pair.get("signals") or []):
+            continue
+        urls = [pair.get("source_url"), pair.get("target_url")]
+        fid = store.add_finding(
+            "TEMPORAL_OVERLAP",
+            f"{urls[0]} and {urls[1]} were captured live in overlapping windows",
+            severity="LOW", confidence=0.4)
+        flags.append({
+            "rule": "overlap_contradicts_succession", "severity": "LOW",
+            "markets": [u for u in urls if u], "finding_id": fid,
+            "detail": ("both sites were live at once, so their shared artifacts "
+                       "cannot mean one replaced the other — read this as parallel "
+                       "operations or a shared supplier, recorded as LINKED_TO")})
+    return flags
+
+
+# The four rules are called separately by run_correlation rather than through a
+# wrapper: the clone rule has to run BEFORE successors (its verdicts suppress
+# them) and the commonness and temporal rules can only run after, since they
+# object to pairs succession actually proposed.
 
 
 # --- dossiers ----------------------------------------------------------------
@@ -538,16 +973,40 @@ def evidence_chain(store: EvidenceStore, observation_ids) -> List[dict]:
     return sorted(out, key=lambda e: -e["confidence"])
 
 
-def confidence_level(role: str, score: float, n_signal: int) -> str:
+def confidence_level(role: str, score: float, n_signal: int,
+                     contradicted: bool = False) -> str:
     """Deliberately hard to reach HIGH: one funnel is never enough, whatever it
-    scores, because a single artifact type is exactly what a clone can copy."""
+    scores, because a single artifact type is exactly what a clone can copy.
+
+    A candidate with a standing contradiction cannot be HIGH at all. The
+    objection is not a footnote to a strong conclusion — it is a competing
+    explanation for the same evidence, and a reader who skims only the label
+    must not be told HIGH while the body says a clone may explain it.
+    """
     if role == "OPERATOR":
-        if score >= 0.90 and n_signal >= 2:
-            return "HIGH"
-        return "MEDIUM" if score >= 0.60 else "LOW"
-    if score >= 0.70 and n_signal >= 3:
-        return "HIGH"
-    return "MEDIUM" if score >= 0.50 and n_signal >= 2 else "LOW"
+        level = "HIGH" if score >= 0.90 and n_signal >= 2 else (
+            "MEDIUM" if score >= 0.60 else "LOW")
+    else:
+        level = "HIGH" if score >= 0.70 and n_signal >= 3 else (
+            "MEDIUM" if score >= 0.50 and n_signal >= 2 else "LOW")
+    return "MEDIUM" if contradicted and level == "HIGH" else level
+
+
+def entity_timeline(store: EvidenceStore, entity_id: str, limit: int = 40) -> List[dict]:
+    """When this entity was seen, where, and against which snapshot hash.
+
+    Attribution arguments are temporal — a key that appears on B only after A
+    goes quiet says something different from one live on both at once — and the
+    ordering is already in the store. This is the read that puts it in front of
+    the analyst instead of leaving it implicit in a score.
+    """
+    return [dict(r) for r in store._all(
+        "SELECT o.observed_at, o.section, o.extraction_method, o.confidence, "
+        "       s.sha256, t.url FROM observations o "
+        "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
+        "JOIN targets t ON t.target_id = s.target_id "
+        "WHERE o.entity_id=? AND t.url != ? ORDER BY o.observed_at LIMIT ?",
+        (entity_id, DERIVED_TARGET, limit))]
 
 
 def recommended_actions(role: str, etype: str, value: str, markets: List[str],
@@ -615,8 +1074,11 @@ def build_dossier(store: EvidenceStore, cand: dict, aliases: List[dict],
     return {
         "candidate_id": f"{prefix}-{cand['entity_id'][-8:]}",
         "role": cand["role"],
-        "confidence_level": confidence_level(cand["role"], cand["score"], n_signal),
+        "confidence_level": confidence_level(cand["role"], cand["score"], n_signal,
+                                             bool(relevant)),
         "score": cand["score"],
+        "discrimination": cand.get("discrimination", 1.0),
+        "timeline": entity_timeline(store, cand["entity_id"]),
         "entity": {"etype": cand["etype"], "value": cand["value"],
                    "entity_id": cand["entity_id"]},
         "markets": urls,
@@ -655,21 +1117,51 @@ def save_candidates(store: EvidenceStore, dossiers: List[dict]) -> None:
     store.conn.commit()
 
 
+def split_pairs(results: dict) -> tuple:
+    """(asserted, leads, refused) — the three things a pair result can be.
+
+    Reported apart because they call for different actions: an asserted edge is
+    a conclusion to check, a lead is something to look at, and a refused pair is
+    a conclusion the engine talked itself out of and should not be re-proposed
+    by whoever reads the brief.
+    """
+    asserted = [s for s in results.get("successors", []) if not s.get("suppressed")]
+    leads = [s for s in results.get("successors", [])
+             if s.get("suppressed") == "BELOW_THRESHOLD"]
+    refused = [s for s in results.get("successors", [])
+               if s.get("suppressed") and s.get("suppressed") != "BELOW_THRESHOLD"]
+    return asserted, leads, refused
+
+
 def render_markdown(dossiers: List[dict], results: dict) -> str:
+    asserted, leads, refused = split_pairs(results)
     lines = ["# CyberTrace — correlation brief", "", f"_generated {utcnow()}_", "",
              f"{len(dossiers)} candidates "
              f"(operator {len(results['operators'])}, infra {len(results['infra'])}, "
-             f"ip {len(results['ips'])}) · successors {len(results['successors'])} · "
+             f"ip {len(results['ips'])}) · market links {len(asserted)} · "
+             f"leads {len(leads)} · refused {len(refused)} · "
              f"clones {len(results['clones'])} · "
              f"contradictions {len(results['contradictions'])}", ""]
 
-    if results["successors"]:
-        lines += ["## Successor hypotheses", ""]
-        for s in results["successors"]:
-            note = f" — SUPPRESSED ({s['suppressed']})" if s["suppressed"] else ""
-            lines.append(f"- `{s['source_url'] or s['source_market']}` → "
+    if asserted or refused:
+        lines += ["## Market relationships", ""]
+        for s in asserted + refused:
+            note = f" — REFUSED ({s['suppressed']})" if s["suppressed"] else ""
+            lines.append(f"- [{s.get('relation') or 'none'}] "
+                         f"`{s['source_url'] or s['source_market']}` → "
                          f"`{s['target_url'] or s['target_market']}` "
                          f"score {s['score']:.3f} · {', '.join(s['signals'])}{note}")
+        lines.append("")
+
+    if leads:
+        lines += ["## Leads — ranked, not claimed", "",
+                  "_Below the assertion threshold: worth an analyst's eye, not "
+                  "written into the graph as a relationship._", ""]
+        for s in leads:
+            lines.append(f"- `{s['source_url'] or s['source_market']}` ~ "
+                         f"`{s['target_url'] or s['target_market']}` "
+                         f"score {s['score']:.3f} · "
+                         + "; ".join(d["detail"] for d in s.get("signals_detail", [])))
         lines.append("")
 
     if results["contradictions"]:
@@ -764,10 +1256,15 @@ def render_html(store: EvidenceStore, path: str,
     for src, dst, attrs in graph.edges(data=True):
         rtype = attrs.get("rtype")
         weight = attrs.get("weight")
-        inferred = rtype == "SUCCESSOR_OF"
+        # Both M5 conclusions are drawn as inferred, and differently from each
+        # other: an arrow for the directional claim, a plain line for the one
+        # that only says "these two are joined".
+        inferred = rtype in ("SUCCESSOR_OF", "LINKED_TO")
         net.add_edge(src, dst, width=5 if inferred else 1,
-                     color="#e67e22" if inferred else "#5a5a5a",
-                     label="SUCCESSOR_OF" if inferred else None,
+                     color="#e67e22" if rtype == "SUCCESSOR_OF" else
+                           "#3498db" if inferred else "#5a5a5a",
+                     label=rtype if inferred else None,
+                     arrows="" if rtype == "LINKED_TO" else None,
                      title=f"{rtype}\nfirst seen {attrs.get('first_seen')}"
                            + (f"\nscore {weight}" if inferred and weight else ""))
 
@@ -794,27 +1291,193 @@ def render_html(store: EvidenceStore, path: str,
     return path
 
 
+DOSSIER_CSS = """
+:root{color-scheme:dark;--bg:#15181c;--card:#1e2228;--line:#2c323a;--fg:#e6e8ea;
+--dim:#9aa3ad;--hi:#e67e22;--ok:#2ecc71;--warn:#f1c40f;--bad:#ff5c5c;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,
+BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:24px}
+h1{font-size:20px;margin:0 0 4px} h2{font-size:15px;margin:28px 0 10px;
+color:var(--hi);text-transform:uppercase;letter-spacing:.08em}
+.sub{color:var(--dim);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.stat b{display:block;font-size:22px} .stat span{color:var(--dim);font-size:12px}
+details{background:var(--card);border:1px solid var(--line);border-radius:8px;
+margin:8px 0;padding:10px 14px} summary{cursor:pointer;font-weight:600}
+summary::marker{color:var(--hi)}
+table{border-collapse:collapse;width:100%;margin:8px 0;font-size:13px;display:block;
+overflow-x:auto} th,td{text-align:left;padding:4px 10px 4px 0;
+border-bottom:1px solid var(--line);vertical-align:top;white-space:nowrap}
+td.wrap{white-space:normal}
+.tag{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11px;
+font-weight:700;letter-spacing:.04em}
+.HIGH{background:#5c1f1f;color:#ffb3b3} .MEDIUM{background:#5c4a1f;color:#ffe08a}
+.LOW{background:#25303a;color:#9fc4e0}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.dim{color:var(--dim)} .bad{color:var(--bad)} .ok{color:var(--ok)}
+ul{margin:6px 0 6px 18px;padding:0} li{margin:2px 0}
+.note{border-left:3px solid var(--bad);padding-left:10px;margin:6px 0}
+"""
+
+
+def _esc(value: Any) -> str:
+    return html.escape(str(value if value is not None else ""), quote=True)
+
+
+def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case file") -> str:
+    """Write the candidate dossiers to one standalone HTML case file.
+
+    Separate from the graph on purpose. The graph answers "what connects to
+    what"; this answers the question an investigator actually has to defend —
+    who is claimed, on what evidence, when it was seen, and what argues against
+    it. Contradictions sit above the candidates rather than inside them, because
+    a reader who stops after the first screen must still have met the objections.
+
+    occam: no JavaScript. `<details>` is a native disclosure widget, so the
+    dashboard-to-detail interaction costs zero script, works offline, and keeps
+    the file safe to open on an evidence machine.
+    """
+    d = results.get("dossiers", [])
+    live_successors, leads, _refused = split_pairs(results)
+    out = [f"<!doctype html><html lang=en><head><meta charset=utf-8>"
+           f"<meta name=viewport content='width=device-width,initial-scale=1'>"
+           f"<title>{_esc(title)}</title><style>{DOSSIER_CSS}</style></head><body>",
+           f"<h1>{_esc(title)}</h1>",
+           f"<div class=sub>generated {_esc(utcnow())} · scores are ranked priors, "
+           f"not calibrated probabilities</div>",
+           "<div class=grid>"]
+    for label, n in (("candidates", len(d)),
+                     ("operator", len(results.get("operators", []))),
+                     ("infra", len(results.get("infra", []))),
+                     ("ip", len(results.get("ips", []))),
+                     ("market links", len(live_successors)),
+                     ("leads", len(leads)),
+                     ("contradictions", len(results.get("contradictions", [])))):
+        out.append(f"<div class=stat><b>{n}</b><span>{label}</span></div>")
+    out.append("</div>")
+
+    if results.get("contradictions"):
+        out.append("<h2>Contradictions — read before the candidates</h2>")
+        for c in results["contradictions"]:
+            out.append(f"<div class=note><span class='tag {_esc(c['severity'])}'>"
+                       f"{_esc(c['severity'])}</span> <b>{_esc(c['rule'])}</b><br>"
+                       f"<span class=dim>{_esc(' ~ '.join(c['markets']))}</span><br>"
+                       f"{_esc(c['detail'])}</div>")
+
+    if live_successors:
+        out.append("<h2>Market relationships</h2><table><tr><th>relation</th>"
+                   "<th>from</th><th>to</th><th>score</th><th>signals</th></tr>")
+        for s in live_successors:
+            out.append(f"<tr><td>{_esc(s.get('relation'))}</td>"
+                       f"<td class=mono>{_esc(s.get('source_url'))}</td>"
+                       f"<td class=mono>{_esc(s.get('target_url'))}</td>"
+                       f"<td>{s['score']:.3f}</td>"
+                       f"<td class=wrap>{_esc(', '.join(s['signals']))}</td></tr>")
+        out.append("</table>")
+
+    if leads:
+        out.append("<h2>Leads — ranked, not claimed</h2>"
+                   "<p class=dim>Below the assertion threshold. Shown because an "
+                   "analyst should see them; not written into the graph, because "
+                   "the evidence does not support asserting a relationship.</p>"
+                   "<table><tr><th>a</th><th>b</th><th>score</th><th>why</th></tr>")
+        for s in leads:
+            out.append(f"<tr><td class=mono>{_esc(s.get('source_url'))}</td>"
+                       f"<td class=mono>{_esc(s.get('target_url'))}</td>"
+                       f"<td>{s['score']:.3f}</td><td class=wrap>"
+                       + _esc("; ".join(x["detail"] for x in s.get("signals_detail", [])))
+                       + "</td></tr>")
+        out.append("</table>")
+
+    out.append("<h2>Candidates</h2>")
+    if not d:
+        out.append("<p class=dim>No candidate cleared the evidence floor. With this "
+                   "corpus that is a result, not an empty run: nothing here converged "
+                   "across enough markets to support an attribution claim.</p>")
+    for c in d:
+        contra = c.get("contradictions") or []
+        out.append(
+            f"<details><summary>{_esc(c['candidate_id'])} · {_esc(c['role'])} · "
+            f"<span class='tag {_esc(c['confidence_level'])}'>{_esc(c['confidence_level'])}"
+            f"</span> · score {c['score']:.3f} · "
+            f"<span class=mono>{_esc(c['entity']['value'][:60])}</span>"
+            + (f" · <span class=bad>{len(contra)} contradiction(s)</span>" if contra else "")
+            + "</summary>")
+        out.append(f"<p class=dim>{_esc(c['entity']['etype'])} · seen on "
+                   f"{len(c['markets'])} market(s) · {c['evidence_count']} evidence "
+                   f"record(s) · discrimination {c.get('discrimination', 1.0)}</p>")
+        out.append("<ul>" + "".join(f"<li class=mono>{_esc(m)}</li>"
+                                    for m in c["markets"]) + "</ul>")
+        if contra:
+            out.append("".join(f"<div class=note>{_esc(x['detail'])}</div>" for x in contra))
+        if c.get("timeline"):
+            out.append("<b>Timeline</b><table><tr><th>observed</th><th>market</th>"
+                       "<th>section</th><th>snapshot</th></tr>")
+            for t in c["timeline"][:20]:
+                out.append(f"<tr><td class=mono>{_esc(t['observed_at'][:19])}</td>"
+                           f"<td class=mono>{_esc(t['url'][:28])}</td>"
+                           f"<td>{_esc(t['section'])}</td>"
+                           f"<td class=mono>{_esc(t['sha256'][:12])}</td></tr>")
+            out.append("</table>")
+        if c.get("key_evidence"):
+            out.append("<b>Evidence chain</b><table><tr><th>method</th><th>context</th>"
+                       "<th>conf</th><th>snapshot</th></tr>")
+            for e in c["key_evidence"][:8]:
+                out.append(f"<tr><td>{_esc(e['extraction_method'])}</td>"
+                           f"<td class=wrap>{_esc((e['context'] or '')[:160])}</td>"
+                           f"<td>{e['confidence']}</td>"
+                           f"<td class=mono>{_esc(e['sha256'][:12])}</td></tr>")
+            out.append("</table>")
+        for heading, key in (("Next steps", "recommended_actions"),
+                             ("Limitations", "limitations")):
+            if c.get(key):
+                out.append(f"<b>{heading}</b><ul>"
+                           + "".join(f"<li>{_esc(x)}</li>" for x in c[key]) + "</ul>")
+        out.append("</details>")
+
+    out.append("</body></html>")
+    with open(path, "w") as fh:
+        fh.write("\n".join(out))
+    return path
+
+
 def run_correlation(store: EvidenceStore, min_conf: float = 0.35,
                     min_infra_markets: int = 2,
                     min_successor_score: float = 0.5) -> dict:
     """Full M5 pass. Clone guard first: its verdicts constrain everything after."""
     clones = detect_clones(store)
-    contradictions = contradictions_from_clones(store, clones)
-    clone_pairs = {frozenset(c["markets"]) for c in contradictions}
+    clone_flags = contradictions_from_clones(store, clones)
+    clone_pairs = {frozenset(c["markets"]) for c in clone_flags}
+    # Measured once per pass and threaded through everything that scores: a
+    # second computation mid-pass could see different observation counts and
+    # rank two candidates on two different corpora.
+    discrimination = entity_discrimination(store)
     windows = market_windows(store)
     aliases = username_aliases(store)
 
+    successors = detect_successors(store, min_score=min_successor_score,
+                                   clone_pairs=clone_pairs,
+                                   discrimination=discrimination)
+    flags = (clone_flags
+             + contradictions_from_identity(store)
+             + contradictions_from_commonness(store, discrimination)
+             + contradictions_from_temporal(store, successors))
+
     results = {
-        "operators": candidate_operators(store, min_conf=min_conf),
-        "infra": candidate_infra(store, min_markets=min_infra_markets),
-        "ips": candidate_ips(store, min_markets=min_infra_markets),
+        "operators": candidate_operators(store, min_conf=min_conf,
+                                         discrimination=discrimination),
+        "infra": candidate_infra(store, min_markets=min_infra_markets,
+                                 discrimination=discrimination),
+        "ips": candidate_ips(store, min_markets=min_infra_markets,
+                             discrimination=discrimination),
         "aliases": aliases,
-        "successors": detect_successors(store, min_score=min_successor_score,
-                                        clone_pairs=clone_pairs),
+        "successors": successors,
         "clones": clones,
-        "contradictions": contradictions,
+        "clusters": sorted(set(crypto_clusters(store).values())),
+        "contradictions": flags,
     }
-    dossiers = [build_dossier(store, c, aliases, contradictions, windows)
+    dossiers = [build_dossier(store, c, aliases, flags, windows)
                 for c in results["operators"] + results["infra"] + results["ips"]]
     for rank, d in enumerate(dossiers, 1):
         d["rank"] = rank

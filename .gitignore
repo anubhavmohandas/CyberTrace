@@ -65,10 +65,11 @@ data/
 api_keys.py
 
 # OSINT output files. Scratch run output stays out of the repo.
-# evidence/ is the deliberate exception and IS tracked: the saved --save JSON
-# there is the corpus the extractor-precision audit measures against, so it has
-# to be versioned alongside the normalizers whose behaviour it pins down.
-# Everything in evidence/ is published — read a run before adding it.
+# evidence/ and runs/ are NOT tracked today — the negation below is deliberately
+# left off, so nothing scraped off a market gets published by an absent-minded
+# `git add .`. Flip it only after reading every run you are about to publish:
+# the saved --save JSON is the corpus the extractor-precision audit measures
+# against, so versioning it is the only way the numbers stay reproducible.
 output/
 outputs/
 results/
@@ -77,6 +78,15 @@ reports/
 *.json
 # !evidence/*.json
 *.report
+
+# Investigation runs. runs/raw holds saved `search --save` JSON, runs/corpora
+# holds the .db + .html a `correlate --db --html` writes. Both are regenerable
+# from the raw JSON, and the HTML is a ~700KB pyvis dump — keep it out of git.
+# runs/README.md is the tracked index: what each run is and why it was kept.
+# `runs/*` not `runs/` — git never descends into an excluded directory, so the
+# negation below only works if the contents are what is excluded.
+runs/*
+!runs/README.md
 
 # Sensitive files — extra safety net
 *.key

@@ -1,10 +1,28 @@
 # CyberTrace
 
-Multi-Layer OSINT Investigation Tool - Search across Surface Web, Deep Web, and Dark Web simultaneously.
+Multi-Layer OSINT Investigation Tool — search across Surface Web, Deep Web and
+Dark Web, then correlate what comes back into auditable operator attribution.
+
+Two things live here:
+
+1. **Investigation** — point it at an email, username, domain, wallet or
+   `.onion` and it sweeps the sources that cover that type.
+2. **Attribution** — fold several dark web investigations into one evidence
+   graph and rank who is behind which sites, with every claim walkable back to
+   a hashed capture and every objection to it stated alongside.
 
 ## Features
 
 - **Auto-detection** of input type (email, phone, username, domain, Bitcoin, Indian IDs)
+- **Live `.onion` collection over Tor** with a bounded same-host crawl, page
+  hashes and DOM fingerprints
+- **Evidence store with provenance** — SQLite; every relationship resolves to
+  the observations and hashed snapshots supporting it
+- **Correlation engine** — cross-market operator, infrastructure and IP
+  candidates, successor hypotheses, and the contradictions that constrain them
+- **Ground-truth evaluation** — a labeled corpus and a harness that scores the
+  engine on precision, recall and ecosystem leakage
+- **Monitoring** — re-check a case, detect sites going dark, diff the candidates
 - **95% reliability** for blockchain analysis (public data)
 - **90% reliability** for username enumeration (2500+ sites via Maigret)
 - **85% reliability** for domain intelligence (WHOIS, DNS, crt.sh)
@@ -57,6 +75,59 @@ cybertrace search "1A1zP1..." --save report.json
 cybertrace search "MH12AB1234" --output rich
 ```
 
+## Dark web operator attribution
+
+The part that answers "who runs these sites", rather than "what is on them".
+
+```bash
+# 1. Collect. Needs a running Tor SOCKS proxy (127.0.0.1:9050).
+cybertrace search "abcd...onion" --save runs/raw/market-a.json
+cybertrace search "efgh...onion" --save runs/raw/market-b.json
+
+# 2. Correlate into one evidence store, and render both views.
+cybertrace correlate runs/raw/*.json --db case.db --html graph.html --dossier case.html
+
+# 3. Come back later: what changed, what went dark, what moved.
+cybertrace watch --db case.db --discover --dossier case.html
+```
+
+`case.html` is the investigator view — candidates with their evidence chain,
+timeline, contradictions and next steps. `graph.html` is the entity graph.
+Both are standalone files with no remote assets, so opening one on an evidence
+machine announces nothing to anybody.
+
+What the engine will and will not say:
+
+- A shared PGP key is **not** treated as shared control on its own — a copycat
+  can republish a victim's key, so the clone guard weighs page structure and
+  temporal precedence first
+- A key the site actually **signed** with counts differently from one it merely
+  displayed
+- Artifacts common across the corpus (a mail platform's own domain, its
+  documentation mailbox) are discounted automatically — running the same
+  software is not being the same operator
+- Sharing something you *link to* is not evidence; sharing something you
+  *control* is
+- Succession requires the predecessor to have been **observed dark**; two sites
+  live at once get `LINKED_TO`, never `SUCCESSOR_OF`
+- Scores rank candidates. They are not probabilities — see
+  [section 16.6](docs/TECHNICAL_DOCUMENTATION.md#166-what-the-scores-do-not-mean)
+
+### Evaluating it
+
+`corpus/labels.toml` labels a live corpus with each target's operator and
+platform, each citing evidence outside the tool's own output. The harness
+scores the engine against it:
+
+```bash
+python tools/eval_corpus.py runs/raw/*.json --pairs
+```
+
+It reports operator precision and recall, **ecosystem leakage** (same-platform
+pairs wrongly called same-operator), false attribution, and the pairs it could
+not evaluate because a target was dark. It exits non-zero on any false
+attribution, so a change to the scoring model can be gated on it.
+
 ## Modules
 
 | Module | Success Rate | Description |
@@ -105,11 +176,17 @@ improves coverage.
 # Main search command
 cybertrace search TARGET [OPTIONS]
 
+# Attribution
+cybertrace correlate FILES... [--db case.db] [--html graph.html] [--dossier case.html]
+cybertrace watch --db case.db [--target ONION] [--discover] [--dossier case.html]
+
 # Shortcut commands
 cybertrace email EMAIL
 cybertrace username USERNAME
 cybertrace domain DOMAIN
 cybertrace btc ADDRESS
+cybertrace ip ADDRESS
+cybertrace phone NUMBER
 cybertrace indian TARGET
 
 # Configuration
@@ -156,12 +233,20 @@ See [docs/TECHNICAL_DOCUMENTATION.md](docs/TECHNICAL_DOCUMENTATION.md)
 ## Testing
 
 ```bash
-# Run test suite
-pytest tests/ -v
+# Unit + integration suite (offline; no network, no Tor)
+pytest tests/ -q
 
-# Quick test
-python -m cybertrace search "MH12AB1234" --output json
+# Extractor precision over saved runs: what validated, what was refused
+python tools/audit_corpus.py runs/raw/*.json --values
+
+# Correlation scored against the labeled corpus
+python tools/eval_corpus.py runs/raw/*.json --pairs
 ```
+
+The suite is offline by design — every correlation scenario is seeded through
+the same `ingest()` path a real crawl takes. It does not replace the corpus
+runs: tests prove the logic behaves, the corpus proves it behaves *on real
+sites*, and each has caught failures the other could not.
 
 ## License
 

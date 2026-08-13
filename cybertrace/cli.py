@@ -198,8 +198,10 @@ async def _run_search(module, target: str, **options):
               help='Correlate through a persistent evidence store (M5 engine)')
 @click.option('--html', 'html_path', type=click.Path(dir_okay=False),
               help='Also write the evidence graph to an interactive HTML file')
+@click.option('--dossier', 'dossier_path', type=click.Path(dir_okay=False),
+              help='Also write the candidate case file (evidence, timeline, objections)')
 def correlate(result_files, output_format: str, db_path: Optional[str],
-              html_path: Optional[str]):
+              html_path: Optional[str], dossier_path: Optional[str]):
     """
     Correlate saved investigation results across markets.
 
@@ -220,10 +222,11 @@ def correlate(result_files, output_format: str, db_path: Optional[str],
     """
     import json
 
-    if html_path and not db_path:
-        raise click.UsageError("--html needs --db: the graph is rendered from the store")
+    if (html_path or dossier_path) and not db_path:
+        raise click.UsageError(
+            "--html/--dossier need --db: both are rendered from the store")
     if db_path:
-        _correlate_store(result_files, output_format, db_path, html_path)
+        _correlate_store(result_files, output_format, db_path, html_path, dossier_path)
         return
 
     from .graph import EvidenceGraph, build_graph_from_dict, correlate as run_correlate
@@ -244,10 +247,11 @@ def correlate(result_files, output_format: str, db_path: Optional[str],
 
 
 def _correlate_store(result_files, output_format: str, db_path: str,
-                     html_path: Optional[str] = None) -> None:
+                     html_path: Optional[str] = None,
+                     dossier_path: Optional[str] = None) -> None:
     """Ingest saved results into the evidence store, then run the M5 engine."""
     import json
-    from .correlate import render_html, render_markdown, run_correlation
+    from .correlate import render_dossier_html, render_html, render_markdown, run_correlation
     from .evidence import EvidenceStore, ingest
 
     with EvidenceStore(db_path) as store:
@@ -267,6 +271,67 @@ def _correlate_store(result_files, output_format: str, db_path: str,
         if html_path:
             render_html(store, html_path, results)
             click.echo(f"\n[+] Evidence graph written to {html_path}", err=True)
+        if dossier_path:
+            render_dossier_html(results, dossier_path)
+            click.echo(f"[+] Case file written to {dossier_path}", err=True)
+
+
+@cli.command()
+@click.option('--db', 'db_path', required=True, type=click.Path(exists=True, dir_okay=False),
+              help='Evidence store to re-check')
+@click.option('--target', 'targets', multiple=True,
+              help='Only re-check these onions (default: every target in the store)')
+@click.option('--discover', is_flag=True,
+              help='Also list directory services not yet in the store')
+@click.option('--output', '-o', 'output_format', default='table',
+              type=click.Choice(['table', 'json']), help='Output format')
+@click.option('--dossier', 'dossier_path', type=click.Path(dir_okay=False),
+              help='Rewrite the case file after re-correlating')
+def watch(db_path: str, targets, discover: bool, output_format: str,
+          dossier_path: Optional[str]):
+    """
+    Re-visit every target in a case and report what changed.
+
+    Each target is fetched again, the capture is chained to the previous one, and
+    the result is re-correlated. A site that stops answering is recorded as dark
+    with its own hashed snapshot — that is what lets a later relaunch read as a
+    successor rather than as two unrelated markets.
+
+    \b
+      cybertrace watch --db case.db
+      cybertrace watch --db case.db --discover --dossier case.html
+    """
+    import json
+    from .evidence import EvidenceStore
+    from .monitor import run_watch
+
+    with EvidenceStore(db_path) as store:
+        report = run_watch(store, urls=list(targets) or None, discover=discover)
+
+        if output_format == 'json':
+            click.echo(json.dumps(report, indent=2, default=str))
+        else:
+            click.echo(f"\nRe-checked {len(report['checked'])} target(s) "
+                       f"at {report['checked_at']}\n")
+            for row in report['checked']:
+                colour = {'DARK': 'red', 'CHANGED': 'yellow',
+                          'BACK_UP': 'green'}.get(row['status'], None)
+                status = click.style(f"{row['status']:<9}", fg=colour)
+                detail = row.get('title') or row.get('error') or ''
+                click.echo(f"  {status} {row['url'][:56]}  {detail[:60]}")
+            for row in report.get('deltas', []):
+                click.echo(f"\n  [{row['change']}] {row['candidate_id']} "
+                           f"({row['confidence']}) {row['assessment']}")
+            if report.get('discovered'):
+                click.echo(f"\n  {len(report['discovered'])} directory service(s) "
+                           f"not in this case:")
+                for row in report['discovered'][:20]:
+                    click.echo(f"    {row['service'][:28]:<30} {row['onion']}")
+
+        if dossier_path:
+            from .correlate import render_dossier_html, run_correlation
+            render_dossier_html(run_correlation(store), dossier_path)
+            click.echo(f"\n[+] Case file rewritten: {dossier_path}", err=True)
 
 
 @cli.command('config')

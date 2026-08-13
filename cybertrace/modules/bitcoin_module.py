@@ -95,19 +95,32 @@ class BitcoinModule(BaseModule):
             parsed['first_seen'] = datetime.fromtimestamp(txs[-1].get('time', 0)).isoformat()
             parsed['last_seen'] = datetime.fromtimestamp(txs[0].get('time', 0)).isoformat()
             
-            # Extract connected addresses (first 10 transactions)
-            connected = set()
+            # Two different relations, deliberately kept apart.
+            #
+            # co-spend: addresses signed into the SAME transaction's inputs as
+            # this one. Spending them together needs both private keys, so under
+            # the common-input-ownership heuristic they are one wallet — this is
+            # the only relation here that evidences shared control, and it is
+            # what evidence.enrich_bitcoin turns into cluster edges.
+            #
+            # counterparty: everything else the transactions touched. Paying an
+            # address says nothing about who owns it, so merging the two (as one
+            # 'connected' bag) would cluster every customer of a market into the
+            # operator's wallet. `connected_addresses` stays for callers that
+            # only want "addresses seen nearby", now flagged as the weak set.
+            cospend, counterparty = set(), set()
             for tx in txs[:10]:
-                for inp in tx.get('inputs', []):
-                    prev = inp.get('prev_out', {})
-                    addr = prev.get('addr')
-                    if addr and addr != address:
-                        connected.add(addr)
-                for out in tx.get('out', []):
-                    addr = out.get('addr')
-                    if addr and addr != address:
-                        connected.add(addr)
-            parsed['connected_addresses'] = list(connected)[:20]
+                inputs = {inp.get('prev_out', {}).get('addr') for inp in tx.get('inputs', [])}
+                inputs.discard(None)
+                if address in inputs and len(inputs) > 1:
+                    cospend |= inputs - {address}
+                else:
+                    counterparty |= inputs - {address}
+                counterparty |= {o.get('addr') for o in tx.get('out', [])
+                                 if o.get('addr') and o.get('addr') != address}
+            parsed['cospend_addresses'] = sorted(cospend)[:20]
+            parsed['counterparty_addresses'] = sorted(counterparty - cospend)[:20]
+            parsed['connected_addresses'] = sorted(cospend | counterparty)[:20]
         
         return SourceResult(
             source='blockchain.com',
@@ -300,6 +313,11 @@ class BitcoinModule(BaseModule):
             'last_seen': None,
             'reported_scam': False,
             'connected_addresses': [],
+            # Same-wallet under common-input-ownership; see _check_blockchain_com.
+            # Carried in the summary because that is all the darkweb pivot hands
+            # back, and it is the half of `connected_addresses` that evidences
+            # shared control rather than a payment.
+            'cospend_addresses': [],
         }
         
         # Aggregate from sources
@@ -336,5 +354,7 @@ class BitcoinModule(BaseModule):
                 summary['connected_addresses'] = data['connected_addresses']
                 # Add to related for further investigation
                 result.related.extend(data['connected_addresses'][:5])
+            if data.get('cospend_addresses'):
+                summary['cospend_addresses'] = data['cospend_addresses']
         
         return summary

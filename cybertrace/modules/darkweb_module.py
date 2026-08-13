@@ -9,11 +9,13 @@ import re
 import time
 from datetime import datetime
 from email.utils import parsedate_to_datetime
+from html import unescape
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote_plus, unquote, urljoin, urlsplit, urlunsplit
 
 from ..normalize import (
-    norm_btc, norm_domain, norm_email, norm_eth, norm_onion, norm_pgp, norm_xmr,
+    dom_simhash, norm_btc, norm_domain, norm_email, norm_eth, norm_onion, norm_pgp,
+    norm_xmr, pgp_certifiers, pgp_signature_issuers,
 )
 from ..safety import scrub
 from .base import BaseModule, ModuleResult, SourceResult
@@ -235,8 +237,8 @@ class DarkwebModule(BaseModule):
         return sorted(values), evidence
 
     @staticmethod
-    def _extract_pgp_keys(html: str) -> List[Dict[str, str]]:
-        """Capture armored PGP public keys on the page and give each a stable id.
+    def _extract_pgp_keys(html: str) -> List[Dict[str, Any]]:
+        """Capture armored PGP public keys on the page, each with its role.
 
         The id is the true OpenPGP fingerprint (normalize.pgp_fingerprint parses
         the packets), which is what makes a shared key the strongest cross-market
@@ -244,23 +246,44 @@ class DarkwebModule(BaseModule):
         of the armor but never the fingerprint. Keyserver lookup of the
         operator's identities happens on the email pivot
         (email_module._check_pgp_keyservers).
+
+        Role is the part that survives cloning. "A key block is on the page" is
+        exactly what a copycat reproduces; a *signature* on the page issued by
+        that key is not, because it needs the secret half. So a key is recorded
+        as SIGNING when the page also carries a signature it issued, and
+        otherwise by where it was published (contact block, payment block, or
+        merely displayed). evidence.ingest turns SIGNING into a different edge
+        type, and the clone guard reads it before calling shared use shared
+        control.
         """
         # occam: keys the parser can't read (v3, truncated armor) fall back to a
         # payload hash — still stable for identical exports, just not re-export
         # proof. Upgrade: extend normalize._packets if v3 keys ever show up.
-        seen: Dict[str, Dict[str, str]] = {}
+        issuers = {i.upper() for i in pgp_signature_issuers(html)}
+        seen: Dict[str, Dict[str, Any]] = {}
         for m in DarkwebModule._RE_PGP.finditer(html):
             payload = re.sub(r'\s+', '', ''.join(
                 ln for ln in m.group(1).splitlines() if ':' not in ln
             ))
             if len(payload) < 64:  # too short to be a real key block
                 continue
-            fpr = norm_pgp(m.group(0))
+            block = m.group(0)
+            fpr = norm_pgp(block)
+            around = f"{html[max(0, m.start() - 160):m.start()]} {html[m.end():m.end() + 160]}"
+            section = next((n for n, rx in _SECTION_RULES if rx.search(around)), 'body')
             if fpr:
-                seen.setdefault(fpr, {'key_id': fpr, 'fingerprint': fpr.removeprefix('PGP:')})
+                bare = fpr.removeprefix('PGP:')
+                record: Dict[str, Any] = {'key_id': fpr, 'fingerprint': bare,
+                                          'certifiers': pgp_certifiers(block)}
+                signed = bool(issuers & {bare, bare[-16:]})
             else:
-                kid = hashlib.sha256(payload.encode()).hexdigest()[:16]
-                seen.setdefault(kid, {'key_id': kid})
+                record = {'key_id': hashlib.sha256(payload.encode()).hexdigest()[:16]}
+                signed = False
+            record['role'] = ('signing' if signed else
+                              {'wallet': 'payment', 'contact': 'contact',
+                               'pgp': 'displayed'}.get(section, 'displayed'))
+            record['section'] = section
+            seen.setdefault(record['key_id'], record)
         return list(seen.values())
 
     @staticmethod
@@ -521,6 +544,14 @@ class DarkwebModule(BaseModule):
                 'status': page_status,
                 'bytes': len(page_html),
                 'title': page_title.group(1).strip()[:120] if page_title else '',
+                # Forensic anchor per page, not per site: an artifact that
+                # appeared on /contact for one crawl and vanished on the next is
+                # provable against this hash alone. The raw HTML is not retained
+                # (it is hostile content), so the digest is what remains.
+                'sha256': hashlib.sha256(page_html.encode('utf-8', 'ignore')).hexdigest(),
+                # Template identity, independent of wording — see
+                # normalize.dom_simhash. This is what the clone guard compares.
+                'dom_simhash': dom_simhash(page_html),
                 'artifacts': {k: len(v) for k, v in found.items()
                               if k != 'artifact_evidence' and v},
             })
@@ -724,21 +755,32 @@ class DarkwebModule(BaseModule):
 
         services = {}
 
-        # Only trust anchor tags that link directly to a valid v3 onion
-        # address. The previous version also ran an unanchored proximity
-        # pattern (`([A-Za-z0-9\s]+)[\s\S]*?([a-z2-7]{56}\.onion)`) meant to
-        # catch "service name ... onion address" pairs outside <a> tags.
-        # Because `[\s\S]*?` matches across the whole document lazily, it
-        # regularly grabbed unrelated page text as the "name" — in practice
-        # this was seen capturing '<!DOCTYPE html>' itself as a service name.
-        # Anchor-tag extraction is the only reliable signal here.
-        pattern = r'<a[^>]+href="[^"]*?([a-z2-7]{56}\.onion)[^"]*"[^>]*>([^<]+)</a>'
-        matches = re.findall(pattern, html, re.IGNORECASE)
+        # dark.fail lists each service as a heading that links to its own
+        # verification page, with the addresses below it in <code> blocks:
+        #
+        #     <h4><a href="/riseup">Riseup</a></h4> ... <code>http://vww6...onion</code>
+        #
+        # The heading href is a relative path, never the onion, so the
+        # anchor-href pattern below matches nothing on this site — it returned
+        # zero services for every run until this was measured against the live
+        # page. Splitting on the headings and reading the addresses out of the
+        # section each one owns is what actually pairs a name to an address.
+        sections = re.split(r'<h4><a href="[^"]*">([^<]+)</a></h4>', html)
+        for i in range(1, len(sections) - 1, 2):
+            name = self._clean_scraped_name(unescape(sections[i]))
+            onions = re.findall(r'<code>[^<]*?([a-z2-7]{56}\.onion)', sections[i + 1])
+            if name and onions:
+                services[name] = onions[0]          # first is the primary address
 
-        for onion, name in matches:
-            clean_name = self._clean_scraped_name(name)
+        # Kept as the fallback for layouts that do link straight to the onion.
+        # Only anchor tags: an earlier unanchored proximity pattern matched
+        # across the whole document and captured '<!DOCTYPE html>' as a name.
+        for onion, name in re.findall(
+                r'<a[^>]+href="[^"]*?([a-z2-7]{56}\.onion)[^"]*"[^>]*>([^<]+)</a>',
+                html, re.IGNORECASE):
+            clean_name = self._clean_scraped_name(unescape(name))
             if clean_name:
-                services[clean_name] = onion
+                services.setdefault(clean_name, onion)
 
         return services
 

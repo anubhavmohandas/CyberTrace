@@ -324,6 +324,51 @@ class TestDarkwebCrawl:
             [b for f in found for b in f['bitcoin_addresses']]
 
 
+class TestDirectoryDiscovery:
+    """dark.fail pairs a heading with the addresses under it.
+
+    The parser is regression-tested against that real shape because the previous
+    one — anchor tags whose href IS the onion — matched nothing on the live page
+    and quietly returned zero services on every run, while the code above it
+    reported directory discovery as working.
+    """
+
+    PAGE = """
+    <h4><a href="/riseup">Riseup</a></h4>
+      <div class="online"><ul>
+        <li class="online status1"><code>http://vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.onion</code></li>
+      </ul></div>
+    <h4><a href="/proton">Protonmail &amp; more</a></h4>
+      <code>https://protonmailrmez3lotccipshtkleegetolb73fuirgj7r4o4vfu7ozyd.onion</code>
+    <h4><a href="/nothing">No Address Here</a></h4>
+      <p>offline</p>
+    """
+
+    def _parse(self, html):
+        import asyncio
+        module = DarkwebModule()
+
+        async def fake_fetch(url, **kwargs):
+            return html
+
+        module.fetch = fake_fetch
+        return asyncio.run(module._parse_dark_fail())
+
+    def test_headings_pair_with_the_addresses_below_them(self):
+        services = self._parse(self.PAGE)
+        assert services == {
+            'Riseup': 'vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.onion',
+            'Protonmail & more':
+                'protonmailrmez3lotccipshtkleegetolb73fuirgj7r4o4vfu7ozyd.onion',
+        }
+
+    def test_anchor_href_layout_still_works(self):
+        """The fallback: directories that do link straight at the onion."""
+        onion = 'a' * 56 + '.onion'
+        assert self._parse(f'<a href="http://{onion}/">Some Market</a>') == \
+            {'Some Market': onion}
+
+
 class TestIndianModule:
     """Test Indian module."""
 

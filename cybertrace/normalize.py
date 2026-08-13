@@ -137,11 +137,23 @@ def _packets(data: bytes) -> Iterator[tuple]:
         i += size
 
 
-def pgp_fingerprint(block: str) -> Optional[str]:
-    """True OpenPGP fingerprint of the primary public key, uppercase hex.
+def _key_fingerprint(body: bytes) -> Optional[str]:
+    """Fingerprint of one key packet body (primary or subkey), uppercase hex.
 
     RFC 4880 §12.2 (v4): SHA-1 over 0x99 || 2-octet body length || packet body.
     RFC 9580 §5.2.2 (v6): SHA-256 over 0x9b || 4-octet body length || body.
+    """
+    if not body:
+        return None
+    if body[0] == 4:
+        return hashlib.sha1(b"\x99" + len(body).to_bytes(2, "big") + body).hexdigest().upper()
+    if body[0] == 6:
+        return hashlib.sha256(b"\x9b" + len(body).to_bytes(4, "big") + body).hexdigest().upper()
+    return None                                       # v3 and earlier: not supported
+
+
+def pgp_fingerprint(block: str) -> Optional[str]:
+    """True OpenPGP fingerprint of the primary public key, uppercase hex.
 
     This is the identity the cross-market clone guard turns on, which is why it
     is a real fingerprint and not a hash of the armor: a clone re-exporting the
@@ -151,17 +163,141 @@ def pgp_fingerprint(block: str) -> Optional[str]:
     if not raw:
         return None
     for tag, body in _packets(raw):
-        if tag != 6 or not body:                      # 6 = public key packet
-            continue
-        version = body[0]
-        if version == 4:
-            head = b"\x99" + len(body).to_bytes(2, "big")
-            return hashlib.sha1(head + body).hexdigest().upper()
-        if version == 6:
-            head = b"\x9b" + len(body).to_bytes(4, "big")
-            return hashlib.sha256(head + body).hexdigest().upper()
-        return None                                   # v3 and earlier: not supported
+        if tag == 6:                                  # 6 = public key packet
+            return _key_fingerprint(body)
     return None
+
+
+# --- OpenPGP signatures ------------------------------------------------------
+#
+# A displayed key is the one thing a clone can copy perfectly, so "this market
+# shows key K" is the weakest possible PGP evidence. Who *signed* what is the
+# part a clone cannot fake: a third-party certification on a key, or a signed
+# announcement, both require the other key's secret half. These two parsers are
+# what let the graph tell those apart — see evidence.ARTIFACT_MAP consumers.
+
+# Signature types that assert something about an identity (RFC 4880 §5.2.1):
+# 0x10-0x13 certify a User ID, 0x1F is a direct key signature. Subkey bindings
+# (0x18) and revocations are deliberately excluded: a binding is self-made, so
+# it says nothing about a second party.
+_CERT_SIG_TYPES = frozenset({0x10, 0x11, 0x12, 0x13, 0x1F})
+
+_SUBPKT_ISSUER_KEYID = 16
+_SUBPKT_ISSUER_FPR = 33
+
+
+def _subpackets(data: bytes) -> Iterator[tuple]:
+    """Yield (type, body) for each signature subpacket. Stops at malformed."""
+    i = 0
+    while i < len(data):
+        first = data[i]
+        i += 1
+        if first < 192:
+            length = first
+        elif first < 255:
+            if i >= len(data):
+                return
+            length = ((first - 192) << 8) + data[i] + 192
+            i += 1
+        else:
+            length = int.from_bytes(data[i:i + 4], "big")
+            i += 4
+        if length < 1 or i + length > len(data):
+            return
+        yield data[i], data[i + 1:i + length]
+        i += length
+
+
+def _sig_issuer(body: bytes) -> Optional[tuple]:
+    """(sig_type, issuer) for one signature packet body.
+
+    Issuer is the 40/64-hex fingerprint when the signature carries one, else the
+    16-hex long key id. Preferring the fingerprint matters downstream: norm_pgp
+    keeps key ids in a weaker namespace, so a signature that names a fingerprint
+    resolves onto the same node as the key itself instead of an alias.
+    """
+    if len(body) < 6:
+        return None
+    version = body[0]
+    if version in (4, 5):
+        sig_type, count_width = body[1], 2
+    elif version == 6:
+        sig_type, count_width = body[1], 4
+    else:
+        return None                                   # v3: issuer is at a fixed offset,
+                                                      # and v3 keys are long dead
+    i = 4
+    issuer = None
+    for _ in range(2):                                # hashed, then unhashed area
+        if i + count_width > len(body):
+            break
+        size = int.from_bytes(body[i:i + count_width], "big")
+        i += count_width
+        area, i = body[i:i + size], i + size
+        for sub_type, sub_body in _subpackets(area):
+            if sub_type == _SUBPKT_ISSUER_FPR and len(sub_body) >= 21:
+                issuer = sub_body[1:].hex().upper()    # leading byte is key version
+            elif sub_type == _SUBPKT_ISSUER_KEYID and len(sub_body) == 8 and not issuer:
+                issuer = sub_body.hex().upper()
+    return (sig_type, issuer) if issuer else None
+
+
+def _armor_blocks(text: str, kind: str) -> Iterator[str]:
+    """Every `-----BEGIN PGP <kind>-----` … `-----END …` block in some text."""
+    return (m.group(0) for m in re.finditer(
+        rf"-----BEGIN PGP {kind}-----.*?-----END PGP {kind}-----", text, re.DOTALL))
+
+
+def pgp_certifiers(block: str) -> list:
+    """Keys that certified this public key, excluding its own self-signatures.
+
+    A third-party certification is the strongest successor signal the graph has:
+    the holder of the certifying key's secret half vouched for this one. Cloning
+    a displayed key copies these packets too, so the certification is evidence
+    about the *key*, never on its own about the site displaying it.
+    """
+    raw = _armor_payload(block)
+    if not raw:
+        return []
+    packets = list(_packets(raw))
+    own = set()
+    for tag, body in packets:
+        if tag in (6, 14):                            # public key, public subkey
+            fpr = _key_fingerprint(body)
+            if fpr:
+                own |= {fpr, fpr[-16:]}
+    out = []
+    for tag, body in packets:
+        if tag != 2:                                  # 2 = signature
+            continue
+        parsed = _sig_issuer(body)
+        if not parsed:
+            continue
+        sig_type, issuer = parsed
+        if sig_type in _CERT_SIG_TYPES and issuer not in own and issuer[-16:] not in own:
+            out.append(issuer)
+    return sorted(set(out))
+
+
+def pgp_signature_issuers(text: str) -> list:
+    """Issuers of every detached/clearsigned PGP SIGNATURE block in some text.
+
+    An operator who signs an announcement proves current control of the key.
+    That is the role a copied key cannot supply, which is why the collector
+    records it separately from "a key block was on the page".
+    """
+    out = []
+    for block in _armor_blocks(text, "SIGNATURE"):
+        raw = _armor_payload(block)
+        if not raw:
+            continue
+        for tag, body in _packets(raw):
+            if tag != 2:
+                continue
+            parsed = _sig_issuer(body)
+            if parsed and parsed[1]:
+                out.append(parsed[1])
+    return sorted(set(out))
 
 
 # --- public normalizers ------------------------------------------------------
@@ -399,6 +535,54 @@ def norm_asn(value: str) -> Optional[str]:
     m = re.fullmatch(r"(?:AS)?(\d{1,10})", value, re.I) or \
         re.match(r"AS(\d{1,10})\b", value, re.I)
     return f"AS{int(m.group(1))}" if m else None
+
+
+# --- page structure ----------------------------------------------------------
+
+_TAG_RE = re.compile(r"<\s*([a-zA-Z][a-zA-Z0-9]{0,14})\b", re.A)
+_CLASS_RE = re.compile(r'class\s*=\s*["\']([^"\']{1,200})["\']', re.I)
+_SHINGLE = 4
+
+
+def dom_simhash(html: str) -> Optional[str]:
+    """64-bit simhash of a page's structure, as 16 hex chars.
+
+    Built from tag-name shingles and class tokens — the template — never from
+    the prose. Two markets running one operator's copied build match here even
+    after every word on the page is rewritten, and two unrelated sites running
+    the same off-the-shelf software match too. That second case is the whole
+    reason this is a *similarity* input and not an identity: it feeds the clone
+    guard, which weighs it against temporal precedence, rather than minting an
+    entity that two independent sites would share.
+
+    occam: simhash over shingles, not a tree edit distance. One 64-bit number
+    per page, comparable with a popcount, no parser and no dependency. Upgrade
+    to real DOM ancestry only if template families stop separating.
+    """
+    tags = _TAG_RE.findall(html or "")
+    if len(tags) < _SHINGLE:
+        return None
+    tokens = ["|".join(t.lower() for t in tags[i:i + _SHINGLE])
+              for i in range(len(tags) - _SHINGLE + 1)]
+    tokens += [f"class:{c}" for attr in _CLASS_RE.findall(html or "")
+               for c in attr.lower().split()[:8]]
+    bits = [0] * 64
+    for token in tokens:
+        digest = int.from_bytes(hashlib.blake2b(token.encode(), digest_size=8).digest(), "big")
+        for b in range(64):
+            bits[b] += 1 if digest >> b & 1 else -1
+    return f"{sum(1 << b for b in range(64) if bits[b] > 0):016x}"
+
+
+def simhash_similarity(a: Optional[str], b: Optional[str]) -> float:
+    """1.0 identical structure, 0.0 nothing in common. None on either side -> 0."""
+    if not a or not b:
+        return 0.0
+    try:
+        distance = bin(int(a, 16) ^ int(b, 16)).count("1")
+    except ValueError:
+        return 0.0
+    return round(1.0 - distance / 64.0, 4)
 
 
 NORMALIZERS = {
