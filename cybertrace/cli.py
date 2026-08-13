@@ -187,7 +187,12 @@ async def _run_search(module, target: str, **options):
                 type=click.Path(exists=True, dir_okay=False))
 @click.option('--output', '-o', 'output_format', default='table',
               type=click.Choice(['table', 'json']), help='Output format')
-def correlate(result_files, output_format: str):
+@click.option('--db', 'db_path', type=click.Path(dir_okay=False),
+              help='Correlate through a persistent evidence store (M5 engine)')
+@click.option('--html', 'html_path', type=click.Path(dir_okay=False),
+              help='Also write the evidence graph to an interactive HTML file')
+def correlate(result_files, output_format: str, db_path: Optional[str],
+              html_path: Optional[str]):
     """
     Correlate saved investigation results across markets.
 
@@ -195,12 +200,25 @@ def correlate(result_files, output_format: str):
     graph. Artifacts (PGP key, crypto address, handle) reused across markets are
     surfaced as ranked operator candidates.
 
+    With --db the results are ingested into a persistent evidence store and run
+    through the full correlation engine: ranked dossiers with evidence chains,
+    successor hypotheses, and the clone findings that contradict them. The store
+    accumulates, so later runs correlate against everything ingested before.
+
     \b
       cybertrace search "a.onion" --save a.json
       cybertrace search "b.onion" --save b.json
       cybertrace correlate a.json b.json
+      cybertrace correlate a.json b.json --db case.db --html case.html
     """
     import json
+
+    if html_path and not db_path:
+        raise click.UsageError("--html needs --db: the graph is rendered from the store")
+    if db_path:
+        _correlate_store(result_files, output_format, db_path, html_path)
+        return
+
     from .graph import EvidenceGraph, build_graph_from_dict, correlate as run_correlate
 
     graph = EvidenceGraph()
@@ -216,6 +234,32 @@ def correlate(result_files, output_format: str):
         click.echo(json.dumps({'graph': graph.to_dict(), **corr}, indent=2, default=str))
     else:
         click.echo(format_operator_candidates(corr, graph))
+
+
+def _correlate_store(result_files, output_format: str, db_path: str,
+                     html_path: Optional[str] = None) -> None:
+    """Ingest saved results into the evidence store, then run the M5 engine."""
+    import json
+    from .correlate import render_html, render_markdown, run_correlation
+    from .evidence import EvidenceStore, ingest
+
+    with EvidenceStore(db_path) as store:
+        for path in result_files:
+            try:
+                with open(path) as fh:
+                    ingest(json.load(fh), store)
+            except (json.JSONDecodeError, OSError) as e:
+                click.echo(f"[!] Skipping {path}: {e}", err=True)
+
+        results = run_correlation(store)
+        if output_format == 'json':
+            click.echo(json.dumps(results, indent=2, default=str))
+        else:
+            click.echo(render_markdown(results['dossiers'], results))
+
+        if html_path:
+            render_html(store, html_path, results)
+            click.echo(f"\n[+] Evidence graph written to {html_path}", err=True)
 
 
 @cli.command('config')
