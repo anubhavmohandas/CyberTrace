@@ -9,7 +9,7 @@ import click
 from .config import config
 from .detector import detect_input_type, normalize_input
 from .modules import get_module, list_modules, TYPE_TO_MODULE
-from .output import print_result, save_result
+from .output import print_result, save_result, format_operator_candidates
 
 LOGO = r"""
    ██████╗██╗   ██╗██████╗ ███████╗██████╗ ████████╗██████╗  █████╗  ██████╗███████╗
@@ -20,6 +20,9 @@ LOGO = r"""
    ╚═════╝   ╚═╝   ╚═════╝ ╚══════╝╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝"""
 
 
+_banner_shown = False
+
+
 def show_banner() -> None:
     """
     Clear the screen and print the banner, giving each run a clean workspace.
@@ -28,14 +31,19 @@ def show_banner() -> None:
     file or through jq — the screen is left alone and nothing is drawn, and the
     banner is written to stderr regardless so it can never contaminate captured
     results.
+
+    Guarded against running twice: help output and the group callback can both
+    reach here in one invocation, and a second clear would wipe the first.
     """
-    if not sys.stdout.isatty():
+    global _banner_shown
+    if _banner_shown or not sys.stdout.isatty():
         return
     # -q/--quiet is defined on the subcommand, so Click hasn't parsed it yet at
     # group level; read argv directly rather than plumbing state through.
     if {'-q', '--quiet'}.intersection(sys.argv):
         return
 
+    _banner_shown = True
     click.clear()
     click.echo(click.style(LOGO, fg='cyan', bold=True), err=True)
     click.echo(click.style(
@@ -46,23 +54,59 @@ def show_banner() -> None:
         fg=214, bold=True), err=True)
 
 
-@click.group()
+class ColorFormatter(click.HelpFormatter):
+    """Help formatter that tints section headings and the name column."""
+
+    def write_heading(self, heading: str) -> None:
+        super().write_heading(click.style(heading, fg='cyan', bold=True))
+
+    def write_dl(self, rows, *args, **kwargs) -> None:
+        # Click measures these columns with term_len(), which strips ANSI first,
+        # so styling the names here does not break alignment.
+        super().write_dl(
+            [(click.style(name, fg=214, bold=True), help_) for name, help_ in rows],
+            *args, **kwargs,
+        )
+
+    def write_usage(self, prog: str, args: str = '', prefix=None) -> None:
+        super().write_usage(click.style(prog, fg='green', bold=True), args, prefix)
+
+
+class ColorContext(click.Context):
+    def make_formatter(self) -> ColorFormatter:
+        return ColorFormatter(width=self.terminal_width,
+                              max_width=self.max_content_width)
+
+
+class BannerGroup(click.Group):
+    """Group whose help output carries the banner and CyberTrace colours."""
+
+    context_class = ColorContext
+
+    def format_help(self, ctx, formatter) -> None:
+        # Bare `cybertrace` and `cybertrace --help` never reach the group
+        # callback — Click prints help and exits during parsing — so the banner
+        # has to be hooked here to appear at all.
+        show_banner()
+        super().format_help(ctx, formatter)
+
+
+@click.group(cls=BannerGroup)
 @click.version_option(version='1.0.0', prog_name='CyberTrace')
 def cli():
     """
     CyberTrace - Multi-Layer OSINT Investigation Tool
-    
+
     Search across Surface Web, Deep Web, and Dark Web simultaneously.
-    
+
     Examples:
-    
-        cybertrace search "user@example.com"
-        
-        cybertrace search "hackerman123" --type username
-        
-        cybertrace search "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa" --output json
-        
-        cybertrace search "example.com" --save report.json
+
+    \b
+      cybertrace search "user@example.com"
+      cybertrace search "hackerman123" --type username
+      cybertrace search "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa" --output json
+      cybertrace search "example.com" --save report.json
+      cybertrace username torvalds
     """
     show_banner()
 
@@ -136,6 +180,42 @@ async def _run_search(module, target: str, **options):
     """Run module search in async context."""
     async with module:
         return await module.search(target, **options)
+
+
+@cli.command()
+@click.argument('result_files', nargs=-1, required=True,
+                type=click.Path(exists=True, dir_okay=False))
+@click.option('--output', '-o', 'output_format', default='table',
+              type=click.Choice(['table', 'json']), help='Output format')
+def correlate(result_files, output_format: str):
+    """
+    Correlate saved investigation results across markets.
+
+    Investigate several onions with --save, then fold them into one evidence
+    graph. Artifacts (PGP key, crypto address, handle) reused across markets are
+    surfaced as ranked operator candidates.
+
+    \b
+      cybertrace search "a.onion" --save a.json
+      cybertrace search "b.onion" --save b.json
+      cybertrace correlate a.json b.json
+    """
+    import json
+    from .graph import EvidenceGraph, build_graph_from_dict, correlate as run_correlate
+
+    graph = EvidenceGraph()
+    for path in result_files:
+        try:
+            with open(path) as fh:
+                build_graph_from_dict(json.load(fh), graph)
+        except (json.JSONDecodeError, OSError) as e:
+            click.echo(f"[!] Skipping {path}: {e}", err=True)
+
+    corr = run_correlate(graph)
+    if output_format == 'json':
+        click.echo(json.dumps({'graph': graph.to_dict(), **corr}, indent=2, default=str))
+    else:
+        click.echo(format_operator_candidates(corr, graph))
 
 
 @cli.command('config')

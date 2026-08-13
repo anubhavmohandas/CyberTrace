@@ -4,7 +4,16 @@ import json
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+import click
+
 from .modules.base import ModuleResult
+
+# Shared palette, matching the CLI banner and setup scripts.
+RULE = dict(fg='cyan')
+HEADING = dict(fg='cyan', bold=True)
+LABEL = dict(dim=True)
+VALUE = dict(fg=214, bold=True)
+KEY = dict(fg='cyan')
 
 
 def format_json(result: ModuleResult, indent: int = 2) -> str:
@@ -45,8 +54,12 @@ def _format_operator_intel(intel: Dict[str, Any], width: int) -> list:
         if addrs:
             lines.append(f"  {coin.capitalize()}: {', '.join(addrs)}")
 
-    if intel.get('pgp_key_present'):
-        lines.append("  PGP key present on page: yes")
+    pgp = intel.get('pgp_keys') or []
+    if pgp:
+        # Bare fingerprint reads as a fingerprint; the PGP:-prefixed key_id is
+        # the graph's namespace, not something to show an analyst.
+        lines.append(
+            f"  PGP keys on page: {', '.join(k.get('fingerprint') or k['key_id'] for k in pgp)}")
 
     for m in intel.get('favicon_shodan') or []:
         lines.append(
@@ -84,23 +97,82 @@ def _format_pivots(pivots: list, width: int) -> list:
     return lines
 
 
-def format_table(result: ModuleResult) -> str:
-    """Format result as ASCII table."""
-    lines = []
-    
-    # Header
-    width = 70
-    lines.append("=" * width)
-    lines.append(f" CYBERTRACE RESULTS ".center(width, "="))
-    lines.append("=" * width)
-    lines.append("")
-    lines.append(f"  Target:     {result.target}")
-    lines.append(f"  Type:       {result.target_type}")
-    lines.append(f"  Module:     {result.module}")
-    lines.append(f"  Duration:   {result.duration:.2f}s")
-    lines.append(f"  Sources:    {result.success_count}/{result.total_count} successful")
+def _format_evidence_graph(graph: Dict[str, Any], width: int) -> list:
+    """Compact evidence-graph view: node/edge counts + the strong links."""
+    from collections import Counter
+    nodes, edges = graph.get('nodes', []), graph.get('edges', [])
+    types = Counter(n['type'] for n in nodes)
+    lines = [" EVIDENCE GRAPH ".center(width, "-"), "-" * width]
+    lines.append(f"  {len(nodes)} nodes, {len(edges)} edges")
+    lines.append(f"  Nodes: {', '.join(f'{t}x{cnt}' for t, cnt in types.most_common())}")
+    strong = [e for e in edges if e.get('confidence') in ('strong', 'very_strong')]
+    if strong:
+        lines.append(f"  Strong links ({len(strong)}):")
+        for e in strong[:12]:
+            prov = f" [{e['provenance']}]" if e.get('provenance') else ""
+            lines.append(f"      {e['from']} --{e['rel']}({e['confidence']})--> {e['to']}{prov}")
     lines.append("")
     lines.append("-" * width)
+    return lines
+
+
+def format_operator_candidates(corr: Dict[str, Any], graph=None) -> str:
+    """Render cross-market correlation output as ranked operator candidates."""
+    width = 70
+    cands = corr.get('operator_candidates', [])
+    lines = ["=" * width, " OPERATOR CANDIDATES (cross-market) ".center(width, "="), "=" * width, ""]
+    if graph is not None:
+        d = graph.to_dict()
+        lines.append(f"  Graph: {len(d['nodes'])} nodes, {len(d['edges'])} edges across markets")
+        lines.append("")
+    if not cands:
+        lines.append("  No cross-market operator links found (no shared artifacts).")
+        lines.append("=" * width)
+        return "\n".join(lines)
+    for i, cand in enumerate(cands, 1):
+        lines.append(f"  [{i}] confidence: {cand['confidence'].upper()}   markets: {len(cand['markets'])}")
+        lines.append(f"      {cand['note']}")
+        for m in cand['markets']:
+            lines.append(f"        - {m}")
+        lines.append("      shared artifacts:")
+        for a in cand['shared_artifacts'][:10]:
+            lines.append(f"        - {a['type']} {a['value']}  ({a['weight']}, {len(a['markets'])} markets)")
+        lines.append("")
+    lines.append("=" * width)
+    return "\n".join(lines)
+
+
+def format_table(result: ModuleResult, color: bool = False) -> str:
+    """
+    Format result as ASCII table.
+
+    Colour is opt-in and off by default: save_result writes this straight to
+    disk, where ANSI escapes would be noise. print_result turns it on, and
+    click.echo strips the codes again whenever stdout is redirected. Text is
+    always centred/padded before styling, since escape codes would otherwise
+    corrupt the width arithmetic.
+    """
+    def c(text: str, **style) -> str:
+        return click.style(text, **style) if color else text
+
+    lines = []
+
+    # Header
+    width = 70
+    lines.append(c("=" * width, **RULE))
+    lines.append(c(f" CYBERTRACE RESULTS ".center(width, "="), **HEADING))
+    lines.append(c("=" * width, **RULE))
+    lines.append("")
+    for label, value in (
+        ("Target:  ", result.target),
+        ("Type:    ", result.target_type),
+        ("Module:  ", result.module),
+        ("Duration:", f"{result.duration:.2f}s"),
+        ("Sources: ", f"{result.success_count}/{result.total_count} successful"),
+    ):
+        lines.append(f"  {c(label, **LABEL)}   {c(str(value), **VALUE)}")
+    lines.append("")
+    lines.append(c("-" * width, **RULE))
 
     # Operator intelligence — the headline for onion targets. Rendered up top
     # and fully expanded (the generic summary renderer only shows "N entries").
@@ -112,16 +184,23 @@ def format_table(result: ModuleResult) -> str:
     if pivots:
         lines.extend(_format_pivots(pivots, width))
 
+    graph = (result.summary or {}).get('evidence_graph')
+    if graph:
+        lines.extend(_format_evidence_graph(graph, width))
+
     # Source results
-    lines.append(" SOURCE RESULTS ".center(width, "-"))
-    lines.append("-" * width)
-    
+    lines.append(c(" SOURCE RESULTS ".center(width, "-"), **HEADING))
+    lines.append(c("-" * width, **RULE))
+
     for source_name, source_result in result.sources.items():
-        status = "✓" if source_result.success else "✗"
-        lines.append(f"  [{status}] {source_name}")
-        
+        if source_result.success:
+            status = c("[✓]", fg='green', bold=True)
+        else:
+            status = c("[✗]", fg='red', bold=True)
+        lines.append(f"  {status} {c(source_name, **VALUE)}")
+
         if source_result.error:
-            lines.append(f"      Error: {source_result.error}")
+            lines.append(f"      {c('Error:', fg='red', bold=True)} {c(source_result.error, fg='red')}")
         elif source_result.data:
             # Show key findings — truncate before str() conversion to avoid
             # building large string representations of nested objects
@@ -133,15 +212,15 @@ def format_table(result: ModuleResult) -> str:
                         str_val = str(value)
                         if len(str_val) > 50:
                             str_val = str_val[:47] + "..."
-                    lines.append(f"      {key}: {str_val}")
+                    lines.append(f"      {c(f'{key}:', **KEY)} {str_val}")
         lines.append("")
-    
-    lines.append("-" * width)
-    
+
+    lines.append(c("-" * width, **RULE))
+
     # Summary
-    lines.append(" SUMMARY ".center(width, "-"))
-    lines.append("-" * width)
-    
+    lines.append(c(" SUMMARY ".center(width, "-"), **HEADING))
+    lines.append(c("-" * width, **RULE))
+
     if result.summary:
         for key, value in result.summary.items():
             if value is not None:
@@ -158,26 +237,26 @@ def format_table(result: ModuleResult) -> str:
                     if len(str_val) > 50:
                         str_val = str_val[:47] + "..."
                 
-                lines.append(f"  {key}: {str_val}")
+                lines.append(f"  {c(f'{key}:', **KEY)} {c(str_val, bold=True)}")
     else:
-        lines.append("  No summary available")
-    
+        lines.append(c("  No summary available", **LABEL))
+
     lines.append("")
-    lines.append("-" * width)
-    
+    lines.append(c("-" * width, **RULE))
+
     # Related targets
     if result.related:
-        lines.append(" RELATED TARGETS ".center(width, "-"))
-        lines.append("-" * width)
+        lines.append(c(" RELATED TARGETS ".center(width, "-"), **HEADING))
+        lines.append(c("-" * width, **RULE))
         for related in result.related[:10]:
-            lines.append(f"  → {related}")
+            lines.append(f"  {c('→', fg=214)} {related}")
         if len(result.related) > 10:
-            lines.append(f"  ... and {len(result.related) - 10} more")
+            lines.append(c(f"  ... and {len(result.related) - 10} more", **LABEL))
         lines.append("")
-        lines.append("-" * width)
-    
-    lines.append("=" * width)
-    
+        lines.append(c("-" * width, **RULE))
+
+    lines.append(c("=" * width, **RULE))
+
     return "\n".join(lines)
 
 
@@ -290,10 +369,10 @@ async def save_result_async(result: ModuleResult, filepath: str, format: str = '
 
 
 def print_result(result: ModuleResult, format: str = 'table') -> None:
-    """Print result to console."""
+    """Print result to console. click.echo strips styling when redirected."""
     if format == 'json':
-        print(format_json(result))
+        click.echo(format_json(result))
     elif format == 'rich':
         format_rich(result)
     else:
-        print(format_table(result))
+        click.echo(format_table(result, color=True))

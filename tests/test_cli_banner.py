@@ -3,11 +3,15 @@
 import io
 import sys
 
+import cybertrace.cli
 from cybertrace.cli import show_banner
 
 
 def _run(argv, isatty, monkeypatch):
     """Call show_banner with a faked argv/tty, returning (stdout, stderr)."""
+    # show_banner only ever fires once per process; without this reset the
+    # later tests would pass vacuously whenever an earlier one printed.
+    monkeypatch.setattr(cybertrace.cli, '_banner_shown', False)
     out, err = io.StringIO(), io.StringIO()
     out.isatty = lambda: isatty
     err.isatty = lambda: isatty
@@ -24,8 +28,8 @@ def test_banner_text_goes_to_stderr_only(monkeypatch):
     # that is what clearing the terminal *is*.
     out, err = _run(['cybertrace', 'search', 'x'], True, monkeypatch)
     assert out.strip('\033[2J1;H') == ''
-    assert 'ANUBHAV' in err
-    assert 'CYBERTRACE' not in out
+    assert 'A N U B H A V' in err  # letter-spaced in the signature strip
+    assert '█' not in out
 
 
 def test_silent_when_stdout_redirected(monkeypatch):

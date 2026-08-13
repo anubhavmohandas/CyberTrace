@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import hashlib
 import ipaddress
 import logging
 import re
@@ -10,9 +11,22 @@ from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote_plus, unquote
 
+from ..normalize import (
+    norm_btc, norm_domain, norm_email, norm_eth, norm_onion, norm_pgp, norm_xmr,
+)
 from .base import BaseModule, ModuleResult, SourceResult
 
 logger = logging.getLogger(__name__)
+
+# Where on the page an artifact was seen. A BTC address under "donate" is the
+# operator's; the same string in passing prose is a mention. Checked against the
+# raw HTML window, so class="footer" / id="wallet" count as evidence too.
+_SECTION_RULES = (
+    ('wallet', re.compile(r'wallet|donate|payment|deposit|escrow|bitcoin|monero', re.I)),
+    ('contact', re.compile(r'contact|support|abuse|admin|reach us', re.I)),
+    ('pgp', re.compile(r'pgp|gpg|public key|signature', re.I)),
+    ('footer', re.compile(r'footer|copyright|&copy;|©|terms', re.I)),
+)
 
 
 class DarkwebModule(BaseModule):
@@ -144,11 +158,103 @@ class DarkwebModule(BaseModule):
     _RE_ANALYTICS = re.compile(r'\b(?:UA-\d{4,}-\d+|G-[A-Z0-9]{6,}|GTM-[A-Z0-9]{4,})\b')
     _RE_ONION = re.compile(r'[a-z2-7]{56}\.onion', re.IGNORECASE)
     _RE_TITLE = re.compile(r'<title[^>]*>([^<]+)</title>', re.IGNORECASE)
+    _RE_PGP = re.compile(
+        r'-----BEGIN PGP PUBLIC KEY BLOCK-----(.*?)-----END PGP PUBLIC KEY BLOCK-----',
+        re.DOTALL,
+    )
+    # Generic role mailboxes — not operator handles, so they don't seed a username pivot.
+    _ROLE_LOCALPARTS = frozenset({
+        'admin', 'administrator', 'support', 'info', 'contact', 'sales',
+        'help', 'abuse', 'noreply', 'no-reply', 'root', 'mail', 'office',
+        'hello', 'team', 'security', 'billing', 'orders', 'webmaster', 'postmaster',
+    })
     # Endpoints that commonly leak the real backend IP when misconfigured.
     _MISCONFIG_PATHS = (
         '/server-status', '/server-info', '/.git/config', '/.env',
         '/phpinfo.php', '/info.php', '/status', '/robots.txt',
     )
+
+    @staticmethod
+    def _validated(html: str, pattern: 're.Pattern', normalizer,
+                   exclude: str = '') -> Tuple[List[str], Dict[str, Dict[str, str]]]:
+        """Regex hits that survive normalize.py, plus where each was seen.
+
+        Validation is the gate the whole evidence model rests on: a regex is
+        shape-matching, not proof, so an address failing its checksum must never
+        become a graph node. Otherwise two markets quoting the same malformed
+        string correlate into a shared "operator" that does not exist.
+
+        Returns the raw values (canonical form is the graph's job) and an
+        evidence map {value: {section, context}} for the edges built from them.
+        """
+        # occam: section = keyword hit in a fixed ±70 char window, first rule
+        # wins. Two blocks closer than that can cross-attribute (a footer address
+        # beside a donate box reads as 'wallet'). Upgrade to real DOM ancestry
+        # only if misattributed sections start moving confidence wrongly.
+        values: List[str] = []
+        evidence: Dict[str, Dict[str, str]] = {}
+        for m in pattern.finditer(html):
+            raw = m.group(0)
+            if raw in evidence or (exclude and raw in exclude):
+                continue
+            if normalizer(raw) is None:
+                continue
+            before, after = html[max(0, m.start() - 70):m.start()], html[m.end():m.end() + 70]
+            # Classify on the surroundings only: 'admin@x.com' in a footer is a
+            # footer artifact, and letting the value match its own section rule
+            # would relabel it 'contact' on the strength of its local-part.
+            around = f"{before} {after}"
+            evidence[raw] = {
+                'section': next((n for n, rx in _SECTION_RULES if rx.search(around)), 'body'),
+                'context': re.sub(
+                    r'\s+', ' ', re.sub(r'<[^>]+>', ' ', f"{before}{raw}{after}")).strip()[:200],
+            }
+            values.append(raw)
+        return sorted(values), evidence
+
+    @staticmethod
+    def _extract_pgp_keys(html: str) -> List[Dict[str, str]]:
+        """Capture armored PGP public keys on the page and give each a stable id.
+
+        The id is the true OpenPGP fingerprint (normalize.pgp_fingerprint parses
+        the packets), which is what makes a shared key the strongest cross-market
+        signal in the graph: a clone re-exporting a copied key changes every byte
+        of the armor but never the fingerprint. Keyserver lookup of the
+        operator's identities happens on the email pivot
+        (email_module._check_pgp_keyservers).
+        """
+        # occam: keys the parser can't read (v3, truncated armor) fall back to a
+        # payload hash — still stable for identical exports, just not re-export
+        # proof. Upgrade: extend normalize._packets if v3 keys ever show up.
+        seen: Dict[str, Dict[str, str]] = {}
+        for m in DarkwebModule._RE_PGP.finditer(html):
+            payload = re.sub(r'\s+', '', ''.join(
+                ln for ln in m.group(1).splitlines() if ':' not in ln
+            ))
+            if len(payload) < 64:  # too short to be a real key block
+                continue
+            fpr = norm_pgp(m.group(0))
+            if fpr:
+                seen.setdefault(fpr, {'key_id': fpr, 'fingerprint': fpr.removeprefix('PGP:')})
+            else:
+                kid = hashlib.sha256(payload.encode()).hexdigest()[:16]
+                seen.setdefault(kid, {'key_id': kid})
+        return list(seen.values())
+
+    @staticmethod
+    def _usernames_from_emails(emails: List[str]) -> List[str]:
+        """Email local-parts are candidate operator handles (plan: email ->
+        username). Drop generic role accounts and too-short/noisy strings."""
+        out: List[str] = []
+        for e in emails:
+            local = e.split('@', 1)[0].lower()
+            if local in DarkwebModule._ROLE_LOCALPARTS or len(local) < 4:
+                continue
+            if not re.fullmatch(r'[a-z0-9._-]+', local):
+                continue
+            if local not in out:
+                out.append(local)
+        return out
 
     @staticmethod
     def _public_ipv4(candidates) -> List[str]:
@@ -247,21 +353,22 @@ class DarkwebModule(BaseModule):
                 pass
 
         # Clearnet hosts referenced on the page (leaked operator infrastructure).
+        # norm_domain rejects onions and anything that isn't a real hostname.
         clearnet_hosts = sorted({
-            h.split(':')[0].lower() for h in self._RE_URL.findall(html)
-            if not h.lower().endswith('.onion')
+            d for d in (norm_domain(h) for h in self._RE_URL.findall(html)) if d
         })
 
-        # Operator artifacts. Drop BTC matches that are actually a slice of an
-        # onion address (base32 overlaps base58) to avoid false positives.
+        # Operator artifacts, each gated by its normalizer so only values that
+        # actually validate (base58check, bech32, block-base58, RFC-shaped mail)
+        # can become graph entities. Drop BTC matches that are really a slice of
+        # an onion address (base32 overlaps base58) before validating.
         onion_tokens = ''.join(self._RE_ONION.findall(html))
-        btc = sorted({
-            a for a in self._RE_BTC.findall(html) if a not in onion_tokens
-        })
-        emails = sorted(set(self._RE_EMAIL.findall(html)))
-        eth = sorted(set(self._RE_ETH.findall(html)))
-        xmr = sorted(set(self._RE_XMR.findall(html)))
+        btc, ev_btc = self._validated(html, self._RE_BTC, norm_btc, exclude=onion_tokens)
+        emails, ev_email = self._validated(html, self._RE_EMAIL, norm_email)
+        eth, ev_eth = self._validated(html, self._RE_ETH, norm_eth)
+        xmr, ev_xmr = self._validated(html, self._RE_XMR, norm_xmr)
         analytics = sorted(set(self._RE_ANALYTICS.findall(html)))
+        artifact_evidence = {**ev_btc, **ev_email, **ev_eth, **ev_xmr}
 
         # Leaked public IPv4 in headers or body — a direct real-host slip.
         header_blob = ' '.join(str(v) for v in headers.values())
@@ -280,8 +387,9 @@ class DarkwebModule(BaseModule):
         )
 
         onion_links = [
-            a.lower() for a in dict.fromkeys(self._RE_ONION.findall(html))
-            if a.lower() != onion_host
+            a for a in dict.fromkeys(
+                norm_onion(x) for x in self._RE_ONION.findall(html)
+            ) if a and a != onion_host
         ]
 
         return SourceResult(
@@ -301,13 +409,16 @@ class DarkwebModule(BaseModule):
                 'ethereum_addresses': eth[:20],
                 'monero_addresses': xmr[:20],
                 'analytics_ids': analytics[:20],
-                'pgp_key_present': 'BEGIN PGP' in html,
+                'pgp_keys': self._extract_pgp_keys(html),
                 'leaked_public_ipv4': leaked_ips,
                 'misconfigurations': misconfigs,
                 'favicon': favicon,
                 'candidate_operator_ips': candidate_ips,
                 'onion_links_found': len(onion_links),
                 'onion_addresses_found': onion_links[:10],
+                # {value: {section, context}} — where on the page each artifact
+                # was seen, so graph edges carry evidence and not just a link.
+                'artifact_evidence': artifact_evidence,
             },
         )
 
@@ -956,12 +1067,20 @@ class DarkwebModule(BaseModule):
     def _pivot_targets(data: Dict[str, Any], cap: int = 3) -> List[Tuple[str, str]]:
         """Pick operator artifacts worth pivoting into other modules, capped per
         kind to bound external calls. ETH addresses go to the bitcoin module too
-        (it auto-detects the coin)."""
+        (it auto-detects the coin); email local-parts become candidate usernames;
+        candidate operator IPs get RDAP/ASN/geo enrichment via the ip module."""
         emails = (data.get('emails') or [])[:cap]
         crypto = (
             (data.get('bitcoin_addresses') or []) + (data.get('ethereum_addresses') or [])
         )[:cap]
-        return [('email', e) for e in emails] + [('bitcoin', c) for c in crypto]
+        ips = (data.get('candidate_operator_ips') or [])[:cap]
+        usernames = DarkwebModule._usernames_from_emails(data.get('emails') or [])[:cap]
+        return (
+            [('email', e) for e in emails]
+            + [('bitcoin', c) for c in crypto]
+            + [('ip', ip) for ip in ips]
+            + [('username', u) for u in usernames]
+        )
 
     async def _pivot_operator_artifacts(self, data: Dict[str, Any]) -> Optional[SourceResult]:
         """
@@ -1092,7 +1211,7 @@ class DarkwebModule(BaseModule):
                     'monero': d.get('monero_addresses'),
                 },
                 'analytics_ids': d.get('analytics_ids'),
-                'pgp_key_present': d.get('pgp_key_present'),
+                'pgp_keys': d.get('pgp_keys'),
                 'favicon_shodan': d.get('favicon', {}).get('shodan_matches'),
                 'misconfigurations': d.get('misconfigurations'),
             }
@@ -1100,5 +1219,13 @@ class DarkwebModule(BaseModule):
         pivot = result.sources.get('operator_pivot')
         if pivot and pivot.success:
             summary['operator_pivots'] = pivot.data.get('results')
+
+        # Evidence graph: typed nodes + confidence-scored edges over the artifacts
+        # above. Only attached when a live onion produced something to graph, so a
+        # hardened/unreachable target stays quiet. Lazy import avoids a cycle.
+        from ..graph import build_graph
+        g = build_graph(result)
+        if g.nodes:
+            summary['evidence_graph'] = g.to_dict()
 
         return summary

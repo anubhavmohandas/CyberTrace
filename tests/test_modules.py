@@ -14,6 +14,7 @@ from cybertrace.modules import (
     IndianModule,
 )
 from cybertrace.modules.base import ModuleResult, SourceResult
+from cybertrace.normalize import norm_btc, norm_email
 
 
 class TestModuleRegistry:
@@ -148,6 +149,35 @@ class TestDarkwebOperatorIntel:
         assert 'UA-1234567-8' in DarkwebModule._RE_ANALYTICS.findall(html)
         assert DarkwebModule._public_ipv4(DarkwebModule._RE_IPV4.findall(html)) == ['8.8.8.8']
 
+    def test_validated_rejects_addresses_that_fail_checksum(self):
+        # Same address, last char changed — regex-shaped but checksum-invalid.
+        # It must never reach the graph, or two markets quoting the same typo
+        # would correlate into an operator that doesn't exist.
+        html = ("donate 1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2 "
+                "and 1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN3")
+        values, evidence = DarkwebModule._validated(
+            html, DarkwebModule._RE_BTC, norm_btc)
+        assert values == ['1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2']
+        assert '1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN3' not in evidence
+
+    def test_validated_records_section_and_context(self):
+        html = ('<div class="footer">seen at admin@example.com</div>'
+                + '<p>filler prose that separates the two blocks.</p>' * 3
+                + '<div id="donate">pay support@shop.example</div>')
+        _values, evidence = DarkwebModule._validated(
+            html, DarkwebModule._RE_EMAIL, norm_email)
+        assert evidence['admin@example.com']['section'] == 'footer'
+        assert evidence['support@shop.example']['section'] == 'wallet'
+        # context is the tag-stripped window the artifact was seen in
+        assert 'pay' in evidence['support@shop.example']['context']
+
+    def test_validated_excludes_onion_slices(self):
+        onion = 'a' * 56 + '.onion'
+        values, _ = DarkwebModule._validated(
+            html := f"visit {onion}", DarkwebModule._RE_BTC, norm_btc,
+            exclude=html)
+        assert values == []
+
     def test_pivot_targets_caps_and_labels(self):
         data = {
             'emails': ['a@x.com', 'b@x.com', 'c@x.com', 'd@x.com'],
@@ -161,6 +191,58 @@ class TestDarkwebOperatorIntel:
 
     def test_pivot_targets_empty_when_no_artifacts(self):
         assert DarkwebModule._pivot_targets({}) == []
+
+    def test_pivot_targets_ip_and_username(self):
+        data = {
+            'emails': ['darkoperator@proton.me', 'admin@x.com', 'ab@x.com'],
+            'candidate_operator_ips': ['8.8.8.8', '1.1.1.1'],
+        }
+        jobs = DarkwebModule._pivot_targets(data, cap=3)
+        assert ('ip', '8.8.8.8') in jobs and ('ip', '1.1.1.1') in jobs
+        # local-part becomes a username; role account + too-short are dropped
+        assert ('username', 'darkoperator') in jobs
+        assert ('username', 'admin') not in jobs
+        assert ('username', 'ab') not in jobs
+
+    def test_extract_pgp_keys_falls_back_to_payload_hash(self):
+        # Not a parseable OpenPGP packet — id degrades to the payload hash.
+        block = (
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----\n"
+            "Version: GnuPG v2\n\n"
+            + "mQENBFabcd" * 20 + "\n=Ab12\n"
+            "-----END PGP PUBLIC KEY BLOCK-----"
+        )
+        keys = DarkwebModule._extract_pgp_keys(block + "\n" + block)  # same key twice
+        assert len(keys) == 1 and len(keys[0]['key_id']) == 16
+        assert 'fingerprint' not in keys[0]
+        assert DarkwebModule._extract_pgp_keys("no key here") == []
+
+    def test_extract_pgp_keys_uses_true_fingerprint(self):
+        """A re-armored export of one key must yield ONE node, not two.
+
+        This is what makes a shared PGP key the strongest cross-market signal:
+        a clone re-exporting a copied key changes every byte of the armor but
+        cannot change the fingerprint.
+        """
+        import base64, hashlib
+
+        body = b'\x04' + b'\x5f\x00\x00\x00' + b'\x01' + b'\xab' * 60  # v4 pubkey packet
+        packet = b'\x98' + bytes([len(body)]) + body                   # old-format tag 6
+        b64 = base64.b64encode(packet).decode()
+        expected = hashlib.sha1(
+            b'\x99' + len(body).to_bytes(2, 'big') + body).hexdigest().upper()
+
+        armor_a = (f"-----BEGIN PGP PUBLIC KEY BLOCK-----\n\n{b64}\n"
+                   "-----END PGP PUBLIC KEY BLOCK-----")
+        # same key, different armor: extra header, different line wrapping, CRC
+        wrapped = "\n".join(b64[i:i + 24] for i in range(0, len(b64), 24))
+        armor_b = (f"-----BEGIN PGP PUBLIC KEY BLOCK-----\nVersion: GnuPG v2\n\n"
+                   f"{wrapped}\n=Ab12\n-----END PGP PUBLIC KEY BLOCK-----")
+
+        keys = DarkwebModule._extract_pgp_keys(armor_a + "\n" + armor_b)
+        assert len(keys) == 1, "re-armored key must not split into two entities"
+        assert keys[0]['key_id'] == f"PGP:{expected}"
+        assert keys[0]['fingerprint'] == expected
 
     def test_favicon_hash_matches_shodan_scheme(self):
         import base64, mmh3
