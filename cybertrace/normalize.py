@@ -19,6 +19,8 @@ Every function returns the canonical string or None. Canonical forms:
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import ipaddress
 import re
@@ -532,6 +534,31 @@ def norm_ip(value: str) -> Optional[str]:
 NON_ATTRIBUTIVE_SECTIONS = frozenset({"quoted", "roster", "demo"})
 
 
+def _v3_checksum_ok(label: str) -> bool:
+    """Verify the checksum a v3 address carries in its own bytes.
+
+    A v3 label decodes to pubkey(32) || checksum(2) || version(1), where the
+    checksum is SHA3-256(".onion checksum" || pubkey || version)[:2]. Tor
+    enforces this before it will build a circuit, so every address that was ever
+    reachable passes and rejecting the rest costs no real service.
+
+    What it stops is a whole class of phantom entity. Directories corrupt the
+    addresses they display on purpose — tor.taxi mangles a character in every
+    link it prints, "unclickable for your safety" — so a page listing 140 sites
+    yields 140 addresses that no one operates. Read as observations they are
+    entities like any other: they inflate the commonness denominators, and each
+    one is a plausible-looking sibling of the real address it was derived from.
+    A typo'd or phish-bait address arrives the same way.
+    """
+    try:
+        raw = base64.b32decode(label.upper())
+    except binascii.Error:
+        return False
+    if len(raw) != 35 or raw[34] != 3:
+        return False
+    return hashlib.sha3_256(b".onion checksum" + raw[:32] + b"\x03").digest()[:2] == raw[32:34]
+
+
 def norm_onion(value: str) -> Optional[str]:
     """v3 only. v2 was retired in 2021 and its 16-char form collides with far
     too much base32-looking page text to be worth accepting.
@@ -540,11 +567,16 @@ def norm_onion(value: str) -> Optional[str]:
     is built to the .onion address itself, so `www.<addr>.onion` — the form
     Facebook and Reddit publish — is the same hidden service and must resolve to
     one node, not a second one that never correlates with the first.
+
+    The address must also verify its own checksum: shape alone is not identity,
+    and a corrupted address is not a service. See _v3_checksum_ok.
     """
     value = value.strip().lower().removeprefix("http://").removeprefix("https://")
     value = value.split("/", 1)[0].split(":", 1)[0]
     value = ".".join(value.split(".")[-2:])
-    return value if re.fullmatch(r"[a-z2-7]{56}\.onion", value) else None
+    if not re.fullmatch(r"[a-z2-7]{56}\.onion", value):
+        return None
+    return value if _v3_checksum_ok(value[:56]) else None
 
 
 _DOMAIN_RE = re.compile(

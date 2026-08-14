@@ -1,7 +1,9 @@
 """Evidence-model tests: normalization gate, provenance chain, clone guard."""
 
 import base64
+import hashlib
 import json
+import re
 import struct
 from datetime import datetime, timezone
 
@@ -25,8 +27,20 @@ BTC_VALID = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
 BTC_BECH32 = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
 XMR_VALID = ("44AFFq5kSiGBoZ4NMDwYtN18obc8AemS33DBLWs3H7otXft3"
              "XjrpDtQGv7SqSsaBYBb98uNbr2VBBEt7f2wfn3RVGQBEP3A")
-ONION_A = "a" * 56 + ".onion"
-ONION_B = "b" * 56 + ".onion"
+def onion(seed: str) -> str:
+    """A synthetic but checksum-VALID v3 address, one per seed character.
+
+    norm_onion verifies the checksum a real address carries, so `"a" * 56` is
+    not a stand-in for an onion any more — it is exactly the corrupted string
+    the gate exists to refuse. Fixtures have to be addresses that could exist.
+    """
+    pub = (seed.encode() * 32)[:32]
+    chk = hashlib.sha3_256(b".onion checksum" + pub + b"\x03").digest()[:2]
+    return base64.b32encode(pub + chk + b"\x03").decode().lower() + ".onion"
+
+
+ONION_A = onion("a")
+ONION_B = onion("b")
 
 
 def _pubkey_packet(modulus: int, created: int = 1_700_000_000) -> bytes:
@@ -157,6 +171,25 @@ def test_onion_subdomain_resolves_to_one_node():
     assert norm_onion(f"https://WWW.{ONION_A.upper()}/dir/page") == ONION_A
     assert norm_onion(f"mail.sub.{ONION_A}:8080") == ONION_A
     assert norm_onion(f"www.{ONION_A[:-6]}") is None   # still must end in .onion
+
+
+def test_a_directorys_mangled_links_are_not_addresses():
+    """tor.taxi prints every link with one character changed, on purpose.
+
+    Its front page says the links are "unclickable for your safety" — an
+    anti-phishing measure — so the 140 addresses it displays are 140 services
+    that do not exist. Riseup's real address is published there as `…ceo3ak7…`
+    for `…ceo3ah7…`, Cryptostorm's as `…gvku2c…` for `…gvcu2c…`. Both are
+    well-formed and both must be refused, because a v3 address carries the
+    checksum that proves it: shape is not identity.
+    """
+    riseup = "vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.onion"
+    storm = "stormwayszuh4juycoy4kwoww5gvcu2c4tdtpkup667pdwe4qenzwayd.onion"
+    assert norm_onion(riseup) == riseup and norm_onion(storm) == storm
+    assert norm_onion(riseup.replace("ceo3ah7", "ceo3ak7")) is None
+    assert norm_onion(storm.replace("gvcu2c", "gvku2c")) is None
+    # The corruption is invisible to a shape check, which is the whole problem.
+    assert re.fullmatch(r"[a-z2-7]{56}\.onion", riseup.replace("ceo3ah7", "ceo3ak7"))
 
 
 def test_boilerplate_domains_are_not_infrastructure():
@@ -366,7 +399,7 @@ def test_index_hits_do_not_become_target_links():
     merely ranked beside it. Two down markets sharing that directory then look
     like one operator. The same list from an actual visit IS a real link.
     """
-    others = ["b" * 56 + ".onion", "c" * 56 + ".onion"]
+    others = [onion("b"), onion("c")]
 
     r = ModuleResult(target=ONION_A, target_type='darkweb', module='darkweb')
     r.sources['torch'] = SourceResult(

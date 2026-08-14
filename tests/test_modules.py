@@ -637,6 +637,25 @@ class TestDarkwebCrawl:
         # Off-host links would attribute another site's artifacts to this operator.
         assert links == [f'http://{self.HOST}/contact', f'http://{self.HOST}/rules.html']
 
+    def test_links_are_kept_when_the_site_serves_from_a_www_vhost(self):
+        """`www.<addr>.onion` is the same hidden service as `<addr>.onion`, and
+        the big wiki-backed onions redirect to it. Their own links are absolute
+        and carry the `www.`, so comparing against the address we asked for
+        rejects every one of them: the crawl stops at the front page and the
+        site is recorded as live with nothing published.
+
+        Measured on Whonix — one page and no artifacts before, eight pages and
+        the donation wallet after.
+        """
+        served = f'www.{self.HOST}'
+        html = (f'<a href="http://{served}/wiki/Donate">d</a>'
+                f'<a href="http://{self.OTHER}/x">other onion</a>')
+        assert DarkwebModule._same_onion_links(f'http://{served}/', html, served) == \
+            [f'http://{served}/wiki/Donate']
+        # The host gate itself is unchanged: another onion is still refused.
+        assert not DarkwebModule._same_onion_links(
+            f'http://{served}/', f'<a href="http://{self.OTHER}/x">o</a>', served)
+
     def test_crawl_is_bounded_and_aggregates_artifacts_across_pages(self):
         import asyncio
 

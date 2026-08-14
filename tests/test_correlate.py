@@ -9,13 +9,16 @@ from datetime import datetime, timezone
 from cybertrace.correlate import (
     COMMON_ARTIFACT_FLOOR, canonical_entity_key, candidate_infra, candidate_operators,
     confidence_level, contradictions_from_identity, crypto_clusters, detect_successors,
-    entity_discrimination, entity_funnel_profile, render_dossier_html, render_html,
-    render_markdown, run_correlation, username_aliases,
+    entity_discrimination, entity_funnel_profile, markets_for_entity,
+    render_dossier_html, render_html, render_markdown, run_correlation,
+    username_aliases,
 )
 from cybertrace.evidence import EvidenceStore, enrich_email, ingest
+from cybertrace.modules.base import ModuleResult, SourceResult
+from cybertrace.modules.darkweb_module import DarkwebModule
 from cybertrace.monitor import candidate_deltas
 
-from .test_evidence import BTC_VALID, KEY_A, KEY_B, ONION_A, ONION_B, _result
+from .test_evidence import BTC_VALID, KEY_A, KEY_B, ONION_A, ONION_B, _result, onion
 
 JAN = datetime(2026, 1, 10, tzinfo=timezone.utc)
 AUG = datetime(2026, 8, 2, tzinfo=timezone.utc)
@@ -340,7 +343,7 @@ def test_empty_store_yields_nothing(tmp_path):
 # --- commonness: the ecosystem-vs-operator separation ------------------------
 
 def _onion(n: int) -> str:
-    return chr(ord('c') + n) * 56 + ".onion"
+    return onion(chr(ord('c') + n))
 
 
 def test_platform_furniture_is_discounted_and_a_rare_artifact_is_not(tmp_path):
@@ -434,6 +437,74 @@ def test_a_keyserver_answer_is_not_the_markets_key(tmp_path):
         assert by_id[email]["n_markets"] == 2
         # The uploaded key is not, however strongly the keyserver asserted it.
         assert key not in by_id, by_id.get(key)
+
+
+def test_a_platform_mailbox_is_not_an_operator_however_few_sites_show_it(tmp_path):
+    """Two servers of one mail platform, both printing the platform's support
+    address. Same string, same count, same page section as a real operator's
+    mailbox on its own two onions — and the opposite conclusion.
+
+    Per-entity commonness cannot tell them apart: `support@platform.info` on two
+    of a platform's servers is one address on two targets, exactly like
+    `support@dnmx.cc` on the two DNMX onions. What differs is the domain's reach
+    — the platform's domain is all over the corpus, an operator's is on the pair
+    that owns it — so the address is scored on that instead. Left per-entity,
+    every ecosystem in the corpus mints an operator as soon as one of its
+    servers prints a support address.
+    """
+    platform, operator = 'support@platform.info', 'support@ownbrand.cc'
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        # The rest of the platform: enough servers to make the domain furniture,
+        # each naming it the way a real one does — a link, not a mailbox.
+        for i in range(6):
+            ingest(_result(f"{'q' * 54}{i:02d}.onion", seen=JAN,
+                           clearnet_hosts_referenced=['docs.platform.info']), store)
+        for onion in (ONION_A, ONION_B):
+            ingest(_result(onion, seen=JAN, emails=[platform, operator]), store)
+
+        by_value = {c["value"]: c for c in candidate_operators(
+            store, discrimination=entity_discrimination(store))}
+        # Same two markets, same section, same confidence — only the domain's
+        # reach differs, and that is the whole verdict.
+        assert by_value[operator]["n_markets"] == 2
+        assert platform not in by_value, by_value.get(platform)
+
+
+def test_a_pile_of_shared_citations_is_a_lead_and_not_an_edge(tmp_path):
+    """Two wikis on one subject cite the same twenty sources. That is a topic,
+    not an operator.
+
+    CONTEXT_WEIGHT already prices a single shared citation near nothing, because
+    linking to a host says nothing about controlling it. What it cannot price is
+    volume: the pair score is a noisy-OR, so twenty independent near-nothings
+    compound past the assertion threshold and the edge is asserted on arithmetic
+    that no individual signal supports. Whonix and Kicksecure — genuinely one
+    operator — scored 0.69 this way, on stackexchange, mediawiki.org and the
+    OpenVPN forums. Right answer, and a reason that links any two privacy wikis
+    on the web.
+
+    The pair still ranks: an analyst should see it. It just is not a claim.
+    """
+    # Twenty distinct registrable domains: subdomains of one host collapse into
+    # a single signal, which is not the case being tested.
+    cited = [f"docs.cited-source{i:02d}.net" for i in range(20)]
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        for onion in (ONION_A, ONION_B):
+            ingest(_result(onion, seen=JAN, clearnet_hosts_referenced=cited), store)
+        pairs = detect_successors(store)
+        assert pairs, "the pair must still be ranked — suppressed, not discarded"
+        assert pairs[0]["score"] >= 0.5, "and it must be the score, not a low one, that is refused"
+        assert pairs[0]["suppressed"] == "REFERENCES_ONLY"
+        assert pairs[0]["relation"] is None
+
+        # One artifact the sites actually control, and the same pile of
+        # citations becomes what it should have been all along: corroboration.
+        ingest(_result(ONION_A, seen=AUG, emails=['op@ownbrand.cc'],
+                       clearnet_hosts_referenced=cited), store)
+        ingest(_result(ONION_B, seen=AUG, emails=['op@ownbrand.cc'],
+                       clearnet_hosts_referenced=cited), store)
+        asserted = [p for p in detect_successors(store) if not p["suppressed"]]
+        assert len(asserted) == 1 and asserted[0]["relation"] == "LINKED_TO"
 
 
 def test_a_shared_certifier_is_not_a_shared_operator(tmp_path):
@@ -627,3 +698,74 @@ def test_candidate_deltas_report_only_movement():
     # A candidate that stopped clearing the bar is news too, in the other direction.
     reverse = {d["candidate_id"]: d["change"] for d in candidate_deltas(after, before)}
     assert reverse == {"OP-2": "MOVED", "OP-3": "GONE"}
+
+
+# --- index discovery ---------------------------------------------------------
+
+def _index_only(target, seen, **index_data):
+    """A target nobody reached: the direct Tor visit failed, an index answered.
+
+    The shape of the adversarial case this file exists to keep closed — the
+    target is dark, so every artifact and every neighbouring onion in the run
+    came off Torch and off nothing else.
+    """
+    r = ModuleResult(target=target, target_type='darkweb', module='darkweb')
+    r.sources['target_onion'] = SourceResult(
+        source='target_onion', success=False, timestamp=seen,
+        error='Onion unreachable via Tor (127.0.0.1:9050 is up) — the site is down')
+    r.sources['torch'] = SourceResult(
+        source='torch', success=True, timestamp=seen, data=index_data)
+    return r
+
+
+def test_torch_discovered_onions_never_become_an_operator_link(tmp_path):
+    """Two dark onions that co-ranked on Torch must correlate to nothing.
+
+    This is the whole leak in one scenario: Torch returns A and B beside each
+    other and repeats the same result-snippet contact details under both. Read
+    as observations, that is a shared email, a shared key and a shared wallet
+    across two markets — the exact convergence the engine promotes to an
+    operator — and every part of it is a property of the search index.
+    """
+    shared = dict(emails=['op@morke.ru'], bitcoin_addresses=[BTC_VALID],
+                  pgp_keys=[{'armored': KEY_A}])
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_index_only(ONION_A, JAN, onion_addresses_found=[ONION_B], **shared), store)
+
+        # Discovery does not mint a target, so nothing downstream will ever
+        # crawl B or enrich it: `recheck` and correlation both enumerate targets.
+        assert [r["url"] for r in store._all("SELECT url FROM targets")] == [ONION_A]
+        # A -> B is provenance about how B was found. LINKS_TO would assert the
+        # market published the link, which no one ever asked the market.
+        assert [r["rtype"] for r in store._all(
+            "SELECT r.rtype FROM relationships r JOIN entities e "
+            "ON e.entity_id = r.target_entity_id WHERE e.normalized_value=?",
+            (ONION_B,))] == ["DISCOVERED_VIA"]
+
+        ingest(_index_only(ONION_B, AUG, onion_addresses_found=[ONION_A], **shared), store)
+        results = run_correlation(store)
+
+        assert results["operators"] == []
+        assert results["successors"] == []       # not even a lead: no pair exists
+        assert results["infra"] == [] and results["ips"] == []
+        # The leads themselves survive as entities — a dark market's index entry
+        # is still where an analyst starts — attributed to no market.
+        for etype, value in (("EMAIL", 'op@morke.ru'), ("BTC_ADDRESS", BTC_VALID),
+                             ("ONION_ADDRESS", ONION_B)):
+            entity = store.find_entity(etype, value)
+            assert entity is not None, f"{etype} {value} was dropped, not demoted"
+            assert markets_for_entity(store, entity) == []
+
+
+def test_an_index_payload_seeds_no_enrichment_pivot():
+    """The module-side half of the same guarantee. Phase 7 only ever sees the
+    live page's data, and enrichment is what turns a string into a named person
+    (keyserver, Gravatar, chain lookup) — so an index snippet must not reach it
+    even if it is handed over directly."""
+    index_payload = {'emails': ['op@morke.ru'], 'bitcoin_addresses': [BTC_VALID],
+                     'onion_addresses_found': [ONION_B]}
+    assert DarkwebModule._pivot_targets(index_payload)      # not inert by accident
+    # An onion is never a pivot target regardless of where it came from: there
+    # is no module that "enriches" an onion except by visiting it.
+    assert not any(ONION_B in target
+                   for _, target in DarkwebModule._pivot_targets(index_payload))

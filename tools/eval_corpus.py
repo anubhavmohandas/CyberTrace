@@ -115,7 +115,7 @@ def predictions(results: dict, urls: dict) -> dict:
         pair = frozenset((s.get("source_url"), s.get("target_url")))
         if None in pair:
             continue
-        if s.get("suppressed") == "BELOW_THRESHOLD":
+        if s.get("suppressed") in ("BELOW_THRESHOLD", "REFERENCES_ONLY"):
             # Ranked, not claimed. Scored as UNRELATED against ground truth on
             # purpose — the engine did not assert a link — but tallied so a
             # missed positive that WAS surfaced reads differently from one the

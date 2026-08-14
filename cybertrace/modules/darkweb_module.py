@@ -706,6 +706,16 @@ class DarkwebModule(BaseModule):
             base = f"{parts.scheme}://{parts.netloc}"
             status, headers, html = await self._fetch_full(url)
 
+        # The vhost that actually served the page, which is not always the one
+        # we asked for. `www.<addr>.onion` is one hidden service with the bare
+        # address, but its own links are absolute and carry the `www.`, so a
+        # literal comparison against the requested host rejects every one of
+        # them and the crawl stops at the front page — a redirecting site is
+        # then recorded as a live target that publishes nothing. Self-reference
+        # exclusion still uses the bare address, which is what `norm_onion`
+        # returns for either spelling.
+        served_host = urlsplit(base).hostname or onion_host
+
         if status is None:
             socks = f'{self.config.tor.socks_host}:{self.config.tor.socks_port}'
             return SourceResult(
@@ -749,7 +759,7 @@ class DarkwebModule(BaseModule):
         # Crawl the site's own pages before extracting: a login wall or a sparse
         # landing page otherwise reports an artifact-free operator.
         pages = [(f"{base}/", status, html)] + \
-            await self._crawl_pages(base, onion_host, html)
+            await self._crawl_pages(base, served_host, html)
 
         agg: Dict[str, List[str]] = {
             k: [] for k in (

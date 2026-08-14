@@ -184,6 +184,15 @@ def entity_discrimination(store: EvidenceStore) -> Dict[str, float]:
     Returns 1.0 for everything when the corpus is too small to judge (< 3
     targets): with two markets, "on both" is the signal, not a commonness
     finding, and dividing it away would silence the only evidence there is.
+
+    An address is scored on its DOMAIN's commonness, not its own. Per-entity IDF
+    cannot see the difference between `support@dnmx.cc` on the two DNMX onions
+    and `support@onionmail.info` on two of the twenty-odd independently-run
+    OnionMail servers: both are one string on two targets, so both score alike
+    and the second becomes an operator spanning two markets. What separates them
+    is not in the mailbox, it is in the domain — `onionmail.info` is attested
+    across 28 targets of this corpus, `dnmx.cc` across exactly the pair that
+    owns it. Measured, not listed: no platform has to be named in advance.
     """
     n_targets = (store._one("SELECT COUNT(*) AS n FROM targets WHERE url != ?",
                             (DERIVED_TARGET,)) or {"n": 0})["n"]
@@ -195,9 +204,34 @@ def entity_discrimination(store: EvidenceStore) -> Dict[str, float]:
     if n_targets < 3:
         return {r["entity_id"]: 1.0 for r in rows}
     scale = math.log(n_targets)
-    return {r["entity_id"]: round(
-        min(1.0, max(0.05, math.log(n_targets / max(1, r["df"])) / scale)), 4)
-        for r in rows}
+
+    def idf(df: int) -> float:
+        return round(min(1.0, max(0.05, math.log(n_targets / max(1, df)) / scale)), 4)
+
+    disc = {r["entity_id"]: idf(r["df"]) for r in rows}
+
+    # Second pass for addresses only. A domain's reach is whatever bears it —
+    # the DOMAIN entity a site links, or another mailbox at the same domain —
+    # so both types are counted, and the widest reach wins.
+    hosts = store._all(
+        "SELECT e.entity_id, e.etype, e.normalized_value AS value, "
+        "COUNT(DISTINCT s.target_id) AS df FROM entities e "
+        "JOIN observations o ON o.entity_id = e.entity_id "
+        "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
+        "JOIN targets t ON t.target_id = s.target_id "
+        "WHERE e.etype IN ('EMAIL','DOMAIN') AND t.url != ? AND s.status='OK' "
+        "GROUP BY e.entity_id", (DERIVED_TARGET,))
+    reach: Dict[str, int] = {}
+    for row in hosts:
+        domain = _registrable(row["value"].rsplit("@", 1)[-1])
+        reach[domain] = max(reach.get(domain, 0), row["df"])
+    for row in hosts:
+        if row["etype"] != "EMAIL":
+            continue
+        domain = _registrable(row["value"].rsplit("@", 1)[-1])
+        disc[row["entity_id"]] = min(disc.get(row["entity_id"], 1.0),
+                                     idf(reach[domain]))
+    return disc
 
 
 def username_aliases(store: EvidenceStore, min_sim: float = 0.82) -> List[dict]:
@@ -773,7 +807,20 @@ def detect_successors(store: EvidenceStore, min_score: float = 0.5,
         for s in signals:
             residual *= 1.0 - min(0.99, s["weight"])
         score = round(1.0 - residual, 4)
-        if score < min_score:
+        # References corroborate; they never make a claim — the same rule
+        # timing already gets, for the same reason. CONTEXT_WEIGHT prices one
+        # shared citation at 0.06 precisely because linking to a host says
+        # nothing about controlling it, but twenty of them noisy-OR to 0.69 and
+        # the pair is asserted on arithmetic no single signal supports.
+        #
+        # Measured: Whonix and Kicksecure — one operator, correct answer — were
+        # linked by twenty shared citations (unix.meta.stackexchange.com,
+        # mediawiki.org, forums.openvpn.net, catb.org) and nothing else. Any two
+        # wikis on one subject reproduce that, so the pair is ranked as a lead
+        # and left for an analyst rather than asserted as a relationship.
+        attributive = any(s["signal"] != "shared_domain" for s in signals
+                          if s["signal"] not in ("temporal_handoff", "temporal_overlap"))
+        if score < min_score or not attributive:
             # Too weak to assert, too specific to throw away. A pair joined only
             # by references — both sites citing one organisation's hosts, say —
             # is a lead an analyst should see and the graph should not claim.
@@ -784,7 +831,10 @@ def detect_successors(store: EvidenceStore, min_score: float = 0.5,
                     "source_market": a_id, "target_market": b_id,
                     "source_url": (windows.get(a_id) or {}).get("url"),
                     "target_url": (windows.get(b_id) or {}).get("url"),
-                    "score": score, "suppressed": "BELOW_THRESHOLD", "relation": None,
+                    "score": score,
+                    "suppressed": "BELOW_THRESHOLD" if score < min_score
+                                  else "REFERENCES_ONLY",
+                    "relation": None,
                     "signals": [s["signal"] for s in signals],
                     "signals_detail": _signal_summary(signals), "evidence_ids": []})
             continue

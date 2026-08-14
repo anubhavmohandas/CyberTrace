@@ -854,3 +854,90 @@ operator = "cryptostorm"
 platform = "cryptostorm"
 evidence_class = "operator-specific"
 basis = "published in the footer of Cryptostorm's own onion beside its warrant canary; serves the same branded page and the same support@cryptostorm.is, and links the stormways address back"
+
+# --- ENCRYPTED SUPPORT LLC: one operator, two brands ------------------------
+# One operator, two separately-branded sites — the only pair here that shares no
+# name. Every other operator family shares a word: Riseup's servers share
+# `riseup.net`, DNMX's mirrors share the DNMX brand, Endchan's two addresses
+# serve the same board. These two do not, so nothing about the brand can carry
+# the label and the basis has to be a published statement.
+#
+# It is: each site's own /wiki/Impressum names ENCRYPTED SUPPORT LLC (A Series
+# of OTOCO RMI LLC, registration 966308, Majuro) as the operating entity, with
+# the same phone number on both, and Whonix's own wiki publishes the Kicksecure
+# onion below. That was verified page-by-page on 2026-08-15, not taken from a
+# directory.
+#
+# The class is `namespace`, and the distinction is the whole point of the row.
+# What the two captures actually share is 26 referenced clearnet hosts out of 40
+# each — facebook.com, stackexchange, mediawiki.org, the Debian and VirtualBox
+# forums — because they are the same wiki software writing about the same
+# subject. Exactly ONE of those 26 is attributive: `encrypted-support.com`, the
+# LLC's own domain, referenced by both. That is a co-referenced host, the same
+# evidence shape as riseup.net, and promoting it is the move that would link any
+# two privacy wikis on the web. Their donation wallets are different addresses,
+# and they share no mailbox and no key. So a miss here is correct behaviour.
+#
+# What would make this operator-specific is on a page the engine does not read:
+# the Impressum is not in the crawler's priority set, and a phone number is not
+# an entity type. Both are recorded here as limitations rather than chased —
+# building an extractor to make one corpus pair recoverable is how a tool gets
+# fitted to its own test set.
+
+[[target]]
+name = "whonix"
+onion = "dds6qkxpwdeubwucdiaord2xgbbeyds25rbsgr73tbfpqpt4a6vjwsyd.onion"
+operator = "encrypted-support"
+platform = "mediawiki"
+evidence_class = "namespace"
+basis = "whonix.org's own wiki publishes this as the Whonix onion; its /wiki/Impressum names ENCRYPTED SUPPORT LLC (registration 966308) as the operating entity, and its own wiki pages link the Kicksecure onion below"
+
+[[target]]
+name = "kicksecure"
+onion = "w5j6stm77zs6652pgsij4awcjeel3eco7kvipheu6mtr623eyyehj4yd.onion"
+operator = "encrypted-support"
+platform = "mediawiki"
+evidence_class = "namespace"
+basis = "kicksecure.com publishes this as the Kicksecure onion; its /wiki/Impressum names the same ENCRYPTED SUPPORT LLC, same registration number and same phone as Whonix's"
+
+# --- tor.taxi: one operator, two onion services -----------------------------
+# The fourth operator-specific positive, and the first that rests on a PGP
+# fingerprint rather than a mailbox or a wallet — the evidence class the corpus
+# was missing, and the one README.md recorded as having unit coverage and no
+# field measurement.
+#
+# Both addresses serve tor.taxi, publish the operator's own `contact@tor.taxi`,
+# and serve the SAME key at /pgp.txt: A5E0A8393961186AA291379FBD89C41A1588778A,
+# read off the page rather than from a keyserver. The basis is stronger than a
+# shared string: /mirrors.txt on the stormways-equivalent address below is a
+# PGP-SIGNED message, signed by that same fingerprint, naming the tortaxi2dev
+# address as its mirror. The operator names its own address and signs the
+# statement with the key both addresses publish.
+#
+# Recorded caveat: the signed list served from tortaxi2dev names only itself and
+# the clearnet domain — it is a newer signature than the one on the prd address,
+# which names both. So the mutual-naming holds in one direction, and the pair is
+# joined by the key and the mailbox in both.
+#
+# This site is also why norm_onion now verifies the v3 checksum. tor.taxi prints
+# every link it lists with one character altered, deliberately, as an
+# anti-phishing measure — its own front page calls them "unclickable for your
+# safety". Ingesting the page as-is minted well-formed addresses for services
+# that do not exist, including near-twins of Riseup's and Cryptostorm's real
+# addresses. See tests/test_evidence.py::test_a_directorys_mangled_links_are_not_addresses.
+
+[[target]]
+name = "tortaxi-prd"
+onion = "tortaxiprd6ybez7n7fnwwmcdo3efib5hv6z7ks463ya72bv7ovz7qqd.onion"
+operator = "tor.taxi"
+platform = "tortaxi"
+evidence_class = "operator-specific"
+basis = "serves the tor.taxi site under the operator's own contact@tor.taxi, publishes key A5E0A839…1588778A at /pgp.txt, and its /mirrors.txt — signed by that key — names the tortaxi2dev address below as its mirror"
+
+[[target]]
+name = "tortaxi-2dev"
+onion = "tortaxi2dev6xjwbaydqzla77rrnth7yn2oqzjfmiuwn5h6vsk2a4syd.onion"
+operator = "tor.taxi"
+platform = "tortaxi"
+evidence_class = "operator-specific"
+basis = "named as tor.taxi's own mirror in the PGP-signed /mirrors.txt served from the address above; serves the same site, the same contact@tor.taxi, and the same key A5E0A839…1588778A at its own /pgp.txt"
