@@ -22,6 +22,16 @@ from .base import BaseModule, ModuleResult, SourceResult
 
 logger = logging.getLogger(__name__)
 
+# Markers that HEAD a quoted block, so they sit above the artifact rather than
+# beside it — see _validated, which gives these a wider look-back than any other
+# section rule gets.
+_QUOTED_LEAD = re.compile(
+    r'wrote:|-{2,}\s*(?:original|forwarded)\s+message|in reply to|&gt;\s*&gt;', re.I)
+# Those plus the attributions that appear right next to the artifact, for the
+# narrow window. One pattern string, so the two windows cannot drift apart.
+_QUOTED_NEAR = re.compile(
+    _QUOTED_LEAD.pattern + r'|written by|authored by|\bauthor\s*:|all copies', re.I)
+
 # Where on the page an artifact was seen. A BTC address under "donate" is the
 # operator's; the same string in passing prose is a mention. Checked against the
 # raw HTML window, so class="footer" / id="wallet" count as evidence too.
@@ -36,9 +46,7 @@ _SECTION_RULES = (
     # whoever was quoted. Denylisting Gmail would not have caught it; provenance
     # does. Downstream: evidence.ingest demotes the edge to MENTIONS and
     # _pivot_targets refuses to enrich it.
-    ('quoted', re.compile(
-        r'wrote:|-{2,}\s*original message|in reply to|<blockquote|&gt;\s*&gt;'
-        r'|written by|authored by|\bauthor\s*:|all copies', re.I)),
+    ('quoted', _QUOTED_NEAR),
     ('wallet', re.compile(r'wallet|donate|payment|deposit|escrow|bitcoin|monero', re.I)),
     ('contact', re.compile(r'contact|support|abuse|admin|reach us', re.I)),
     ('pgp', re.compile(r'pgp|gpg|public key|signature', re.I)),
@@ -247,8 +255,14 @@ class DarkwebModule(BaseModule):
             # beside it, and ±70 would only catch a quoted address by luck. The
             # other rules keep the narrow window on purpose: a `donate` heading
             # 500 chars up says nothing about the address down here.
+            # occam: 600-char look-back, and an open <blockquote> is detected by
+            # comparing the last opening tag to the last closing one rather than
+            # by parsing. A quote that opened further up than that is missed.
+            # Upgrade to real DOM ancestry if quoted artifacts still get through.
             section = next((n for n, rx in _SECTION_RULES if rx.search(around)), 'body')
-            if section != 'quoted' and _QUOTED_LEAD.search(html[max(0, m.start() - 600):m.start()]):
+            lead = html[max(0, m.start() - 600):m.start()]
+            if section != 'quoted' and (_QUOTED_LEAD.search(lead)
+                                        or lead.rfind('<blockquote') > lead.rfind('</blockquote')):
                 section = 'quoted'
             evidence[raw] = {
                 'section': section,
@@ -490,7 +504,34 @@ class DarkwebModule(BaseModule):
         analyst can pivot into the ip/domain modules.
         """
         base = f"http://{onion_host}"
-        status, headers, html = await self._fetch_full(f"{base}/")
+        url = f"{base}/"
+        status, headers, html = await self._fetch_full(url)
+
+        # _fetch_full keeps allow_redirects=False because the misconfig probes
+        # need to tell "not exposed" from "bounced to a login". The target's own
+        # front page is the one place the destination is what we came for, and a
+        # redirect is how the big clearnet-backed onions actually serve: Reddit
+        # answers http://<addr> with 307 -> https://<addr>, then 301 ->
+        # https://www.<addr>, then 302 -> the page. Unfollowed, that captures a
+        # 168-byte redirect stub and reports it as a live site with no
+        # artifacts, which is worse than an error because it reads as a real
+        # capture of a site that publishes nothing.
+        #
+        # Never off this onion, though. A Location pointing at clearnet is a
+        # request we must not make: it would leave Tor for a host the target
+        # chose, which is a deanonymising fetch, not a redirect. Any vhost of
+        # the same 56-char address is fine — that is still one hidden service,
+        # and it is exactly where these redirects lead.
+        for _ in range(4):
+            if status not in (301, 302, 303, 307, 308):
+                break
+            parts = urlsplit(urljoin(url, headers.get('Location', '')))
+            if parts.scheme not in ('http', 'https') or \
+                    '.'.join((parts.hostname or '').split('.')[-2:]) != onion_host:
+                break
+            url = urlunsplit(parts)
+            base = f"{parts.scheme}://{parts.netloc}"
+            status, headers, html = await self._fetch_full(url)
 
         if status is None:
             socks = f'{self.config.tor.socks_host}:{self.config.tor.socks_port}'

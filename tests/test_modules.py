@@ -190,6 +190,54 @@ class TestDarkwebOperatorIntel:
         # context is the tag-stripped window the artifact was seen in
         assert 'pay' in evidence['support@shop.li']['context']
 
+    def test_quoted_content_is_not_the_operator(self):
+        """A mailing-list archive reproduces other people's messages. The Riseup
+        list archive quoted a script header naming its author's Gmail, and that
+        address became an operator artifact and then a username, which pivoted
+        to a real person's GitHub. Provenance is what separates them — the site
+        publishing an address versus the site quoting someone who did."""
+        # The shape that caused it: an attribution beside the address.
+        _v, ev = DarkwebModule._validated(
+            '<pre>* script MICRO-CAL par S.A. (amrounix@gmail.com) '
+            '* all copies and modifications are allowed.</pre>',
+            DarkwebModule._RE_EMAIL, norm_email)
+        assert ev['amrounix@gmail.com']['section'] == 'quoted'
+
+        # The commoner shape: the marker heads the block, far above the address.
+        # This is what the ±70 window used for every other section cannot see.
+        _v, ev = DarkwebModule._validated(
+            '<p>On Mon, 3 Jun 2024, S.A. wrote:</p><p>' + 'quoted body. ' * 30
+            + 'mail me at amrounix@gmail.com</p>', DarkwebModule._RE_EMAIL, norm_email)
+        assert ev['amrounix@gmail.com']['section'] == 'quoted'
+
+        # A blockquote that already closed is the site speaking again. Without
+        # the open/close comparison every address below any quote reads quoted.
+        _v, ev = DarkwebModule._validated(
+            '<blockquote>old thread</blockquote><div>' + 'our own words. ' * 25
+            + 'write support@morke.ru</div>', DarkwebModule._RE_EMAIL, norm_email)
+        assert ev['support@morke.ru']['section'] != 'quoted'
+
+    def test_quoted_artifacts_are_never_enriched(self):
+        """Enrichment is the step that turns a string into a named person, so a
+        quoted address has to be stopped before the pivot, not scored down
+        after it."""
+        jobs = DarkwebModule._pivot_targets({
+            'emails': ['amrounix@gmail.com', 'honeytroll@riseup.net'],
+            'bitcoin_addresses': ['1QuotedAddr'],
+            'artifact_evidence': {
+                'amrounix@gmail.com': {'section': 'quoted'},
+                '1QuotedAddr': {'section': 'quoted'},
+                'honeytroll@riseup.net': {'section': 'body'},
+            },
+        })
+        assert ('email', 'honeytroll@riseup.net') in jobs
+        assert ('email', 'amrounix@gmail.com') not in jobs
+        assert ('bitcoin', '1QuotedAddr') not in jobs
+        # and the quoted address must not seed a username either — that pivot is
+        # what reached the script author's GitHub.
+        assert ('username', 'amrounix') not in jobs
+        assert ('username', 'honeytroll') in jobs
+
     def test_validated_excludes_onion_slices(self):
         onion = 'a' * 56 + '.onion'
         values, _ = DarkwebModule._validated(

@@ -123,6 +123,35 @@ def test_placeholder_emails_never_reach_enrichment():
         assert norm_email(value) == value, value
 
 
+def test_mailing_list_instruction_fragments_are_not_mailboxes():
+    """`listname-subscribe@lists.riseup.net` in Riseup's list instructions was
+    extracted from the first character the pattern could match, yielding
+    `-subscribe@lists.riseup.net` — an address belonging to nobody, minted as an
+    operator artifact. The guard is on the shape, so the whole
+    `-request@`/`-owner@` family goes with it, and real hyphens survive."""
+    for value in ("-subscribe@lists.riseup.net", "-unsubscribe@lists.riseup.net",
+                  "-request@lists.riseup.net", "list-@riseup.net",
+                  "admin.@riseup.net", "a..b@riseup.net"):
+        assert norm_email(value) is None, value
+    for value in ("cypherpunks-subscribe@lists.riseup.net", "a.b-c@riseup.net",
+                  "honeytroll@riseup.net"):
+        assert norm_email(value) == value, value
+    # A leading dot is prose punctuation, not part of the local-part, and the
+    # strip at the top of norm_email already recovers the address it precedes.
+    assert norm_email(".admin@riseup.net") == "admin@riseup.net"
+
+
+def test_onion_subdomain_resolves_to_one_node():
+    """Facebook and Reddit publish `www.<addr>.onion`. The circuit is built to
+    the .onion address itself, so the prefix is vhost routing, not identity —
+    detector.normalize_input drops it and this must agree, or the same hidden
+    service becomes two entities that never correlate."""
+    assert norm_onion(f"www.{ONION_A}") == ONION_A
+    assert norm_onion(f"https://WWW.{ONION_A.upper()}/dir/page") == ONION_A
+    assert norm_onion(f"mail.sub.{ONION_A}:8080") == ONION_A
+    assert norm_onion(f"www.{ONION_A[:-6]}") is None   # still must end in .onion
+
+
 def test_boilerplate_domains_are_not_infrastructure():
     """Two markets both linking github.com share page furniture, not hosting.
     Admitted as DOMAIN entities these mint INFRA candidates and then SUCCESSOR
