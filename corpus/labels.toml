@@ -31,21 +31,78 @@ name = "cybertrace-eval-v1"
 collected = "2026-08-13"
 note = "Live Tor captures; see runs/raw/ for the saved --save JSON each row came from."
 
-# --- Riseup: one operator, two onion services -------------------------------
+# --- Riseup: one operator, seven onion services -----------------------------
+# Riseup publishes the service -> onion mapping itself, at
+# /en/security/network-security/tor on its own onion. That page is the basis
+# for every row below: the operator naming its own addresses is a stronger
+# claim than a third-party directory repeating them, and it is checkable
+# without consulting anything CyberTrace produced.
+#
+# Read the recall number for this family with its evidence class in mind. All
+# seven share the riseup.net namespace and little else, so they test whether
+# the engine can promote a *public-service domain signal* — which is exactly
+# the promotion that manufactures false attribution elsewhere. They are real
+# positives, but they are not evidence that operator-specific reuse is
+# detected. Only the DNMX pair below tests that.
 
 [[target]]
 name = "riseup-main"
 onion = "vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.onion"
 operator = "riseup"
 platform = "riseup"
-basis = "dark.fail publishes this as Riseup's onion under its PGP-signed listing"
+basis = "Riseup's own onion services page lists this as riseup.net / help.riseup.net; dark.fail also publishes it under its PGP-signed listing"
 
 [[target]]
 name = "riseup-account"
 onion = "3xeiol2bnhrsqhcsaifwtnlqkylrerdspzua7bcjrh26qlrrrctfobid.onion"
 operator = "riseup"
 platform = "riseup"
-basis = "the page is Riseup's own account settings UI and references account/mail/lists/pad/share.riseup.net"
+basis = "Riseup's own onion services page lists this as account.riseup.net"
+
+[[target]]
+name = "riseup-mail"
+onion = "5gdvpfoh6kb2iqbizb37lzk2ddzrwa47m6rpdueg2m656fovmbhoptqd.onion"
+operator = "riseup"
+platform = "riseup"
+basis = "Riseup's own onion services page lists this as mail/imap/pop/smtp.riseup.net"
+
+[[target]]
+name = "riseup-lists"
+onion = "7sbw6jufrirhyltzkslhcmkik4z7yrsmbpnptyritvz5nhbk35hncsqd.onion"
+operator = "riseup"
+platform = "sympa"
+basis = "Riseup's own onion services page lists this as lists.riseup.net"
+
+[[target]]
+name = "riseup-pad"
+onion = "kfahv6wfkbezjyg4r6mlhpmieydbebr5vkok5r34ya464gqz6c44bnyd.onion"
+operator = "riseup"
+platform = "etherpad"
+basis = "Riseup's own onion services page lists this as pad.riseup.net"
+
+[[target]]
+name = "riseup-we"
+onion = "zkdppoahhqu5ihjqd4qqvyfd2bm4wejrhjosim67t6yopl77jitg2nad.onion"
+operator = "riseup"
+platform = "crabgrass"
+basis = "Riseup's own onion services page lists this as we.riseup.net"
+
+[[target]]
+name = "riseup-0xacab"
+onion = "wmj5kiic7b6kjplpbvwadnht2nh2qnkbnqtcv3dyvpqtz7ssbssftxid.onion"
+operator = "riseup"
+platform = "gitlab"
+basis = "Riseup's own onion services page lists this as 0xacab.org, the code-hosting service Riseup runs"
+
+# Dark at collection time, kept labeled on purpose: a target that stops
+# answering must leave a labeled hole the eval reports as unevaluable, not
+# vanish from the corpus and quietly improve the score.
+[[target]]
+name = "riseup-share"
+onion = "2pyimbpxocupne6nbekma4dygkobl36sblei6ttknbm4kfh3r7jlpzyd.onion"
+operator = "riseup"
+platform = "riseup"
+basis = "Riseup's own onion services page lists this as share.riseup.net"
 
 # --- Endchan: one operator, two onion services ------------------------------
 
@@ -84,6 +141,13 @@ basis = "independent Tor mail service; nginx, its own template, no OnionMail ban
 
 # --- Independent mail providers ---------------------------------------------
 
+# --- DNMX: one operator, two onion services ---------------------------------
+# The positive case that carries operator-specific evidence rather than a
+# public namespace: both addresses publish the same operator mailbox,
+# support@dnmx.cc, which is a thing the operator controls rather than a host
+# anyone can link to. If the engine can only surface Riseup and not this, it
+# is matching brands, not operators.
+
 [[target]]
 name = "dnmx"
 onion = "dnmxjaitaiafwmss2lx7tbs5bv66l7vjdmb5mtb3yqpxqhk3it5zivad.onion"
@@ -92,11 +156,25 @@ platform = "dnmx"
 basis = "Dark Net Mail Exchange, self-hosted Apache/PHP stack under its own brand"
 
 [[target]]
+name = "dnmx-2"
+onion = "hxuzjtocnzvv5g2rtg2bhwkcbupmk7rclb6lly3fo4tvqkk5oyrv3nid.onion"
+operator = "dnmx"
+platform = "dnmx"
+basis = "this address's own page publishes the dnmxjait address as its mirror, and both serve the DNMX brand under the same support@dnmx.cc mailbox"
+
+[[target]]
 name = "elude"
 onion = "eludemailxhnqzfmxehy3bk5guyhlxbunfyhkcksv4gvx6d3wcf6smad.onion"
 operator = "elude"
 platform = "elude"
 basis = "Elude.in mail service under its own brand"
+
+[[target]]
+name = "torbox"
+onion = "torbox36ijlcevujx7mjb4oiusvwgvmue7jfn2cvutwa6kl6to3uyqad.onion"
+operator = "torbox"
+platform = "torbox"
+basis = "self-branded '[TorBox] The Tor Mail Box', hidden-service-only mail under its own PGP key (7BFA09DA...)"
 
 [[target]]
 name = "protonmail"
