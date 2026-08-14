@@ -31,7 +31,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from .normalize import normalize, simhash_similarity
+from .normalize import NON_ATTRIBUTIVE_SECTIONS, normalize, simhash_similarity
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -271,6 +271,21 @@ _INDEX_SOURCES = {"ahmia", "torch", "dargle", "intelx", "onion_directories",
 # the site rather than about an index.
 _SITE_COLLECTORS = {"target_onion", "operator_pivot", "watch"}
 
+# Snapshot status vocabulary. The column already separated a capture from an
+# outage; DISCOVERY is the third thing a row can be, and leaving it fused with
+# OK is what let a target that was never fetched still report intelligence.
+#
+#   OK         we asked the site and it answered — an observation OF the target
+#   DOWN       we asked and it did not answer — evidence ABOUT the target
+#   DISCOVERY  an index answered a query that named the target. Evidence about
+#              what some search engine has on file, and about nothing else.
+#
+# Every read that means "observed on this target" must filter to OK. Measured:
+# on the v4 corpus five targets were dark, and each still carried between two
+# and eleven artifacts attributed to it — every one of them read off Torch,
+# Dargle or a directory listing, none of them off the site.
+SNAPSHOT_STATUS = ("OK", "DOWN", "DISCOVERY")
+
 
 def _site_was_down(error: Optional[str]) -> bool:
     """True when a failed visit is evidence about the SITE, not about us.
@@ -367,7 +382,8 @@ class EvidenceStore:
 
     def insert_snapshot(self, target_id: str, payload: Any, collector: str,
                         observed_at: Optional[str] = None,
-                        raw_path: Optional[str] = None) -> str:
+                        raw_path: Optional[str] = None,
+                        status: str = "OK") -> str:
         """Hash and store one capture, chained to the previous capture by the
         same collector of the same target. The chain is what makes a leak that
         appeared for one crawl and vanished on the next provable rather than
@@ -401,10 +417,10 @@ class EvidenceStore:
         sid = self._id("snap")
         self.conn.execute(
             "INSERT INTO snapshots (snapshot_id, target_id, observed_at, collector, "
-            "sha256, payload, raw_path, previous_snapshot_id, diff_summary) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            "sha256, payload, raw_path, previous_snapshot_id, diff_summary, status) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (sid, target_id, observed_at or utcnow(), collector, sha, blob, raw_path,
-             prev["snapshot_id"] if prev else None, diff),
+             prev["snapshot_id"] if prev else None, diff, status),
         )
         self.conn.commit()
         return sid
@@ -443,8 +459,8 @@ class EvidenceStore:
         it is evidence a successor hypothesis stands on, not a log line.
         """
         sid = self.insert_snapshot(target_id, {"online": False, "error": note},
-                                   collector=collector, observed_at=observed_at)
-        self.conn.execute("UPDATE snapshots SET status='DOWN' WHERE snapshot_id=?", (sid,))
+                                   collector=collector, observed_at=observed_at,
+                                   status="DOWN")
         self.conn.execute("UPDATE targets SET active=0 WHERE target_id=?", (target_id,))
         self.conn.commit()
         return sid
@@ -684,8 +700,15 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
             continue
         payload = src.get("data") or {}
         observed_at = src.get("timestamp") or utcnow()
+        # An index answering a query that named the target is not a capture of
+        # the target. Recorded, hashed and walkable like anything else, but
+        # marked so no read can mistake "Torch has this on file" for "we looked
+        # at the site and saw this" — the two are indistinguishable once they
+        # are rows in the same table under the same status.
+        discovery = name in _INDEX_SOURCES
         sid = store.insert_snapshot(target_id, payload, collector=name,
-                                    observed_at=observed_at)
+                                    observed_at=observed_at,
+                                    status="DISCOVERY" if discovery else "OK")
         snapshot_ids.append(sid)
 
         if onion and market_id:
@@ -702,9 +725,12 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
 
         for key, (etype, rtype) in ARTIFACT_MAP.items():
             # An index returns what ranked beside the target, not what the target
-            # links to. Everything else in its payload still counts: a paste that
-            # names this market and an email is real evidence about it.
-            index_hit = key == "onion_addresses_found" and name in _INDEX_SOURCES
+            # links to — that co-ranking is DISCOVERED_VIA and carries no weight.
+            # The rest of an index payload is still evidence (a paste naming this
+            # market and an email is a real lead) but it is evidence somebody
+            # else recorded, so it gets MENTIONS: the site was never asked, and
+            # USES_EMAIL would assert control on the strength of a search hit.
+            index_hit = key == "onion_addresses_found" and discovery
             for raw in payload.get(key) or []:
                 # The target's own address is already HAS_ADDRESS; re-adding it as
                 # a link would make every market cite itself as an associate.
@@ -712,21 +738,22 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
                         normalize(etype, str(raw)) == normalize(etype, target_url):
                     continue
                 where = seen_at.get(raw) or {}
-                # Quoted third-party content — a forwarded message, a pasted
-                # source header — is something the page reproduces, not
-                # something it controls. MENTIONS is the edge that already says
+                # Content the page reproduces rather than authors — a forwarded
+                # message, a list subscriber's address — belongs to whoever was
+                # quoted or subscribed. MENTIONS is the edge that already says
                 # that, and correlate.CONTEXT_WEIGHT scores it at 0.15, so the
                 # artifact stays visible as supporting context and stops short
                 # of becoming operator identity.
-                quoted = where.get("section") == "quoted"
+                borrowed = (where.get("section") in NON_ATTRIBUTIVE_SECTIONS
+                            or discovery)
                 _link(store, page_snaps.get(where.get("page"), sid), market_id, etype,
-                      "DISCOVERED_VIA" if index_hit else "MENTIONS" if quoted else rtype,
+                      "DISCOVERED_VIA" if index_hit else "MENTIONS" if borrowed else rtype,
                       str(raw), name,
                       section=where.get("section") or key,
                       # An index co-ranking is provenance, not a claim about the
                       # site, so it is recorded at a confidence that cannot on
                       # its own carry an edge into a candidate.
-                      confidence=0.3 if index_hit else 0.7,
+                      confidence=0.3 if discovery else 0.7,
                       context=where.get("context"), observed_at=observed_at)
 
         # The server's own build signature. Declared in ENTITY_TYPES but never

@@ -14,8 +14,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote_plus, unquote, urljoin, urlsplit, urlunsplit
 
 from ..normalize import (
-    dom_simhash, norm_btc, norm_domain, norm_email, norm_eth, norm_onion, norm_pgp,
-    norm_xmr, pgp_certifiers, pgp_signature_issuers,
+    NON_ATTRIBUTIVE_SECTIONS, dom_simhash, norm_btc, norm_domain, norm_email,
+    norm_eth, norm_onion, norm_pgp, norm_xmr, pgp_certifiers, pgp_signature_issuers,
 )
 from ..safety import scrub
 from .base import BaseModule, ModuleResult, SourceResult
@@ -47,11 +47,53 @@ _SECTION_RULES = (
     # does. Downstream: evidence.ingest demotes the edge to MENTIONS and
     # _pivot_targets refuses to enrich it.
     ('quoted', _QUOTED_NEAR),
+    # Mailing-list membership, for the same reason and with the same effect.
+    # Riseup's list manager renders the logged-in user's own address into its
+    # menu — `<a href="mailto:honeytroll@riseup.net">` beside a link captioned
+    # `subscribers` — and that address was minted as a Riseup operator artifact,
+    # pivoted to a username, and pivoted again across 26 social sites. It is a
+    # subscriber of a list the site hosts. Naming the roster VOCABULARY is what
+    # separates it from the operator's own `abuse@` on the same page; nothing
+    # about the address itself does.
+    # occam: the ±70 window below, unlike 'quoted'. A roster heading further up
+    # than that is missed; widening it would demote genuine contact addresses on
+    # any page that also happens to mention a list. Upgrade to DOM ancestry with
+    # the quoted rule if list pages start leaking members again.
+    ('roster', re.compile(
+        r'subscriber|subscribed\s+to|list[-_](?:user|admin)|your_lists|login_menu'
+        r'|list\s+(?:owner|member|moderator)|roster', re.I)),
     ('wallet', re.compile(r'wallet|donate|payment|deposit|escrow|bitcoin|monero', re.I)),
     ('contact', re.compile(r'contact|support|abuse|admin|reach us', re.I)),
     ('pgp', re.compile(r'pgp|gpg|public key|signature', re.I)),
     ('footer', re.compile(r'footer|copyright|&copy;|©|terms', re.I)),
 )
+
+# Surroundings that make a regex hit not an artifact at all, whatever it
+# validates as. Decided from what is AROUND the match, never from the value:
+# both families below are generated strings, so a denylist would have to name
+# Reddit's Sentry key and every icon path in advance and would still miss the
+# next one. The shape is the tell, and the shape is in the context.
+
+# `https://<key>@<host>/…` — the userinfo of a URL authority is a credential,
+# not a mailbox. Reddit's Sentry DSN minted
+# `9f057df6115a4bb488c08ea12a835e6e@error-tracking.<onion>` as an EMAIL, one
+# pivot short of a keyserver lookup on an address nobody can receive mail at.
+# The character class stops at quotes and angle brackets, so an ordinary
+# `<a href="https://x.com">mail@x.com</a>` is untouched.
+_URL_USERINFO = re.compile(r'[a-z][a-z0-9+.\-]*://[^\s"\'<>]*$', re.I)
+
+# A dotted quad that is one slice of a longer dotted-numeric run, or that
+# follows a version marker, is not an address. Measured: Reddit's page carries
+# the SVG path `c0 .5.4.9.9.9h14.2`, out of which `5.4.9.9` was extracted,
+# enriched through the ip module into a Telefonica DSL line, and offered as the
+# market's candidate operator IP — a real subscriber's address attached to a
+# site they have nothing to do with.
+_DOTTED_QUAD = re.compile(r'\d{1,3}(?:\.\d{1,3}){3}')
+_VERSION_LEAD = re.compile(
+    r'\.$'                                   # mid-run: `.5.4.9.9`
+    r'|[A-Za-z]/$'                           # `PHP/5.4.9.9` — not `http://1.2.3.4`
+    r'|\b(?:version|ver|release|build|rev|sdk)\b[^\w]{0,3}$', re.I)
+_VERSION_TAIL = re.compile(r'^\.\d')         # `5.4.9.9.9h` — the run continues
 
 
 class DarkwebModule(BaseModule):
@@ -242,9 +284,17 @@ class DarkwebModule(BaseModule):
             raw = m.group(0)
             if raw in evidence or (exclude and raw in exclude):
                 continue
+            before, after = html[max(0, m.start() - 70):m.start()], html[m.end():m.end() + 70]
+            # Context gate, before validation: these two shapes normalize
+            # perfectly well and are still not artifacts. See _URL_USERINFO and
+            # _DOTTED_QUAD for the captures that forced each.
+            if '@' in raw and _URL_USERINFO.search(before):
+                continue
+            if _DOTTED_QUAD.fullmatch(raw) and (_VERSION_LEAD.search(before)
+                                                or _VERSION_TAIL.match(after)):
+                continue
             if normalizer(raw) is None:
                 continue
-            before, after = html[max(0, m.start() - 70):m.start()], html[m.end():m.end() + 70]
             # Classify on the surroundings only: 'admin@x.com' in a footer is a
             # footer artifact, and letting the value match its own section rule
             # would relabel it 'contact' on the strength of its local-part.
@@ -352,6 +402,24 @@ class DarkwebModule(BaseModule):
             ):
                 out.append(str(addr))
         return sorted(set(out))
+
+    @staticmethod
+    def _norm_public_ipv4(value: str) -> Optional[str]:
+        """One routable public IPv4 or None — the per-value half of
+        _public_ipv4, so contextual extraction can use it as a normalizer."""
+        return (DarkwebModule._public_ipv4([value]) or [None])[0]
+
+    @classmethod
+    def _public_ipv4_in(cls, text: str) -> Tuple[List[str], Dict[str, Dict[str, str]]]:
+        """Public IPv4 in some text, gated on context like every other artifact.
+
+        A bare `findall` here is what let SVG path coordinates become a leaked
+        operator IP: an address is the one artifact class with no checksum to
+        fail, so where it was seen is the ONLY validation available. Routing it
+        through _validated also earns it a section and a context snippet, which
+        is what stops a quoted or roster address reaching the ip-module pivot.
+        """
+        return cls._validated(text, cls._RE_IPV4, cls._norm_public_ipv4)
 
     async def _fetch_full(self, url: str) -> Tuple[Optional[int], Dict[str, str], str]:
         """Fetch url (.onion auto-routes through Tor) returning status, headers,
@@ -466,6 +534,7 @@ class DarkwebModule(BaseModule):
         emails, ev_email = self._validated(html, self._RE_EMAIL, norm_email)
         eth, ev_eth = self._validated(html, self._RE_ETH, norm_eth)
         xmr, ev_xmr = self._validated(html, self._RE_XMR, norm_xmr)
+        ips, ev_ip = self._public_ipv4_in(html)
         return {
             'emails': emails,
             'bitcoin_addresses': btc,
@@ -481,8 +550,8 @@ class DarkwebModule(BaseModule):
                 a for a in dict.fromkeys(norm_onion(x) for x in self._RE_ONION.findall(html))
                 if a and a != onion_host
             ],
-            'leaked_public_ipv4': self._public_ipv4(self._RE_IPV4.findall(html)),
-            'artifact_evidence': {**ev_btc, **ev_email, **ev_eth, **ev_xmr},
+            'leaked_public_ipv4': ips,
+            'artifact_evidence': {**ev_btc, **ev_email, **ev_eth, **ev_xmr, **ev_ip},
         }
 
     async def _fetch_target_onion(self, onion_host: str) -> SourceResult:
@@ -631,10 +700,11 @@ class DarkwebModule(BaseModule):
 
         # Leaked public IPv4 in headers or any crawled body — a real-host slip.
         header_blob = ' '.join(str(v) for v in headers.values())
-        leaked_ips = sorted(
-            set(agg['leaked_public_ipv4'])
-            | set(self._public_ipv4(self._RE_IPV4.findall(header_blob)))
-        )
+        header_ips, ev_header_ip = self._public_ipv4_in(header_blob)
+        artifact_evidence.update(
+            {ip: {**where, 'page': 'response headers'}
+             for ip, where in ev_header_ip.items() if ip not in artifact_evidence})
+        leaked_ips = sorted(set(agg['leaked_public_ipv4']) | set(header_ips))
 
         # Misconfig probes + favicon/Shodan pivot (each best-effort).
         misconfigs = await self._probe_misconfigs(base)
@@ -691,7 +761,7 @@ class DarkwebModule(BaseModule):
                     'path': path,
                     'status': status,
                     'bytes': len(body),
-                    'leaked_ips': self._public_ipv4(self._RE_IPV4.findall(body)),
+                    'leaked_ips': self._public_ipv4_in(body)[0],
                 }
             return None
 
@@ -1339,19 +1409,23 @@ class DarkwebModule(BaseModule):
         kind to bound external calls. ETH addresses go to the bitcoin module too
         (it auto-detects the coin); email local-parts become candidate usernames;
         candidate operator IPs get RDAP/ASN/geo enrichment via the ip module."""
-        # Artifacts read out of quoted third-party content are never enriched.
-        # Enrichment is the step that turns a string into a named person — the
-        # keyserver, GitHub and Gravatar lookups — so a quoted address must be
-        # stopped before it, not scored down after. See _SECTION_RULES.
-        quoted = {v for v, where in (data.get('artifact_evidence') or {}).items()
-                  if where.get('section') == 'quoted'}
-        own_emails = [e for e in (data.get('emails') or []) if e not in quoted]
+        # Artifacts belonging to somebody else — quoted third-party content, a
+        # list subscriber — are never enriched. Enrichment is the step that
+        # turns a string into a named person (keyserver, GitHub, Gravatar), so
+        # they have to be stopped before it, not scored down after. See
+        # _SECTION_RULES and normalize.NON_ATTRIBUTIVE_SECTIONS.
+        borrowed = {v for v, where in (data.get('artifact_evidence') or {}).items()
+                    if where.get('section') in NON_ATTRIBUTIVE_SECTIONS}
+        own_emails = [e for e in (data.get('emails') or []) if e not in borrowed]
         emails = own_emails[:cap]
         crypto = [
             c for c in (data.get('bitcoin_addresses') or [])
-            + (data.get('ethereum_addresses') or []) if c not in quoted
+            + (data.get('ethereum_addresses') or []) if c not in borrowed
         ][:cap]
-        ips = (data.get('candidate_operator_ips') or [])[:cap]
+        # IPs carry evidence too now that they are extracted contextually, so an
+        # address read out of a quoted mail header gets the same refusal.
+        ips = [i for i in (data.get('candidate_operator_ips') or [])
+               if i not in borrowed][:cap]
         usernames = DarkwebModule._usernames_from_emails(own_emails)[:cap]
         return (
             [('email', e) for e in emails]

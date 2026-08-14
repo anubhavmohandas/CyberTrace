@@ -484,6 +484,23 @@ def norm_ip(value: str) -> Optional[str]:
         return None
 
 
+# Page sections whose artifacts belong to somebody other than the operator. A
+# value here is still real and still worth recording — it is simply evidence
+# about whoever was quoted or subscribed, so it must never carry an edge that
+# says the site *controls* it, and must never reach enrichment, which is the
+# step that turns a string into a named person.
+#
+#   quoted  content the page reproduces: a forwarded message, a pasted header
+#   roster  mailing-list membership: a subscriber, list user or list admin —
+#           roles that belong to USERS of a list service, not to whoever runs it
+#
+# Lives here rather than beside the section rules in darkweb_module because both
+# the collector (which refuses to pivot them) and evidence.ingest (which demotes
+# their edge to MENTIONS) have to agree on the set, and drift between those two
+# is silent: the artifact would keep its operator edge while looking suppressed.
+NON_ATTRIBUTIVE_SECTIONS = frozenset({"quoted", "roster"})
+
+
 def norm_onion(value: str) -> Optional[str]:
     """v3 only. v2 was retired in 2021 and its 16-char form collides with far
     too much base32-looking page text to be worth accepting.

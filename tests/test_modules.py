@@ -222,21 +222,98 @@ class TestDarkwebOperatorIntel:
         quoted address has to be stopped before the pivot, not scored down
         after it."""
         jobs = DarkwebModule._pivot_targets({
-            'emails': ['amrounix@gmail.com', 'honeytroll@riseup.net'],
+            'emails': ['amrounix@gmail.com', 'support@dnmx.cc'],
             'bitcoin_addresses': ['1QuotedAddr'],
+            'candidate_operator_ips': ['8.8.8.8', '9.9.9.9'],
             'artifact_evidence': {
                 'amrounix@gmail.com': {'section': 'quoted'},
                 '1QuotedAddr': {'section': 'quoted'},
-                'honeytroll@riseup.net': {'section': 'body'},
+                '8.8.8.8': {'section': 'quoted'},
+                'support@dnmx.cc': {'section': 'contact'},
             },
         })
-        assert ('email', 'honeytroll@riseup.net') in jobs
+        assert ('email', 'support@dnmx.cc') in jobs
         assert ('email', 'amrounix@gmail.com') not in jobs
         assert ('bitcoin', '1QuotedAddr') not in jobs
+        # An IP read out of a quoted mail header is the sender's, not the
+        # site's — it earns the same refusal now that IPs carry evidence.
+        assert ('ip', '8.8.8.8') not in jobs
+        assert ('ip', '9.9.9.9') in jobs
         # and the quoted address must not seed a username either — that pivot is
         # what reached the script author's GitHub.
         assert ('username', 'amrounix') not in jobs
-        assert ('username', 'honeytroll') in jobs
+
+    def test_list_subscriber_is_not_the_list_operator(self):
+        """Riseup's list manager renders the logged-in user's own address into
+        its menu. It was minted as a Riseup operator artifact, pivoted to the
+        username `honeytroll`, and pivoted again across 26 social sites — a
+        subscriber of a hosted list attributed to whoever hosts it.
+
+        The markup is the real thing off `lists.riseup.net`, trimmed to the
+        window the section rules see.
+        """
+        html = ('<p>Check out the FAQs for <a href="https://riseup.net/lists/'
+                'list-admin/faq">list admins</a> and <a href="https://riseup.net'
+                '/lists/list-user">subscribers</a>.</p>'
+                '<a href="mailto:honeytroll@riseup.net"><span>x</span></a>')
+        _v, ev = DarkwebModule._validated(html, DarkwebModule._RE_EMAIL, norm_email)
+        assert ev['honeytroll@riseup.net']['section'] == 'roster'
+        # …and being roster is what keeps it out of the enrichment pivot.
+        assert ('email', 'honeytroll@riseup.net') not in DarkwebModule._pivot_targets({
+            'emails': ['honeytroll@riseup.net'],
+            'artifact_evidence': {'honeytroll@riseup.net': {'section': 'roster'}}})
+
+        # The operator's own contact block on the very same kind of page must
+        # keep its full weight — a rule that demoted this too would trade one
+        # false attribution for the loss of every real one.
+        for genuine, section in (('support@dnmx.cc', 'contact'),
+                                 ('abuse@morke.ru', 'contact'),
+                                 ('admin@Mail2Tor.com', 'contact')):
+            _v, ev = DarkwebModule._validated(
+                f'<div class="footer">Abuse contact: {genuine}</div>',
+                DarkwebModule._RE_EMAIL, norm_email)
+            assert ev[genuine]['section'] == section, genuine
+            assert ('email', genuine) in DarkwebModule._pivot_targets({
+                'emails': [genuine],
+                'artifact_evidence': {genuine: {'section': section}}})
+
+    def test_url_userinfo_is_not_a_mailbox(self):
+        """Reddit's onion embeds a Sentry DSN, `https://<key>@<host>/<project>`.
+        The key@host half is regex-shaped like an address and normalizes
+        cleanly, so only the `://` in front of it says it is a credential in a
+        URL authority rather than a mailbox somebody reads."""
+        html = ('var SENTRY_CONFIG = {"dsn":"https://9f057df6115a4bb488c08ea12a'
+                '835e6e@error-tracking.' + 'r' * 56 + '.onion/o418887/5810803"};')
+        values, ev = DarkwebModule._validated(
+            html, DarkwebModule._RE_EMAIL, norm_email)
+        assert values == [] and ev == {}
+        # A mailto link and an address beside an ordinary hyperlink still count.
+        for markup in ('<a href="mailto:admin@morke.ru">write us</a>',
+                       '<a href="https://morke.ru">site</a> or admin@morke.ru'):
+            values, _ = DarkwebModule._validated(
+                markup, DarkwebModule._RE_EMAIL, norm_email)
+            assert values == ['admin@morke.ru'], markup
+
+    def test_dotted_numeric_noise_is_not_an_ip(self):
+        """An IP is the one artifact with no checksum to fail, so context is the
+        only validation there is. Measured on Reddit's onion: the SVG path
+        `c0 .5.4.9.9.9h14.2` yielded `5.4.9.9`, which was enriched into a
+        Telefonica DSL line and offered as the market's candidate operator IP.
+        """
+        svg = ('<path d="M18 8.2V5.3C18 3.48 16.52 2 14.7 2H5.3C3.48 2 2 3.48 2 '
+               '5.3v2.9c0 .5.4.9.9.9h14.2c.5 0 .9-.4.9-.9z"/>')
+        assert DarkwebModule._public_ipv4_in(svg)[0] == []
+        # Version strings in the shapes that reach the header fingerprint too.
+        for text in ('Server: PHP/5.4.9.9', '{"version":"5.4.9.9"}',
+                     'release 5.4.9.9', 'build 5.4.9.9'):
+            assert DarkwebModule._public_ipv4_in(text)[0] == [], text
+        # A real leak, in the shapes it actually arrives in, still lands.
+        for text in ('X-Real-IP: 203.0.113.9 X-Forwarded-For: 8.8.8.8',
+                     'proxy_pass http://8.8.8.8/;', 'MySQL host 8.8.8.8 refused'):
+            assert '8.8.8.8' in DarkwebModule._public_ipv4_in(text)[0], text
+        # and it arrives with provenance, which is what the pivot gate reads.
+        _v, ev = DarkwebModule._public_ipv4_in('<div id="footer">host 8.8.8.8</div>')
+        assert ev['8.8.8.8']['section'] == 'footer'
 
     def test_validated_excludes_onion_slices(self):
         onion = 'a' * 56 + '.onion'

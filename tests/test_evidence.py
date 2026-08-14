@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from cybertrace.correlate import market_artifact_map, markets_for_entity
 from cybertrace.evidence import (
     EvidenceStore, ingest, detect_clones, fingerprint_signature, page_similarity,
     structural_similarity,
@@ -608,6 +609,61 @@ def test_index_hits_are_discovery_not_links(tmp_path):
         types = {r["rtype"] for r in store._all(
             "SELECT rtype FROM relationships WHERE rtype IN ('LINKS_TO','DISCOVERED_VIA')")}
         assert types == {"LINKS_TO", "DISCOVERED_VIA"}
+
+
+def test_a_target_never_fetched_observes_nothing(tmp_path):
+    """The site did not answer; an index still did. What the index had on file
+    is evidence about the index, and attributing it to the target is how five
+    dark onions in the v4 corpus each ended up holding between two and eleven
+    artifacts nobody had ever seen on them.
+
+    The snapshot is still written — we asked, and that is provenance — but it
+    is DISCOVERY, so every read that means "observed on this target" skips it.
+    """
+    result = ModuleResult(target=ONION_A, target_type='darkweb', module='darkweb')
+    result.sources['target_onion'] = SourceResult(
+        source='target_onion', success=False,
+        error='Onion unreachable via Tor (127.0.0.1:9050 is up) — the site is down')
+    result.sources['torch'] = SourceResult(
+        source='torch', success=True,
+        data={'onion_addresses_found': [ONION_B], 'emails': ['op@morke.ru']})
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(result, store)
+        statuses = {r["collector"]: r["status"] for r in store._all(
+            "SELECT collector, status FROM snapshots")}
+        assert statuses == {'target_onion': 'DOWN', 'torch': 'DISCOVERY'}
+
+        # Nothing was observed ON this target, so it holds no artifacts and
+        # cannot pair with anything.
+        assert market_artifact_map(store) == {}
+        email = store.find_entity("EMAIL", "op@morke.ru")
+        assert email is not None, "the lead itself is still recorded"
+        assert markets_for_entity(store, email) == []
+        # …and the edge says the site mentions it, not that the site uses it:
+        # nobody reached the site to see it use anything.
+        assert {r["rtype"] for r in store._all(
+            "SELECT rtype FROM relationships WHERE target_entity_id=?",
+            (email,))} == {"MENTIONS"}
+
+
+def test_roster_addresses_do_not_become_operator_identity(tmp_path):
+    """A list subscriber's address is real and is not the operator's. It stays
+    in the graph as a MENTIONS lead; the contact mailbox beside it keeps the
+    USES_EMAIL edge that makes it an attribution artifact."""
+    result = _result(
+        ONION_A,
+        emails=['honeytroll@riseup.net', 'support@dnmx.cc'],
+        artifact_evidence={'honeytroll@riseup.net': {'section': 'roster'},
+                           'support@dnmx.cc': {'section': 'contact'}})
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(result, store)
+        edges = {r["v"]: r["rtype"] for r in store._all(
+            "SELECT e.normalized_value v, r.rtype FROM relationships r "
+            "JOIN entities e ON e.entity_id = r.target_entity_id "
+            "WHERE e.etype='EMAIL'")}
+        assert edges == {'honeytroll@riseup.net': 'MENTIONS',
+                         'support@dnmx.cc': 'USES_EMAIL'}
 
 
 def test_change_detection_ignores_per_visit_noise(tmp_path):

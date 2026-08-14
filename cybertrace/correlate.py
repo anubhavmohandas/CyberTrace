@@ -191,7 +191,7 @@ def entity_discrimination(store: EvidenceStore) -> Dict[str, float]:
         "SELECT o.entity_id, COUNT(DISTINCT s.target_id) AS df FROM observations o "
         "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
         "JOIN targets t ON t.target_id = s.target_id "
-        "WHERE t.url != ? GROUP BY o.entity_id", (DERIVED_TARGET,))
+        "WHERE t.url != ? AND s.status='OK' GROUP BY o.entity_id", (DERIVED_TARGET,))
     if n_targets < 3:
         return {r["entity_id"]: 1.0 for r in rows}
     scale = math.log(n_targets)
@@ -226,12 +226,19 @@ def username_aliases(store: EvidenceStore, min_sim: float = 0.82) -> List[dict]:
 # --- convergence -------------------------------------------------------------
 
 def markets_for_entity(store: EvidenceStore, entity_id: str) -> List[str]:
-    """Targets where this entity was actually observed (not merely linked)."""
+    """Targets where this entity was actually observed (not merely linked).
+
+    OK snapshots only. A DISCOVERY row means an index answered a query naming
+    the target, so counting it here would let a site nobody reached still hold
+    artifacts — and `min_markets`, the floor that stops one observation becoming
+    an attribution, would be cleared by two search results.
+    """
     rows = store._all(
         "SELECT DISTINCT s.target_id FROM observations o "
         "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
         "JOIN targets t ON t.target_id = s.target_id "
-        "WHERE o.entity_id=? AND t.url != ?", (entity_id, DERIVED_TARGET))
+        "WHERE o.entity_id=? AND t.url != ? AND s.status='OK'",
+        (entity_id, DERIVED_TARGET))
     return sorted(r["target_id"] for r in rows)
 
 
@@ -438,14 +445,20 @@ def crypto_clusters(store: EvidenceStore) -> Dict[str, str]:
 # --- successors --------------------------------------------------------------
 
 def market_artifact_map(store: EvidenceStore) -> Dict[str, Dict[str, Set[str]]]:
-    """target_id -> {etype: {entity_id}} over everything observed there."""
+    """target_id -> {etype: {entity_id}} over everything observed there.
+
+    OK snapshots only, for the same reason as markets_for_entity: pairs are
+    built from this map, and a target that never answered has nothing to pair
+    ON. Read off DISCOVERY rows, two dark markets that happened to co-rank
+    beside one link directory become a pair with shared artifacts.
+    """
     out: Dict[str, Dict[str, Set[str]]] = defaultdict(lambda: defaultdict(set))
     for r in store._all(
             "SELECT s.target_id, o.entity_id, e.etype FROM observations o "
             "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
             "JOIN entities e ON e.entity_id = o.entity_id "
             "JOIN targets t ON t.target_id = s.target_id "
-            "WHERE t.url != ?", (DERIVED_TARGET,)):
+            "WHERE t.url != ? AND s.status='OK'", (DERIVED_TARGET,)):
         out[r["target_id"]][r["etype"]].add(r["entity_id"])
     return out
 

@@ -34,7 +34,16 @@ def audit(paths: list[Path], show_values: bool) -> int:
     accepted: dict[str, Counter] = defaultdict(Counter)
     rejected: dict[str, Counter] = defaultdict(Counter)
     enriched: Counter = Counter()
-    per_target: list[tuple[str, int, int]] = []
+    per_target: list[tuple] = []
+
+    # Entities the extractors read off the site, and separately the ones only an
+    # index had on file. Counting the entities table wholesale conflated the two
+    # and reported eleven artifacts for a target that never answered — the exact
+    # claim this audit exists to make checkable.
+    OBSERVED = ("SELECT DISTINCT e.etype, e.normalized_value, e.metadata "
+                "FROM entities e JOIN observations o ON o.entity_id = e.entity_id "
+                "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
+                "WHERE s.status=?")
 
     for path in paths:
         data = json.loads(path.read_text())
@@ -53,8 +62,8 @@ def audit(paths: list[Path], show_values: bool) -> int:
             if not ingest(data, store):
                 print(f"  ! {path.name}: nothing ingested "
                       f"(no target, or every source failed)", file=sys.stderr)
-            rows = store.conn.execute(
-                "SELECT etype, normalized_value, metadata FROM entities").fetchall()
+            rows = store.conn.execute(OBSERVED, ("OK",)).fetchall()
+            discovered = store.conn.execute(OBSERVED, ("DISCOVERY",)).fetchall()
             for row in rows:
                 accepted[row["etype"]][row["normalized_value"]] += 1
                 if row["metadata"] and row["metadata"] not in ("{}", ""):
@@ -62,17 +71,24 @@ def audit(paths: list[Path], show_values: bool) -> int:
             for (etype, raw), n in store.rejected.items():
                 rejected[etype][raw] += n
             per_target.append((path.name, len(rows), sum(store.rejected.values()),
-                               visited))
+                               visited, len(discovered)))
 
     print("\n=== per target ===")
-    print(f"{'target':<30}{'valid':>7}{'rejected':>10}{'precision':>11}{'fetched':>9}")
-    for name, ok, bad, was_visited in per_target:
+    print(f"{'target':<30}{'observed':>10}{'rejected':>10}{'precision':>11}"
+          f"{'fetched':>9}{'discovery':>11}")
+    for name, ok, bad, was_visited, disc in per_target:
         total = ok + bad
         p = f"{ok / total:.2f}" if total else "--"
-        print(f"{name[:29]:<30}{ok:>7}{bad:>10}{p:>11}"
-              f"{'yes' if was_visited else 'NO':>9}")
+        print(f"{name[:29]:<30}{ok:>10}{bad:>10}{p:>11}"
+              f"{'yes' if was_visited else 'NO':>9}{disc:>11}")
+    # A target that never answered must show a blank observed column: whatever
+    # an index still had on file is discovery, and belongs in the last column.
+    leaked = [n for n, ok, _b, was_visited, _d in per_target if ok and not was_visited]
+    if leaked:
+        print(f"\n  ! target-observed artifacts from never-fetched targets: "
+              f"{', '.join(leaked)}", file=sys.stderr)
 
-    print("\n=== per entity type (corpus) ===")
+    print("\n=== per entity type (corpus, target-observed only) ===")
     print(f"{'type':<20}{'extracted':>10}{'valid':>7}{'rejct':>7}"
           f"{'precision':>11}{'enriched':>10}")
     for etype in sorted(set(accepted) | set(rejected)):
