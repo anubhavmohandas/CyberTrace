@@ -426,10 +426,18 @@ domain.tld domain.com yourdomain.com mydomain.com site.com
 """.split())
 _PLACEHOLDER_TLDS = frozenset("example test invalid localhost local tld".split())
 # `test1@`, `user2@` — a trailing digit is how a doc example enumerates accounts.
-_PLACEHOLDER_LOCAL_RE = re.compile(
-    r"(?:test|example|sample|user|username|youremail|your-email|yourname|email"
+_PLACEHOLDER_WORDS = (
+    r"test|example|sample|user|username|youremail|your-email|yourname|email"
     r"|someone|somebody|foo|bar|baz|firstname|lastname|changeme|placeholder"
-    r"|john\.?doe|jane\.?doe)\d*"
+    r"|john\.?doe|jane\.?doe"
+)
+# …and a local part built ONLY out of those words is still a placeholder however
+# many are strung together: Cock.li's webmail prints `example-test@cock.li` into
+# its login field, which the single-word form accepted as a real mailbox one
+# pivot short of a keyserver lookup. A part that mixes in anything else —
+# `bar-support@` — fails the full match and is kept.
+_PLACEHOLDER_LOCAL_RE = re.compile(
+    rf"(?:{_PLACEHOLDER_WORDS})\d*(?:[-_.](?:{_PLACEHOLDER_WORDS})\d*)*"
 )
 
 
@@ -469,6 +477,25 @@ def norm_email(value: str) -> Optional[str]:
             or _registrable(domain) in _PLACEHOLDER_DOMAINS
             or domain.rpartition(".")[2] in _PLACEHOLDER_TLDS
             or _PLACEHOLDER_LOCAL_RE.fullmatch(local)):
+        return None
+    # A mailbox AT page furniture is page furniture. The stoplist below already
+    # declares these hosts to be things any two unrelated sites cite, and that
+    # reasoning does not stop at the hostname: `gettor@torproject.org` is a Tor
+    # download instruction, not somebody's contact address, and an address at a
+    # code host or a standards body belongs to that organisation rather than to
+    # whoever printed it.
+    #
+    # Measured, and it is the case this whole corpus exists to catch. SecureDrop
+    # ships that gettor address in its Tor install instructions, so four
+    # independently-operated newsrooms — CBC, Forbes, The Guardian, ProPublica —
+    # published the same mailbox. EMAIL is a full-control artifact class, so the
+    # engine promoted it to an OPERATOR candidate spanning all four at 0.47,
+    # against 0.58 for the genuine DNMX pair. Commonness could not save it and
+    # never could: with 5 of the world's SecureDrop instances in the corpus, the
+    # platform's own address measures as RARE (0.67, well over the 0.5 floor).
+    # That is the general shape of the problem — a corpus never holds enough of
+    # a family for frequency alone to expose the family's furniture.
+    if domain in _BOILERPLATE_DOMAINS or _registrable(domain) in _BOILERPLATE_DOMAINS:
         return None
     # An onion mailbox is a real operator pivot, so it is accepted — but only for
     # an address that is actually an onion. `user@example.onion` is documentation.
@@ -526,6 +553,34 @@ _DOMAIN_RE = re.compile(
 # DOMAIN entities is what manufactures "shared infrastructure" between markets
 # and then a SUCCESSOR hypothesis on top of it, so the stoplist has to apply
 # before the entity exists, not at scoring time where the edge already ranks.
+#
+# The second block was measured on the v5 corpus, where each of these was the
+# ONLY thing joining two unrelated targets: `ogp.me` (an Open Graph namespace
+# declared in a meta prefix) paired Blockchair with Riseup, `t.me` paired
+# Blockchair with the Tor Project, `duckduckgo.com` paired Riseup with the Tor
+# Project, `bitcoin.it` paired Endchan with Riseup, and the WordPress pingback
+# and stats hosts paired the two DNMX addresses for a reason that has nothing to
+# do with their operator. Note what is NOT here: only the *host* is ever kept —
+# norm_domain drops the path — so `t.me/someone` cannot carry an operator handle
+# either way, and stoplisting the host loses no identity that ever existed.
+#
+# Two kinds of domain are deliberately NOT here, and both would do real damage:
+#
+#   a platform's own domain (onionmail.info, lynxchan.com) — that is the
+#   ecosystem signal. Refusing it as an entity would leave two servers of one
+#   mail platform sharing nothing, so the engine would rank them UNRELATED by
+#   accident instead of reporting SHARED_PLATFORM and saying why. Commonness
+#   scoring, not a stoplist, is what keeps a platform domain from reading as an
+#   operator — see correlate.contradictions_from_commonness.
+#
+#   a domain some target IS (blockchair.com, facebook.com, reddit.com). Every
+#   one of those is a plausible onion target, and its clearnet name is that
+#   operator's own identity, not furniture on its own site.
+#
+# occam: a named list, no PSL and no crawl-frequency model. Commonness scoring in
+# correlate.entity_discrimination is the general mechanism; this list is only for
+# furniture that must never become an entity at all. Add to it from measured
+# false pairs, never speculatively.
 _BOILERPLATE_DOMAINS = frozenset("""
 w3.org w.org wordpress.org wordpress.com schema.org unicode.org ietf.org
 torproject.org getmonero.org bitcoin.org gnupg.org openpgp.org letsencrypt.org
@@ -533,6 +588,15 @@ github.com github.io gitlab.com sourceforge.net npmjs.com jquery.com
 google.com googleapis.com gstatic.com googletagmanager.com google-analytics.com
 mozilla.org wikipedia.org wikimedia.org archive.org archive.is creativecommons.org
 cloudflare.com jsdelivr.net unpkg.com bootstrapcdn.com fontawesome.com
+
+ogp.me purl.org xmlns.com rssboard.org phrasewise.com pingomatic.com
+wp-statistics.com automattic.com gravatar.com
+gnu.org fsf.org apache.org nginx.org debian.org ubuntu.com python.org nodejs.org
+perl.org php.net mysql.com postgresql.org bitcoin.it
+duckduckgo.com bing.com startpage.com searx.me yandex.com
+t.me telegram.org telegram.me twitter.com x.com instagram.com
+youtube.com youtu.be linkedin.com mastodon.social matrix.org
+signal.org whatsapp.com paypal.com patreon.com opencollective.com
 """.split())
 
 
@@ -543,6 +607,14 @@ def norm_domain(value: str) -> Optional[str]:
     value = value.split("/", 1)[0].split(":", 1)[0].rstrip(".")
     if value.endswith(".onion"):
         return None                                   # an onion is not a domain entity
+    if norm_ip(value):
+        # A literal address in a URL is a host, and there is already an entity
+        # type and an extractor for that. Admitted here it became a second,
+        # weaker copy of the same fact under the wrong type — and `_registrable`
+        # bucketed 78.17.212.207 as "212.207", so two unrelated addresses in one
+        # /16 would have grouped as one namespace and drawn the multi-host
+        # context bonus meant for an operator's own subdomains.
+        return None
     if not _DOMAIN_RE.fullmatch(value):
         return None
     if value in _BOILERPLATE_DOMAINS or _registrable(value) in _BOILERPLATE_DOMAINS:

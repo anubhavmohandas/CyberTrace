@@ -246,3 +246,404 @@ onion = "sector2nyjrxphgrj3cvnueanomz4trvgyxofvu3cexltoxuegtlmzid.onion"
 operator = ""
 platform = ""
 basis = "unidentified; no public operator statement found"
+
+# --- OnionMail: one platform, independent operators -------------------------
+# The negative control the whole engine exists to pass, finally instantiated
+# with enough members to be a real test rather than a single server.
+#
+# Every one of these is a server of the same federated mail platform. They serve
+# an identical page template (one DOM simhash across all 26), answer with the
+# same `Server: OnionMail` banner, and reference the same three platform hosts —
+# onionmail.info, tramaci.org (the software author) and mes3hacklab.org. They
+# are run by different people, and each serves its own distinct certificate at
+# /<name>.pem: 26 servers, 26 different certificate hashes.
+#
+# Basis for every row: onionmail.info publishes the server directory these were
+# taken from, which is a statement by the platform and not by CyberTrace.
+#
+# anon01/anon02/anon03 are deliberately left unlabeled below. They share a
+# naming series, and nothing checkable says whether that is one operator or
+# three. A guessed label there would grade the engine against a coin flip.
+[[target]]
+name = "onionmail-adunanza"
+onion = "j3bv7g27oramhbxxuv6gl3dcyfmf44qnvju3offdyrap7hurfprq74qd.onion"
+operator = "adunanza"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the adunanza server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /adunanza.pem"
+
+[[target]]
+name = "onionmail-anon01"
+onion = "ekfrmoctyeld7qnwq53zfrgfhehkaqckexpxi3s7re4vbupy5op5jwid.onion"
+operator = ""
+platform = ""
+basis = "listed by onionmail.info as the anon01 server, but the anon0N naming series gives no checkable basis for whether these are one operator or three — unlabeled on purpose, never scored"
+
+[[target]]
+name = "onionmail-anon02"
+onion = "ak6fevzpzuxpcrqym4kc4m7f3j7ysypalfk7gdgguoyoej6w74uiihqd.onion"
+operator = ""
+platform = ""
+basis = "listed by onionmail.info as the anon02 server, but the anon0N naming series gives no checkable basis for whether these are one operator or three — unlabeled on purpose, never scored"
+
+[[target]]
+name = "onionmail-anon03"
+onion = "wz7p2u7dd2ojn3wa4ooa4ohcml7dxqkkdgdstcifqrsxkqgzsmlokrqd.onion"
+operator = ""
+platform = ""
+basis = "listed by onionmail.info as the anon03 server, but the anon0N naming series gives no checkable basis for whether these are one operator or three — unlabeled on purpose, never scored"
+
+[[target]]
+name = "onionmail-anonmail"
+onion = "yllvy3mhtamstbqzm4wucfwab57ap6zraxqvkjn2iobmrtxdsnb37dqd.onion"
+operator = "anonmail"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the anonmail server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /anonmail.pem"
+
+[[target]]
+name = "onionmail-anonymous"
+onion = "frpru5dcsywlzypkrxhzg5u2cgx2pfwu3afk7uv7cpvuvgqc6viwubyd.onion"
+operator = "anonymous"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the anonymous server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /anonymous.pem"
+
+[[target]]
+name = "onionmail-bentham"
+onion = "hi3ftg6fgasaquw6c3itzif4lc2upj5fanccoctd5p7xrgrsq7wjnoqd.onion"
+operator = "bentham"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the bentham server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /bentham.pem"
+
+[[target]]
+name = "onionmail-disobey"
+onion = "a5dkbvgakon2lxmauleiizkv6i3s36wp6w3i32a3buc4xmtdnbttmryd.onion"
+operator = "disobey"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the disobey server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /disobey.pem"
+
+[[target]]
+name = "onionmail-dozaru"
+onion = "eot3almpracnkz7gz3r5yr3qaymngqsrmvbica2shw5zuc52az2gxoqd.onion"
+operator = "dozaru"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the dozaru server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /dozaru.pem"
+
+[[target]]
+name = "onionmail-ecwoequ"
+onion = "4zgh4wbaim7bvgdn3imza2xllmsjua4q33uovmu3pp2kasfarx3cqvad.onion"
+operator = "ecwoequ"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the ecwoequ server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /ecwoequ.pem"
+
+[[target]]
+name = "onionmail-hiddenmail"
+onion = "5nm4mdhzyfbif6i5qv3kh4i7j2trlbuvujsencsqn55opaa3d6qhfcqd.onion"
+operator = "hiddenmail"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the hiddenmail server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /hiddenmail.pem"
+
+[[target]]
+name = "onionmail-hobe"
+onion = "ovhcd6qhuz22bid42pw7unwfqf7i55rghb5x62q4kxchjnk2gz2ot6id.onion"
+operator = "hobe"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the hobe server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /hobe.pem"
+
+[[target]]
+name = "onionmail-ihp"
+onion = "n22igu666q5itcsr4sznce7a6wyvqugiwwdvtunqb6imogqiqhkhplyd.onion"
+operator = "ihp"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the ihp server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /ihp.pem"
+
+[[target]]
+name = "onionmail-kozonygi"
+onion = "ooh6e6c3jc4uxmq6ckywbqzscefvfbeuqbzabiiqbt54cv23cxvec2qd.onion"
+operator = "kozonygi"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the kozonygi server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /kozonygi.pem"
+
+[[target]]
+name = "onionmail-mes3hacklab"
+onion = "ea6oxbbgcgd6uso4jkbxdzjokigi2uztfn7jy4yrm3tmlbvjcuewyuad.onion"
+operator = "mes3hacklab"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the mes3hacklab server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /mes3hacklab.pem"
+
+[[target]]
+name = "onionmail-nitega"
+onion = "pwnxp3jvxapsaqry6pcomfkd4g3pth6nf5a6qlm5eyue4guocbsphrqd.onion"
+operator = "nitega"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the nitega server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /nitega.pem"
+
+[[target]]
+name = "onionmail-nonwo"
+onion = "uohj2kmbnoto2nigtsnosfqgjeja5sprtnpb66bgeiotzujexzevouid.onion"
+operator = "nonwo"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the nonwo server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /nonwo.pem"
+
+[[target]]
+name = "onionmail-onionmail"
+onion = "vzoc4aylgsqwexe6okjbz2ix5atgdv5xyibnkcekmtg4u23syz6a7rid.onion"
+operator = "onionmail"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the onionmail server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /onionmail.pem"
+
+[[target]]
+name = "onionmail-orwell"
+onion = "oo4a5fbitngtpxc6todrpwlnq7z4jau4x5hmfirotiuhadtdwoldy5qd.onion"
+operator = "orwell"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the orwell server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /orwell.pem"
+
+[[target]]
+name = "onionmail-qqbbs"
+onion = "aq2f24ccixpfvq2nxw4gpozdcfb3bhrgnswf4oxx22jkw2hbqq3b4eqd.onion"
+operator = "qqbbs"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the qqbbs server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /qqbbs.pem"
+
+[[target]]
+name = "onionmail-ridot"
+onion = "czw66gso77uiz3yxilo36rqramjb4mmvv6dsnianev6achfehzpsilqd.onion"
+operator = "ridot"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the ridot server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /ridot.pem"
+
+[[target]]
+name = "onionmail-robertpolsen"
+onion = "fs4lnzvstmzxgo2dne6jcj436agjvhpjerju2nqowu2kx66mn7asf6yd.onion"
+operator = "robertpolsen"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the robertpolsen server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /robertpolsen.pem"
+
+[[target]]
+name = "onionmail-rocpiiz"
+onion = "kmksg5s5mb64c3gxxw2ltrk2yeqphzgfbgy7xwrm335blpvdumgzbiyd.onion"
+operator = "rocpiiz"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the rocpiiz server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /rocpiiz.pem"
+
+[[target]]
+name = "onionmail-secretmail"
+onion = "2nxpboa3ya52j5au4gxwkdt4nxoh5g4y4f3tuqedlza46y35jmv6doid.onion"
+operator = "secretmail"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the secretmail server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /secretmail.pem"
+
+[[target]]
+name = "onionmail-syyqe"
+onion = "fiy37zb6iqlh2imoe272qgt7tj3lm5fhersqo3ploago6ckcpbn6liid.onion"
+operator = "syyqe"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the syyqe server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /syyqe.pem"
+
+[[target]]
+name = "onionmail-takaranet"
+onion = "72mhdnnn5pl6ozoykrhujigzimbnuops5qskezs6v6lxnqjg6zh7aoid.onion"
+operator = "takaranet"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the takaranet server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /takaranet.pem"
+
+[[target]]
+name = "onionmail-tymeioigi"
+onion = "7kd5gvuzuu44obhhghomhr4sisjfbrpw5bkcofjqknmxx6sfcw3rerid.onion"
+operator = "tymeioigi"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the tymeioigi server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /tymeioigi.pem"
+
+[[target]]
+name = "onionmail-unknown"
+onion = "fi6p22ee2paf5ghglvstr3qyx67cgw3gle56exwmbdrx24pv3krl2uqd.onion"
+operator = "unknown"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the unknown server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /unknown.pem"
+
+[[target]]
+name = "onionmail-unteh4"
+onion = "rzgqupvabqs5f5ckzfv4mbzhzhkoiawor4rukcp3jivmln7tcnv7xbqd.onion"
+operator = "unteh4"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the unteh4 server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /unteh4.pem"
+
+[[target]]
+name = "onionmail-walajo"
+onion = "h3sznixdufwql7dwfrvtlrk5eqlkovr2baiujrxq477xhy32e6niepad.onion"
+operator = "walajo"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the walajo server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /walajo.pem"
+
+[[target]]
+name = "onionmail-winston"
+onion = "qeb7davo4tnjkf3bk3rxy4qkbbe7wfga26kz24qyxmt3tmckt2kk3zyd.onion"
+operator = "winston"
+platform = "onionmail"
+basis = "onionmail.info's published server directory lists this as the winston server; the platform is federated, servers are independently run, and this one serves its own distinct certificate at /winston.pem"
+
+
+# --- SecureDrop: one platform, independent operators ------------------------
+# The harder half of the same test, and the one that bites: the SecureDrop
+# template publishes `gettor@torproject.org` in its Tor install instructions, so
+# several independently-operated newsroom instances legitimately share a mailbox
+# — a full-control artifact class, not a mere reference. Any engine that reads a
+# shared mailbox as shared control attributes five newspapers to one operator.
+# They also share an Apache banner and the platform's session cookie names.
+[[target]]
+name = "securedrop-bloomberg-news"
+onion = "ogdwaroarq4p6rnfn2hl4crvldyruyc2g24435qtxmd3twhevg7dsqid.onion"
+operator = "bloomberg-news"
+platform = "securedrop"
+basis = "securedrop.org's published instance directory attributes this address to Bloomberg News, which operates it; SecureDrop is deployed and run separately by each newsroom"
+
+[[target]]
+name = "securedrop-cbc"
+onion = "gppg43zz5d2yfuom3yfmxnnokn3zj4mekt55onlng3zs653ty4fio6qd.onion"
+operator = "cbc"
+platform = "securedrop"
+basis = "securedrop.org's published instance directory attributes this address to CBC, which operates it; SecureDrop is deployed and run separately by each newsroom"
+
+[[target]]
+name = "securedrop-forbes"
+onion = "6zonlfhh7aqtfwoyvdlad3nxn6ljecx2k6tyyy3spt43nn54q6lvncid.onion"
+operator = "forbes"
+platform = "securedrop"
+basis = "securedrop.org's published instance directory attributes this address to Forbes, which operates it; SecureDrop is deployed and run separately by each newsroom"
+
+[[target]]
+name = "securedrop-guardian"
+onion = "xp44cagis447k3lpb4wwhcqukix6cgqokbuys24vmxmbzmaq2gjvc2yd.onion"
+operator = "guardian"
+platform = "securedrop"
+basis = "securedrop.org's published instance directory attributes this address to The Guardian, which operates it; SecureDrop is deployed and run separately by each newsroom"
+
+[[target]]
+name = "securedrop-new-york-times"
+onion = "ej3kv4ebuugcmuwxctx5ic7zxh73rnxt42soi3tdneu2c2em55thufqd.onion"
+operator = "new-york-times"
+platform = "securedrop"
+basis = "securedrop.org's published instance directory attributes this address to New York Times, which operates it; SecureDrop is deployed and run separately by each newsroom"
+
+[[target]]
+name = "securedrop-propublica"
+onion = "33xu4yhum2eiisxm6fntaslayop76fvaqgt3ak5dakdm3t7cub25cead.onion"
+operator = "propublica"
+platform = "securedrop"
+basis = "securedrop.org's published instance directory attributes this address to ProPublica, which operates it; SecureDrop is deployed and run separately by each newsroom"
+
+[[target]]
+name = "securedrop-the-economist"
+onion = "mxmddqsh4jnr4gjan37ayin3fu5ecnejxge4wjhj4i45qq5djbxdjtad.onion"
+operator = "the-economist"
+platform = "securedrop"
+basis = "securedrop.org's published instance directory attributes this address to The Economist, which operates it; SecureDrop is deployed and run separately by each newsroom"
+
+[[target]]
+name = "securedrop-washington-post"
+onion = "vfnmxpa6fo4jdpyq3yneqhglluweax2uclvxkytfpmpkp5rsl75ir5qd.onion"
+operator = "washington-post"
+platform = "securedrop"
+basis = "securedrop.org's published instance directory attributes this address to The Washington Post, which operates it; SecureDrop is deployed and run separately by each newsroom"
+
+# --- Unrelated: a co-reference hub ------------------------------------------
+# Reached because Endchan's page links it. It is a different imageboard on a
+# different stack (PHP/PHPSESSID against Endchan's LynxChan) and it links a
+# directory of other boards plus Dread and dark.fail — so it is the natural test
+# that being linked BY a target, and co-linking what a target links, creates no
+# operator relationship.
+[[target]]
+name = "81chan"
+onion = "seksenzircjwyrovtwm2q45s2gydk3qbqttbvccvwvvgrmel6s27ddid.onion"
+operator = "81chan"
+platform = "unknown"
+basis = "self-branded 81chan and references its own 81chan.st clearnet domain; a PHP imageboard, unrelated to Endchan whose page links it"
+
+
+# --- Cock.li: one operator, two onion services ------------------------------
+# A SAME_OPERATOR pair on the NAMESPACE class, deliberately labeled as such.
+# cock.li publishes both addresses on its own clearnet front page — the operator
+# naming its own addresses, the strongest basis there is — but what the two
+# actually share is cock.li and mail.cock.li, the operator's own hosts. Read its
+# recall the way the Riseup family is read: a miss here is the engine declining
+# to promote a domain reference, not failing to see reused operator evidence.
+
+[[target]]
+name = "cockli-main"
+onion = "rurcblzhmdk22kttfkel2zduhyu3r6to7knyc7wiorzrx5gw4c3lftad.onion"
+operator = "cock.li"
+platform = "cockli"
+basis = "cock.li's own clearnet front page publishes this onion; the page served here is the Cock.li site and it links the webmail onion below"
+
+[[target]]
+name = "cockli-webmail"
+onion = "xdkriz6cn2avvcr2vks5lvvtmfojz2ohjzj4fhyuka55mvljeso2ztqd.onion"
+operator = "cock.li"
+platform = "cockli"
+basis = "cock.li's own clearnet front page publishes this onion as its webmail, and the Cock.li onion above links it"
+
+# --- Singletons reached from other targets' link lists -----------------------
+# Each self-brands and names its own clearnet domain — the standard already used
+# for darkforest and blackhat-chat. They are here as negative controls: several
+# were reached BECAUSE Endchan or 81chan links them, so they test that being
+# linked by a target, and co-linking what a target links, creates no operator
+# relationship. Platform is left unknown rather than guessed, which scores every
+# pair involving them as UNRELATED.
+
+[[target]]
+name = "kohlchan"
+onion = "kohlchanvwpfx6hthoti5fvqsjxgcwm3tmddvpduph5fqntv5affzfqd.onion"
+operator = "kohlchan"
+platform = "unknown"
+basis = "self-branded KOHLCHAN; a separate imageboard reached from 81chan's board list"
+
+[[target]]
+name = "dnm-bible"
+onion = "biblemeowimkh3utujmhm6oh2oeb3ubjw2lpgeq3lahrfr2l6ev6zgyd.onion"
+operator = "dnmbible"
+platform = "unknown"
+basis = "self-branded 'DNM Bible', a guide site reached from 81chan's link list"
+
+[[target]]
+name = "pogachan"
+onion = "jhq6qyucarzjdamhvbwk2botuuzv3e5t6f5ffuokhima3jedfu6dyeyd.onion"
+operator = "pogachan"
+platform = "unknown"
+basis = "self-branded Pogachan and references its own pogachan.icu clearnet domain"
+
+[[target]]
+name = "opsec-manual"
+onion = "jqibjqqagao3peozxfs53tr6aecoyvctumfsc2xqniu4xgcrksal2iqd.onion"
+operator = "opsec-manual"
+platform = "unknown"
+basis = "self-branded 'The OpSec Manual' with its own contact, donate, canary and PGP directory pages"
+
+[[target]]
+name = "darknetpedia"
+onion = "7el2sx2bez3nvrcc4th6ws546z6m7q2h2e2n3e2tz6lkxdd3qpokqpid.onion"
+operator = "darknetpedia"
+platform = "unknown"
+basis = "self-branded DarknetPedia; answered only with its access-queue page, so it contributes collection but no artifacts"
+
+[[target]]
+name = "itinerarium-mentis"
+onion = "itmens77beqdonoqos4tybglw7vuui4m36dnrrfbfnvkif3yhjukgjqd.onion"
+operator = "itinerariummentis"
+platform = "unknown"
+basis = "self-branded 'Itinerarium Mentis' and references its own itinerariummentis.org clearnet domain"
+
+# Unlabeled on purpose. itmens-2 shares the `itmens` vanity prefix with the blog
+# above, which is suggestive of one operator and is not a basis — and it answers
+# 404, so there is nothing to identify it by either way. digdig never answered.
+[[target]]
+name = "itmens-2"
+onion = "itmensf6tlh4ccibncmbeeidaaw7imhhsbovddstyujmfarks42bxiqd.onion"
+operator = ""
+platform = ""
+basis = "shares the `itmens` vanity prefix with itinerarium-mentis, which suggests one operator and proves nothing; answers 404, so no content identifies it"
+
+[[target]]
+name = "digdig"
+onion = "digdig2nugjpszzmqe5ep2bk7lqfpdlyrkojsx2j6kzalnrqtwedr3id.onion"
+operator = ""
+platform = ""
+basis = "reached from 81chan's link list; never answered, and no public statement identifies its operator"

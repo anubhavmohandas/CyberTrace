@@ -131,3 +131,30 @@ def test_build_graph_from_dict_matches_object_path():
     from_obj = build_graph(r).to_dict()
     from_dict = build_graph_from_dict(r.to_dict()).to_dict()
     assert {n['id'] for n in from_obj['nodes']} == {n['id'] for n in from_dict['nodes']}
+
+
+def test_quoted_artifacts_never_cluster_two_markets():
+    """`cybertrace correlate a.json b.json` (no --db) reaches this path, not the
+    evidence store — and correlate() clusters markets on any node holding two of
+    them. Two sites quoting one third party's address therefore became a shared
+    operator candidate here, months after the store path learned not to. The
+    node stays: it is real, it is just nobody's identity.
+    """
+    a, b = 'a' * 56 + '.onion', 'b' * 56 + '.onion'
+    graph = EvidenceGraph()
+    for onion in (a, b):
+        build_graph_from_dict({
+            'target': onion,
+            'sources': {'target_onion': {'success': True, 'timestamp': '2026-08-14',
+                'data': {'online': True,
+                         'emails': ['amrounix@gmail.com', f'admin@{onion[:6]}.cc'],
+                         'artifact_evidence': {
+                             'amrounix@gmail.com': {'section': 'quoted'},
+                             f'admin@{onion[:6]}.cc': {'section': 'contact'}}}}},
+        }, graph)
+
+    quoted = graph.nodes[EvidenceGraph.node_id('EMAIL', 'amrounix@gmail.com')]
+    assert quoted['markets'] == [], "quoted address belongs to whoever was quoted"
+    # …and it must not have seeded a handle for the pivot chain either.
+    assert EvidenceGraph.node_id('USERNAME', 'amrounix') not in graph.nodes
+    assert correlate(graph)['operator_candidates'] == []

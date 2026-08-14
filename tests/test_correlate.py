@@ -364,6 +364,84 @@ def test_platform_furniture_is_discounted_and_a_rare_artifact_is_not(tmp_path):
             c["value"] for c in candidate_operators(store)}      # unweighted: it passes
 
 
+def _key_certified_by(fpr: str, certifier: str) -> dict:
+    return {'key_id': f'PGP:{fpr}', 'fingerprint': fpr, 'role': 'contact',
+            'section': 'contact', 'certifiers': [certifier]}
+
+
+def test_a_site_that_came_back_was_never_taken_down(tmp_path):
+    """`temporal_handoff` reads "B appeared within 90 days of A being taken
+    down", so a predecessor that is alive right now makes every site collected
+    afterwards look like its successor.
+
+    Measured: Endchan was unreachable in one sweep and answered a few hours
+    later in the next. The stale DOWN row produced three SUCCESSOR_OF edges at
+    0.52 out of Endchan — to cock.li's mail service and a personal blog among
+    them, sharing nothing but a co-referenced host. Tor reachability flaps
+    routinely (7 of 41 targets failed one sweep here; 2 answered an hour later),
+    so this is the ordinary case.
+    """
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, seen=JAN, emails=['op@shop.li']), store)
+        target = store._one("SELECT target_id FROM targets WHERE url=?", (ONION_A,))["target_id"]
+        store.record_down(target, collector='target_onion', note='unreachable',
+                          observed_at=datetime(2026, 3, 1, tzinfo=timezone.utc).isoformat())
+        assert store.down_windows(), "while it is dark, the outage stands"
+
+        # …and then it answers again.
+        ingest(_result(ONION_A, seen=datetime(2026, 4, 1, tzinfo=timezone.utc),
+                       emails=['op@shop.li']), store)
+        assert store.down_windows() == {}, "a site that came back is not taken down"
+        assert store._one("SELECT active FROM targets WHERE url=?", (ONION_A,))["active"] == 1
+
+        # An unrelated site captured afterwards must not inherit a handoff.
+        ingest(_result(ONION_B, seen=AUG, emails=['someone@else.li'],
+                       clearnet_hosts_referenced=['shared-reference.li']), store)
+        ingest(_result(ONION_A, seen=AUG, emails=['op@shop.li'],
+                       clearnet_hosts_referenced=['shared-reference.li']), store)
+        signals = {s for p in detect_successors(store) for s in p["signals"]}
+        assert "temporal_handoff" not in signals
+
+
+def test_a_shared_certifier_is_not_a_shared_operator(tmp_path):
+    """The worst false-attribution path the engine had.
+
+    Every certifier inside a published key block is observed on the target —
+    honestly, the id really is in those bytes — while carrying no edge from the
+    market, because it is a property of the KEY. Read at full control weight,
+    two unrelated sites whose own distinct keys were both certified by one
+    ordinary web-of-trust signer scored `shared_pgp_key` (1.3) AND `signed_by`
+    (1.5): a noisy-OR near 0.9999 and a DIRECTIONAL successor edge between
+    strangers, on the strength of one signature neither of them made.
+
+    Absence of a market edge now floors at MENTIONS instead of defaulting to
+    full control, and `signed_by` requires both keys to be published by their
+    own side.
+    """
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=[_key_certified_by('A' * 40, 'C' * 40)]), store)
+        ingest(_result(ONION_B, pgp_keys=[_key_certified_by('B' * 40, 'C' * 40)]), store)
+
+        assert candidate_operators(store) == [], "a certifier attributes nobody"
+        pairs = detect_successors(store)
+        assert not [p for p in pairs if not p.get("suppressed")], "no asserted edge"
+        assert "signed_by" not in {s for p in pairs for s in p["signals"]}
+
+
+def test_one_key_published_by_both_still_correlates(tmp_path):
+    """The other half of the pair above: the guard must not cost the real
+    signal. Two sites that each publish the SAME key as their own remain an
+    operator candidate and a linked pair."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        for onion in (ONION_A, ONION_B):
+            ingest(_result(onion, pgp_keys=[_key_certified_by('A' * 40, 'C' * 40)]), store)
+
+        operators = candidate_operators(store)
+        assert [c["value"] for c in operators] == ['pgp:' + 'a' * 40]
+        assert operators[0]["n_markets"] == 2
+        assert [p["relation"] for p in detect_successors(store)] == ["LINKED_TO"]
+
+
 def test_a_two_market_corpus_keeps_its_only_signal(tmp_path):
     """With two markets, 'on both' IS the evidence. Dividing it away as common
     would silence the only thing a small case has to go on."""

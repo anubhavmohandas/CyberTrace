@@ -15,6 +15,7 @@ tier. Nothing here concludes an attribution — it ranks the links a human reads
 from typing import Any, Dict, List, Optional
 
 from .modules.base import ModuleResult
+from .normalize import NON_ATTRIBUTIVE_SECTIONS
 
 # Ordered weakest -> strongest. Rank lets a later correlation layer compare and
 # aggregate link strength; the order also drives the one-tier corroboration bump.
@@ -157,6 +158,19 @@ def _evidence(data: Dict[str, Any], value: str, rel: str) -> tuple:
     return conf, meta
 
 
+def _borrowed(data: Dict[str, Any], value: str) -> bool:
+    """True when the page reproduced this artifact rather than published it.
+
+    `correlate()` below clusters markets on any node holding two or more of
+    them, so attaching a market to a quoted address or a list subscriber is what
+    turns somebody else's identity into a shared operator. The store path gates
+    on the same set (evidence.ingest demotes the edge to MENTIONS); this is the
+    other consumer of it, reached by `cybertrace correlate` with no --db.
+    """
+    return ((data.get('artifact_evidence') or {}).get(value) or {}).get(
+        'section') in NON_ATTRIBUTIVE_SECTIONS
+
+
 def _fold(g: EvidenceGraph, mkt: str, data: Dict[str, Any], ts: str) -> EvidenceGraph:
     """Add one market's live-onion artifacts as nodes + evidence edges."""
     from .modules.darkweb_module import DarkwebModule  # lazy: reuse handle heuristic
@@ -165,10 +179,16 @@ def _fold(g: EvidenceGraph, mkt: str, data: Dict[str, Any], ts: str) -> Evidence
     onion = g.add_node('ONION_ADDRESS', mkt)
     g.add_edge(market, onion, 'HAS_ADDRESS', 'target_onion', ts)
 
+    # Artifacts the page reproduced rather than published stay in the graph as
+    # nodes — they are real and worth seeing — but carry no market, so they can
+    # never cluster two sites into one operator candidate. See _borrowed.
     for email in data.get('emails') or []:
-        nid = g.add_node('EMAIL', email, market=mkt)
+        borrowed = _borrowed(data, email)
+        nid = g.add_node('EMAIL', email, market=None if borrowed else mkt)
         conf, ev = _evidence(data, email, 'MENTIONS_EMAIL')
         g.add_edge(market, nid, 'MENTIONS_EMAIL', 'target_onion', ts, confidence=conf, **ev)
+        if borrowed:
+            continue        # and never seed a handle out of somebody else's address
         for user in DarkwebModule._usernames_from_emails([email]):
             un = g.add_node('USERNAME', user, market=mkt)
             g.add_edge(nid, un, 'HANDLE_OF', 'target_onion', ts)
@@ -177,13 +197,16 @@ def _fold(g: EvidenceGraph, mkt: str, data: Dict[str, Any], ts: str) -> Evidence
                       ('ETH', 'ethereum_addresses'),
                       ('XMR', 'monero_addresses')):
         for addr in data.get(key) or []:
-            nid = g.add_node('CRYPTO_ADDRESS', addr, market=mkt, coin=coin)
+            nid = g.add_node('CRYPTO_ADDRESS', addr, coin=coin,
+                             market=None if _borrowed(data, addr) else mkt)
             conf, ev = _evidence(data, addr, 'USES_CRYPTO')
             g.add_edge(market, nid, 'USES_CRYPTO', 'target_onion', ts,
                        confidence=conf, coin=coin, **ev)
 
     for k in data.get('pgp_keys') or []:
-        nid = g.add_node('PGP_KEY', k['key_id'], market=mkt)
+        # A key block carries its own section, not an artifact_evidence entry.
+        quoted = k.get('section') in NON_ATTRIBUTIVE_SECTIONS
+        nid = g.add_node('PGP_KEY', k['key_id'], market=None if quoted else mkt)
         g.add_edge(market, nid, 'USES_PGP', 'target_onion', ts)
 
     for host in data.get('clearnet_hosts_referenced') or []:
@@ -205,7 +228,7 @@ def _fold(g: EvidenceGraph, mkt: str, data: Dict[str, Any], ts: str) -> Evidence
         if m.get('ip')
     }
     for ip in data.get('candidate_operator_ips') or []:
-        nid = g.add_node('IP', ip, market=mkt)
+        nid = g.add_node('IP', ip, market=None if _borrowed(data, ip) else mkt)
         if ip in leaked or ip in misconfig_ips:
             conf, prov = 'strong', 'header/misconfig leak'
         elif ip in favicon_by_ip:

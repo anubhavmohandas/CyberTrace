@@ -535,12 +535,20 @@ class DarkwebModule(BaseModule):
         eth, ev_eth = self._validated(html, self._RE_ETH, norm_eth)
         xmr, ev_xmr = self._validated(html, self._RE_XMR, norm_xmr)
         ips, ev_ip = self._public_ipv4_in(html)
+        # Sectioned like every other artifact. An analytics id is the one class
+        # that reaches correlation at FULL control weight — USES_ANALYTICS is not
+        # in CONTEXT_WEIGHT, and "one account id across two markets is an
+        # operator-level tell" is exactly how the dossier reads it — so an id
+        # copied out of a quoted embed snippet was the cheapest way to attribute
+        # two unrelated sites to one operator. The regex is its own validator
+        # here: UA-/G-/GTM- shapes have no checksum to verify.
+        analytics, ev_analytics = self._validated(html, self._RE_ANALYTICS, lambda v: v)
         return {
             'emails': emails,
             'bitcoin_addresses': btc,
             'ethereum_addresses': eth,
             'monero_addresses': xmr,
-            'analytics_ids': sorted(set(self._RE_ANALYTICS.findall(html))),
+            'analytics_ids': analytics,
             'pgp_keys': self._extract_pgp_keys(html),
             # norm_domain rejects onions and anything that isn't a real hostname.
             'clearnet_hosts_referenced': sorted({
@@ -551,7 +559,8 @@ class DarkwebModule(BaseModule):
                 if a and a != onion_host
             ],
             'leaked_public_ipv4': ips,
-            'artifact_evidence': {**ev_btc, **ev_email, **ev_eth, **ev_xmr, **ev_ip},
+            'artifact_evidence': {**ev_btc, **ev_email, **ev_eth, **ev_xmr, **ev_ip,
+                                  **ev_analytics},
         }
 
     async def _fetch_target_onion(self, onion_host: str) -> SourceResult:

@@ -217,6 +217,23 @@ class TestDarkwebOperatorIntel:
             + 'write support@morke.ru</div>', DarkwebModule._RE_EMAIL, norm_email)
         assert ev['support@morke.ru']['section'] != 'quoted'
 
+    def test_analytics_ids_carry_a_section(self):
+        """An analytics id reaches correlation at FULL control weight —
+        USES_ANALYTICS has no CONTEXT_WEIGHT entry, and the dossier reads one
+        account id across two markets as an operator-level tell. Extracted with
+        a bare findall it carried no provenance at all, so an id copied out of a
+        quoted embed snippet was the cheapest possible way to put two unrelated
+        sites under one operator."""
+        html = ('<blockquote>use my snippet: '
+                '<script>ga("create","UA-111111-1")</script></blockquote>'
+                + '<div>our own words. ' * 20 + '</div>'
+                + '<footer>GTM-ABCD12</footer>')
+        found = DarkwebModule()._extract_artifacts(html, 'x' * 56 + '.onion')
+        ev = found['artifact_evidence']
+        assert 'UA-111111-1' in found['analytics_ids']
+        assert ev['UA-111111-1']['section'] == 'quoted'
+        assert ev['GTM-ABCD12']['section'] == 'footer'
+
     def test_quoted_artifacts_are_never_enriched(self):
         """Enrichment is the step that turns a string into a named person, so a
         quoted address has to be stopped before the pivot, not scored down

@@ -31,7 +31,8 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from .normalize import NON_ATTRIBUTIVE_SECTIONS, normalize, simhash_similarity
+from .normalize import (NON_ATTRIBUTIVE_SECTIONS, norm_onion, normalize,
+                        simhash_similarity)
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -235,13 +236,30 @@ _GENERIC_BANNER = re.compile(
     r"[/ ]?[\d.]*$", re.I)
 
 
+# Response headers that describe THIS request or THIS revision of the page
+# rather than the build serving it. They are collected — Last-Modified dates a
+# change, X-Runtime is a load signal — and they are not identity.
+#
+# Two failures, both measured on the v5 corpus. Stability: four targets' entire
+# signature was a Server banner plus a Last-Modified, so the operator's build
+# fingerprint changed identity every time the page was edited and could never
+# match a second capture. Precision: a timestamp is never a generic banner, so
+# its presence made `{"Server": "nginx"}` "distinctive" and minted an entity for
+# a plain nginx — the exact shared-infrastructure noise the generic-banner test
+# exists to refuse.
+_VOLATILE_HEADERS = frozenset({"etag", "last-modified", "date", "expires",
+                               "age", "x-runtime", "content-length"})
+
+
 def fingerprint_signature(fp: dict) -> Optional[str]:
     """Canonical identity for an HTTP fingerprint, or None if it distinguishes
     nothing. Two markets built by one operator collapse onto a single node here.
 
     Volatile fields must stay out of the identity or nothing ever matches twice:
     clock skew and Date live beside this in the payload and are deliberately not
-    read. Lists are sorted so header ordering between visits cannot fork a node.
+    read, and the per-request/per-revision headers in _VOLATILE_HEADERS are
+    dropped here. Lists are sorted so header ordering between visits cannot fork
+    a node.
 
     occam: substring-free exact-ish banner match, no commonness model. If a
     corpus shows generic banners still merging markets, weight by how many
@@ -250,7 +268,7 @@ def fingerprint_signature(fp: dict) -> Optional[str]:
     if not isinstance(fp, dict):
         return None
     fields = {k: sorted(map(str, v)) if isinstance(v, (list, tuple)) else str(v)
-              for k, v in fp.items() if v}
+              for k, v in fp.items() if v and k.lower() not in _VOLATILE_HEADERS}
     distinctive = any(not _GENERIC_BANNER.fullmatch(v.strip())
                       for v in fields.values() if isinstance(v, str))
     return _canon_json(fields) if distinctive and fields else None
@@ -366,7 +384,28 @@ class EvidenceStore:
     # --- targets & snapshots -------------------------------------------------
 
     def upsert_target(self, url: str, label: Optional[str] = None) -> str:
+        """Canonical row for one target. Onion identity is the address itself.
+
+        A hidden service is reached by its 56-char address; vhost labels, ports
+        and paths are routing within that one service, so they must not fork it
+        into two targets. Every cross-market floor in the system counts DISTINCT
+        target_id — `min_markets`, `entities_sharing`, `_candidate_pairs` — so a
+        forked target lets ONE site clear the bar that exists to stop a single
+        observation becoming an attribution.
+
+        Measured, not hypothetical: runs/raw/facebook.json and reddit.json were
+        saved under `www.<addr>.onion`. Ingesting one dnmx capture under both
+        forms produced an OPERATOR candidate (support@dnmx.cc, score 0.70) and a
+        LINKED_TO edge at 0.91 between a site and itself.
+
+        detector.normalize_input already collapses these for the collector; the
+        store is where identity is minted, so it cannot depend on every caller
+        having done it first.
+        """
         url = url.strip().lower().removeprefix("http://").removeprefix("https://").rstrip("/")
+        onion = norm_onion(url)
+        if onion:
+            url = onion
         kind = "ONION" if url.split("/")[0].endswith(".onion") else "CLEARNET"
         tid = self._id("tgt", url)
         now = utcnow()
@@ -422,6 +461,11 @@ class EvidenceStore:
             (sid, target_id, observed_at or utcnow(), collector, sha, blob, raw_path,
              prev["snapshot_id"] if prev else None, diff, status),
         )
+        # A site that answers is live again. record_down clears this flag, and
+        # without the reverse a target that flapped stays marked dead forever
+        # while the store holds a successful capture of it from minutes later.
+        if status == "OK":
+            self.conn.execute("UPDATE targets SET active=1 WHERE target_id=?", (target_id,))
         self.conn.commit()
         return sid
 
@@ -466,10 +510,31 @@ class EvidenceStore:
         return sid
 
     def down_windows(self) -> Dict[str, str]:
-        """target_id -> earliest time the site was observed dark."""
+        """target_id -> when the site's CURRENT outage began, for sites still dark.
+
+        A target that answered again after going dark has no standing outage, and
+        must not appear here at all. This is the only thing that makes
+        `temporal_handoff` mean anything: the signal reads "B appeared within 90
+        days of A being taken down", so a predecessor that is alive right now
+        makes every site collected afterwards look like its successor.
+
+        Measured, and it is why this changed: Endchan was unreachable during one
+        sweep and answered in the next a few hours later. Reading the stale DOWN
+        row as a takedown produced three SUCCESSOR_OF edges at 0.52 from Endchan
+        to sites with nothing in common but a co-referenced host — cock.li's mail
+        service and a personal blog among them. Tor reachability flaps as a
+        matter of course (7 of 41 targets failed one sweep here; 2 answered an
+        hour later), so this is the ordinary case, not an exotic one.
+
+        The window that survives is the earliest DOWN sighting since the last
+        successful capture — i.e. when the outage we can still see began.
+        """
         return {r["target_id"]: r["first_down"] for r in self._all(
-            "SELECT target_id, MIN(observed_at) AS first_down FROM snapshots "
-            "WHERE status='DOWN' GROUP BY target_id")}
+            "SELECT target_id, MIN(observed_at) AS first_down FROM snapshots s "
+            "WHERE status='DOWN' AND observed_at > COALESCE("
+            "  (SELECT MAX(ok.observed_at) FROM snapshots ok "
+            "   WHERE ok.target_id = s.target_id AND ok.status='OK'), '') "
+            "GROUP BY target_id")}
 
     def page_snapshots(self, target_id: str) -> List[sqlite3.Row]:
         """Every page-level capture of a target, newest first."""
@@ -638,7 +703,12 @@ class EvidenceStore:
             "JOIN observations o ON o.entity_id = e.entity_id "
             "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
             "JOIN targets t ON t.target_id = s.target_id "
-            "WHERE e.etype=? GROUP BY e.entity_id HAVING n >= 2", (etype,))
+            # OK only, like every other cross-target read (markets_for_entity,
+            # market_artifact_map, entity_discrimination). An index having two
+            # onions on file is not those two sites sharing anything, and this
+            # read feeds the clone guard, which writes HIGH-severity findings.
+            "WHERE e.etype=? AND s.status='OK' "
+            "GROUP BY e.entity_id HAVING n >= 2", (etype,))
         return [dict(r) | {"targets": sorted((r["targets"] or "").split(","))} for r in rows]
 
     def to_networkx(self):
@@ -721,7 +791,11 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
         seen_at = payload.get("artifact_evidence") or {}
         # One snapshot per crawled page, so an observation resolves to the hash
         # of the page it was actually read off rather than to the whole visit.
-        page_snaps = _ingest_pages(store, target_id, payload, name, observed_at)
+        # The parent's status rides along: a page record inside an index payload
+        # would otherwise be written OK, and every artifact pinned to it would
+        # read as observed ON the target by the queries that filter on status.
+        page_snaps = _ingest_pages(store, target_id, payload, name, observed_at,
+                                   status="DISCOVERY" if discovery else "OK")
 
         for key, (etype, rtype) in ARTIFACT_MAP.items():
             # An index returns what ranked beside the target, not what the target
@@ -777,10 +851,22 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
             # carried a signature this key issued, USES_PGP only that it showed
             # the block. Cloning reproduces the second and not the first.
             role = key.get("role") or "displayed"
+            # …but where the block sits outranks both. The collector already
+            # sections a key block, and a key inside quoted content belongs to
+            # whoever was quoted — a pasted key in a forum reply or a list
+            # archive is the ordinary case, not an exotic one. Without this the
+            # single highest-weight artifact in the engine (f2_pgp_reuse 1.3,
+            # shared_pgp_key 1.3) was the one class that bypassed the gate every
+            # other artifact goes through. A quoted signature proves the quoted
+            # author held the secret half, so `signing` does not rescue it.
+            borrowed = key.get("section") in NON_ATTRIBUTIVE_SECTIONS
             key_id = _link(store, sid, market_id, "PGP_KEY",
+                           "MENTIONS" if borrowed else
                            "SIGNS_WITH" if role == "signing" else "USES_PGP",
-                           str(value), name, section=f"pgp_keys:{role}",
-                           confidence=0.85 if role == "signing" else 0.7,
+                           str(value), name,
+                           section=f"pgp_keys:{key.get('section') or role}",
+                           confidence=0.3 if borrowed else
+                           0.85 if role == "signing" else 0.7,
                            observed_at=observed_at)
             if key_id:
                 store.set_metadata(key_id, role=role)
@@ -838,7 +924,7 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
 
 
 def _ingest_pages(store: EvidenceStore, target_id: str, payload: dict, collector: str,
-                  observed_at: str) -> Dict[str, str]:
+                  observed_at: str, status: str = "OK") -> Dict[str, str]:
     """One snapshot per crawled page. Returns {path: snapshot_id}.
 
     Page-level lineage is what makes a claim reproducible at the granularity it
@@ -854,7 +940,7 @@ def _ingest_pages(store: EvidenceStore, target_id: str, payload: dict, collector
             continue
         out[path] = store.insert_snapshot(
             target_id, page, collector=f"{collector}{EvidenceStore.PAGE_COLLECTOR}{path}",
-            observed_at=observed_at)
+            observed_at=observed_at, status=status)
     return out
 
 

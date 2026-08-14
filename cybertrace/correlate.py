@@ -342,8 +342,16 @@ def candidate_operators(store: EvidenceStore, min_conf: float = 0.35,
         if canon[entity_id] != entity_id:
             continue                        # alias: score belongs to the fingerprint
         profile = entity_funnel_profile(store, entity_id, discrimination)
+        # Markets that PUBLISHED this identity, not every capture the string
+        # turned up in. An OPERATOR candidate asserts that one party is behind
+        # these sites, so the market floor has to count sites that put the
+        # artifact forward as their own — a certifier id embedded in someone
+        # else's key block, or a quoted address, is observed on the target and
+        # attributed to nobody. INFRA and IP deliberately do NOT get this
+        # filter: shared references are what they are made of.
         profile["markets"] = sorted({m for eid in folded[entity_id]
-                                     for m in markets_for_entity(store, eid)})
+                                     for m in markets_for_entity(store, eid)
+                                     if _market_uses(store, _market_entity(store, m), eid)})
         if profile["total_conf"] >= min_conf and len(profile["markets"]) >= min_markets:
             out.append(_candidate(store, "OPERATOR", row, profile))
     return sorted(out, key=lambda c: (-c["score"], -c["n_funnels"]))
@@ -521,18 +529,44 @@ def _domain_groups(store: EvidenceStore, entity_ids: Set[str]) -> List[List[str]
     return sorted((sorted(g) for g in groups.values()), key=len, reverse=True)
 
 
+# What an artifact is worth when NOTHING joins the market to it. It was seen in
+# a capture of the site, and that is all that is known — so it is read as the
+# weakest thing an edge can mean, not the strongest.
+#
+# The inversion this replaces was the worst false-attribution path in the
+# engine. Certifier key ids are observed against the market's snapshot (they are
+# inside the bytes of the key block, so the observation is true) while carrying
+# no market edge, because they are a property of the KEY. Read at full control
+# weight, two unrelated sites whose own distinct keys happened to be certified
+# by one ordinary web-of-trust signer scored `shared_pgp_key` 1.3 AND
+# `signed_by` 1.5 — a noisy-OR of ~0.9999 and a directional SUCCESSOR_OF edge
+# between sites with nothing whatever to do with each other.
+UNJOINED_CONTEXT = CONTEXT_WEIGHT["MENTIONS"]
+
+
 def _edge_context(store: EvidenceStore, market_entity: Optional[str],
                   entity_id: str) -> float:
-    """Strongest control implied by any edge joining this market to this thing."""
+    """Strongest control implied by any edge joining this market to this thing.
+
+    No edge means no demonstrated control, so it floors at UNJOINED_CONTEXT
+    rather than defaulting to it: absence of evidence is not evidence.
+    """
     if not market_entity:
-        return DEFAULT_CONTEXT
+        return UNJOINED_CONTEXT
     rows = store._all(
         "SELECT rtype FROM relationships WHERE status='ACTIVE' "
         "AND ((source_entity_id=? AND target_entity_id=?) "
         "  OR (source_entity_id=? AND target_entity_id=?))",
         (market_entity, entity_id, entity_id, market_entity))
     return max((CONTEXT_WEIGHT.get(r["rtype"], DEFAULT_CONTEXT) for r in rows),
-               default=DEFAULT_CONTEXT)
+               default=UNJOINED_CONTEXT)
+
+
+def _market_uses(store: EvidenceStore, market_entity: Optional[str],
+                 entity_id: str) -> bool:
+    """Did this market publish this artifact as its own, rather than merely
+    reproduce it? True only for an edge that asserts control."""
+    return _edge_context(store, market_entity, entity_id) >= DEFAULT_CONTEXT
 
 
 def _observations_of(store: EvidenceStore, target_id: str, entity_id: str) -> List[str]:
@@ -559,10 +593,24 @@ def _pair_signals(store: EvidenceStore, artifacts: dict, windows: dict,
     clusters = clusters or {}
     signals = []
 
+    market_a, market_b = _market_entity(store, a_id), _market_entity(store, b_id)
+
     # A key on A signing a key on B is the strongest directional evidence there
     # is: it is the outgoing operator vouching for the incoming one.
+    #
+    # "On A" has to mean a key A publishes as its own. Every certifier inside a
+    # published key block is also observed on the target — that is honest
+    # provenance, the id really is in those bytes — so without this gate the
+    # signal fired whenever some third party had signed B's key and its id
+    # happened to sit inside A's key too. One shared web-of-trust signature
+    # between strangers then read as "the operator of A vouched for B", at the
+    # heaviest weight in the table and with a direction attached.
     for key_a in a.get("PGP_KEY", set()):
+        if not _market_uses(store, market_a, key_a):
+            continue
         for key_b in b.get("PGP_KEY", set()):
+            if not _market_uses(store, market_b, key_b):
+                continue
             for r in store._all(
                     "SELECT r.rel_id, ev.observation_ids FROM relationships r "
                     "LEFT JOIN evidence ev ON ev.relationship_id = r.rel_id "
@@ -573,8 +621,6 @@ def _pair_signals(store: EvidenceStore, artifacts: dict, windows: dict,
                     "direction": "a_to_b",
                     "evidence": json.loads(r["observation_ids"] or "[]"),
                     "detail": "a key on A signed a key on B"})
-
-    market_a, market_b = _market_entity(store, a_id), _market_entity(store, b_id)
     for name, etype in SHARED_ARTIFACTS:
         shared = a.get(etype, set()) & b.get(etype, set())
         # Nine hosts under one organisation's domain are one fact, not nine.

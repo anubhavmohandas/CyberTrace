@@ -106,6 +106,12 @@ def test_misc_normalizers():
     assert norm_onion("short.onion") is None
     assert norm_domain("https://Example.COM:8080/path?q=1") == "example.com"
     assert norm_domain(ONION_A) is None                # an onion is not a domain
+    # A literal address in a URL is a host — there is an entity type for that.
+    # 81chan referenced http://78.17.212.207/, which became a DOMAIN whose
+    # "registrable" form was 212.207, so any second address in that /16 would
+    # have grouped with it as one namespace.
+    assert norm_domain("78.17.212.207") is None
+    assert norm_domain("http://78.17.212.207:8080/x") is None
     assert norm_username("Agent_Zero") == "Agent_Zero"
     assert norm_username("a") is None
 
@@ -161,6 +167,61 @@ def test_boilerplate_domains_are_not_infrastructure():
                   "wordpress.org", "drive.google.com", "cdn.jsdelivr.net"):
         assert norm_domain(value) is None, value
     for value in ("riseup.net", "mail.riseup.net", "dnmx.cc", "cock.li"):
+        assert norm_domain(value) == value, value
+
+
+def test_a_mailbox_at_page_furniture_is_page_furniture():
+    """The corpus's headline case, and the one commonness provably cannot fix.
+
+    SecureDrop ships `gettor@torproject.org` in its Tor install instructions, so
+    four independently-operated newsrooms — CBC, Forbes, The Guardian,
+    ProPublica — published the same mailbox. EMAIL is a full-control artifact
+    class, so the engine promoted it to one OPERATOR candidate spanning all four
+    at score 0.47, against 0.58 for the genuine DNMX pair.
+
+    Frequency scoring could not catch it and never could: with 5 of the world's
+    SecureDrop instances in the corpus, the platform's own address measures as
+    RARE (0.67, against a 0.5 floor). A corpus never holds enough of a family to
+    expose that family's furniture by counting. What does catch it is already in
+    the file — torproject.org is on the boilerplate stoplist — and only
+    norm_domain was consulting it.
+    """
+    for value in ("gettor@torproject.org", "security@github.com",
+                  "noreply@wordpress.org", "press@mozilla.org"):
+        assert norm_email(value) is None, value
+    # The operator mailboxes this must not touch, including one at a domain
+    # whose SITE is in the corpus.
+    for value in ("support@dnmx.cc", "abuse@morke.ru", "admin@mail2tor.com",
+                  "op@riseup.net"):
+        assert norm_email(value) == value, value
+
+
+def test_markup_and_platform_furniture_is_not_a_shared_host():
+    """Each of these was, on the v5 corpus, the ONLY thing joining two unrelated
+    targets: `ogp.me` (an Open Graph namespace declared in a meta prefix, no
+    more a referenced host than a DTD) paired Blockchair with Riseup, `t.me`
+    paired Blockchair with the Tor Project, `duckduckgo.com` paired Riseup with
+    the Tor Project, `en.bitcoin.it` paired Endchan with Riseup, and WordPress's
+    pingback and stats hosts paired the two DNMX addresses for a reason that has
+    nothing to do with their operator.
+
+    Only the host survives normalization, so `t.me/someone` never carried an
+    operator handle here anyway — refusing the host loses no identity.
+    """
+    for value in ("ogp.me", "purl.org", "en.bitcoin.it", "www.gnu.org",
+                  "wp-statistics.com", "archipelago.phrasewise.com",
+                  "duckduckgo.com", "t.me", "x.com", "www.paypal.com"):
+        assert norm_domain(value) is None, value
+
+    # Two things the stoplist must NOT swallow, for opposite reasons.
+    for value in ("onionmail.info", "lynxchan.com"):
+        # A platform's own domain IS the ecosystem signal. Refuse it and two
+        # servers of one mail platform share nothing, so the engine calls them
+        # unrelated by accident instead of reporting SHARED_PLATFORM and why.
+        assert norm_domain(value) == value, value
+    for value in ("blockchair.com", "facebook.com", "reddit.com"):
+        # Each is a labeled or plausible target: on its own site that clearnet
+        # name is the operator's identity, not furniture.
         assert norm_domain(value) == value, value
 
 
@@ -244,6 +305,28 @@ def test_fingerprint_only_when_it_distinguishes():
     assert store.conn.execute(
         "SELECT COUNT(*) c FROM entities WHERE etype='HTTP_FINGERPRINT'").fetchone()["c"] == 0
     store.close()
+
+
+def test_a_timestamp_is_not_a_build_signature():
+    """Per-request and per-revision headers are collected, never identity.
+
+    Both halves of this failed on the v5 corpus. Precision: a Last-Modified date
+    is not a generic banner, so its presence made `{Server: nginx}` "distinctive"
+    and minted an entity for a plain nginx — four targets carried exactly that
+    shape. Stability: an identity containing the page's own modification date
+    changes every time the operator edits the page, so the one signal a
+    self-hosted build gives you could never match a second capture of itself.
+    """
+    edited = {'Server': 'nginx', 'Last-Modified': 'Fri, 14 Aug 2026 01:53:22 GMT'}
+    assert fingerprint_signature(edited) is None
+    assert fingerprint_signature({'Server': 'nginx', 'X-Runtime': '0.076696'}) is None
+    assert fingerprint_signature({'Server': 'Apache', 'ETag': 'W/"1a2b3c"'}) is None
+
+    # A real signature keeps its identity across a re-crawl that changed the page.
+    build = {'X-Powered-By': 'the almighty n0tr1v', 'cookie_names': ['_csrf']}
+    assert fingerprint_signature({**build, 'Last-Modified': 'Mon, 03 Aug 2026 00:00:00 GMT'}) \
+        == fingerprint_signature({**build, 'Last-Modified': 'Tue, 04 Aug 2026 11:11:11 GMT'}) \
+        == fingerprint_signature(build)
 
 
 def test_index_hits_do_not_become_target_links():
@@ -666,6 +749,34 @@ def test_roster_addresses_do_not_become_operator_identity(tmp_path):
                          'support@dnmx.cc': 'USES_EMAIL'}
 
 
+def test_a_quoted_key_is_not_the_sites_key(tmp_path):
+    """The strongest artifact class must go through the same gate as the rest.
+
+    A pasted key block in a forum reply or a list archive is ordinary content,
+    and the collector already sections it `quoted` — but ingest read only the
+    key's ROLE, so the one artifact that carries the heaviest weight anywhere in
+    the engine (f2_pgp_reuse 1.3, shared_pgp_key 1.3) was the single class that
+    skipped the check. Two sites quoting one well-known key would have converged
+    on its owner as their shared operator.
+    """
+    result = _result(ONION_A, pgp_keys=[
+        {'key_id': norm_pgp(KEY_A), 'fingerprint': norm_pgp(KEY_A).removeprefix('PGP:'),
+         'role': 'signing', 'section': 'quoted'},
+        {'key_id': norm_pgp(KEY_B), 'fingerprint': norm_pgp(KEY_B).removeprefix('PGP:'),
+         'role': 'contact', 'section': 'contact'},
+    ])
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(result, store)
+        edges = {r["v"]: r["rtype"] for r in store._all(
+            "SELECT e.normalized_value v, r.rtype FROM relationships r "
+            "JOIN entities e ON e.entity_id = r.target_entity_id WHERE e.etype='PGP_KEY'")}
+        assert edges == {norm_pgp(KEY_A).lower(): 'MENTIONS',
+                         norm_pgp(KEY_B).lower(): 'USES_PGP'}
+        # A quoted signature proves the quoted author held the secret half —
+        # 'signing' must not buy the site back its attribution.
+        assert 'SIGNS_WITH' not in edges.values()
+
+
 def test_change_detection_ignores_per_visit_noise(tmp_path):
     """Clock skew differs on every fetch. Reporting that as a change would mark
     every target CHANGED on every re-check and bury the one that really moved —
@@ -688,6 +799,43 @@ def test_change_detection_ignores_per_visit_noise(tmp_path):
         hashes = {store._one("SELECT sha256 FROM snapshots WHERE snapshot_id=?",
                              (s,))["sha256"] for s in (first, same)}
         assert len(hashes) == 2
+
+
+def test_one_hidden_service_cannot_be_two_targets(tmp_path):
+    """A vhost label, a port and a path are routing inside ONE hidden service.
+
+    Left un-canonicalized they fork the target row, and every cross-market floor
+    in the system counts DISTINCT target_id — so a single site clears
+    `min_markets=2`, the floor whose entire job is to stop one observation
+    becoming an attribution. runs/raw/facebook.json and reddit.json really were
+    saved under `www.<addr>.onion`, so this is a corpus that exists, not a
+    hypothetical.
+    """
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ids = {store.upsert_target(u) for u in (
+            ONION_A, f"http://{ONION_A}", f"https://www.{ONION_A}/",
+            f"http://{ONION_A}:8080/contact", f"mail.{ONION_A}")}
+        assert len(ids) == 1, "one hidden service, one target row"
+        assert store._one("SELECT url FROM targets")["url"] == ONION_A
+
+
+def test_one_capture_ingested_twice_makes_no_operator(tmp_path):
+    """The end-to-end version of the above, at the layer that would publish it.
+
+    Measured before the fix: one dnmx capture ingested under both the bare and
+    the www form produced an OPERATOR candidate (support@dnmx.cc, score 0.70)
+    and a LINKED_TO edge at 0.91 — a site linked to itself, with an operator
+    attributed from a single observation.
+    """
+    from cybertrace.correlate import candidate_operators, detect_successors
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        for target in (ONION_A, f"www.{ONION_A}"):
+            ingest(_result(target, emails=['support@dnmx.cc'],
+                           artifact_evidence={'support@dnmx.cc': {'section': 'contact'}}),
+                   store)
+        assert candidate_operators(store) == []
+        assert detect_successors(store) == []
 
 
 def test_a_dark_site_is_evidence_but_a_dead_proxy_is_not(tmp_path):
