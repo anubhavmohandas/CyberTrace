@@ -7,6 +7,7 @@ under test is the same path a real crawl takes.
 from datetime import datetime, timezone
 
 from cybertrace.correlate import (
+    FUNNELS,
     COMMON_ARTIFACT_FLOOR, canonical_entity_key, candidate_infra, candidate_operators,
     confidence_level, contradictions_from_identity, crypto_clusters, detect_successors,
     entity_discrimination, entity_funnel_profile, markets_for_entity,
@@ -769,3 +770,89 @@ def test_an_index_payload_seeds_no_enrichment_pivot():
     # is no module that "enriches" an onion except by visiting it.
     assert not any(ONION_B in target
                    for _, target in DarkwebModule._pivot_targets(index_payload))
+
+
+# --- evidence-source wiring map ----------------------------------------------
+
+# How far each evidence class actually travels, measured end to end rather than
+# read off the architecture diagram. Both failure directions look like working
+# capability from outside: a funnel keyed on an rtype nothing writes scores
+# every entity at zero, and a collector whose output is fetched at real network
+# cost and then dropped fills a report with things no claim can rest on.
+#
+#   candidate  reaches candidate_operators — an identity claim about a person
+#   pair       reaches detect_successors   — a link between two markets
+#   stored     entity and edge exist, nothing scores them
+#   dropped    ingest() writes no entity at all
+#
+# Three entries are deliberately short of scoring, and each is a decision rather
+# than an omission:
+#
+#   domain       MENTIONS at CONTEXT_WEIGHT 0.15. Every site references the same
+#                handful of clearnet hosts; two doing so links nobody.
+#   fingerprint  Collected because a hand-written banner is a real tell, but in
+#                no funnel: a shared banner is shared software, not a shared
+#                operator. Same reasoning as DISCOVERED_VIA — see FUNNELS.
+#   breach /     The modules fetch these and nothing consumes them. Wiring them
+#   social       is a scoring decision, not a plumbing one, and is unmade.
+#
+# Changing a verdict here is allowed; changing one by accident is what this
+# catches.
+WIRING_MAP = {
+    'email':       (dict(emails=['op@proton.me']),                     'candidate'),
+    'pgp':         (dict(pgp_keys=[{'armored': KEY_A}]),               'candidate'),
+    'username':    (dict(usernames=['operator_x']),                    'candidate'),
+    'btc':         (dict(bitcoin_addresses=[BTC_VALID]),               'pair'),
+    'analytics':   (dict(analytics_ids=['UA-1234-1']),                 'pair'),
+    'leaked_ip':   (dict(misconfigurations=[
+                        {'path': '/s', 'leaked_ips': ['203.0.113.9']}]), 'pair'),
+    'domain':      (dict(clearnet_hosts_referenced=['cryptostorm.is']), 'scored'),
+    'fingerprint': (dict(server_fingerprint={
+                        'X-Powered-By': 'the almighty n0tr1v'}),       'stored'),
+    'breach':      (dict(breaches=[{'name': 'X', 'email': 'op@proton.me'}]), 'dropped'),
+    'social':      (dict(social_accounts=[{'site': 'x', 'handle': 'op'}]),   'dropped'),
+}
+
+
+def _furthest_stage(payload: dict) -> str:
+    """Push one artifact class through ingest() on two markets sharing it —
+    exactly the case correlation exists to catch — and report how far it got.
+
+    `scored` has to be its own rung. An etype that can never be an operator
+    candidate or a successor signal (HTTP_FINGERPRINT is both) would otherwise
+    read as `stored` whether or not a funnel scores it, so putting it in a
+    funnel — the precise drift this guards — would change nothing here.
+    """
+    store = EvidenceStore(":memory:")
+    for url in (ONION_A, ONION_B):
+        ingest(_result(url, seen=JAN, **payload), store)
+    candidates = candidate_operators(store, discrimination=entity_discrimination(store))
+    # temporal_overlap fires for any live pair, so only artifact-driven signals
+    # count as the class having reached the pair stage.
+    shared = {s for pair in detect_successors(store, min_score=0.0)
+              for s in pair['signals'] if s.startswith('shared_')}
+    entities = store._all("SELECT entity_id FROM entities "
+                          "WHERE etype NOT IN ('MARKET','ONION_ADDRESS')")
+    scored = any(entity_funnel_profile(store, e["entity_id"])["total_conf"] > 0
+                 for e in entities)
+    return ('candidate' if candidates else 'pair' if shared else
+            'scored' if scored else 'stored' if entities else 'dropped')
+
+
+def test_every_evidence_class_travels_exactly_as_far_as_claimed():
+    """For every arrow in the architecture, prove data crosses it — or that it
+    deliberately does not."""
+    assert {name: _furthest_stage(payload)
+            for name, (payload, _) in WIRING_MAP.items()} == \
+           {name: stage for name, (_, stage) in WIRING_MAP.items()}
+
+
+def test_no_funnel_is_keyed_on_a_relationship_nothing_writes():
+    """The other half: a funnel scoring an rtype no collector produces is dead
+    weight that still reads as coverage."""
+    from cybertrace.evidence import ARTIFACT_MAP, RELATIONSHIP_TYPES
+    funnelled = {rtype for rtypes in FUNNELS.values() for rtype in rtypes}
+    assert funnelled <= RELATIONSHIP_TYPES, funnelled - RELATIONSHIP_TYPES
+    # Every rtype ARTIFACT_MAP writes is either scored or a documented exception.
+    unscored = {rtype for _, rtype in ARTIFACT_MAP.values()} - funnelled
+    assert unscored == {'LINKS_TO'}, unscored

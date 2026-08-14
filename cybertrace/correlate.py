@@ -47,6 +47,15 @@ FUNNELS: Dict[str, Set[str]] = {
 }
 # DISCOVERED_VIA is in no funnel on purpose: an index co-ranking two onions is
 # provenance about how the address was found, never evidence about the site.
+#
+# HAS_FINGERPRINT is out for the same kind of reason and is not an oversight.
+# ingest() writes it (evidence.py, gated by fingerprint_signature so only a
+# hand-written banner becomes a node at all), and it is worth having in the
+# graph and the dossier — but a build signature is shared *software*, and two
+# markets running one stack are not two markets with one operator. Putting it
+# in a funnel would score every self-hosted site in a family as the same party.
+# tests/test_correlate.py::test_every_evidence_class_travels_exactly_as_far_as_claimed
+# pins this, so wiring it becomes a deliberate edit rather than a quiet one.
 
 # Relative prior per funnel: a reused key is worth more than a referenced host.
 FUNNEL_WEIGHT = {"f1_contact": 1.0, "f2_pgp_reuse": 1.3, "f3_crypto": 1.2,

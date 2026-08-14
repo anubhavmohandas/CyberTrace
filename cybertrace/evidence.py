@@ -1054,6 +1054,22 @@ def enrich_bitcoin(store: EvidenceStore, snapshot_id: str, addr_id: str, summary
 
 # Which pivot/module target types have an enrichment router, and the entity each
 # one anchors to. Adding a module here is what makes its output evidence.
+#
+# What is deliberately absent matters as much as what is here, because
+# `_ingest_enrichment` drops an unrouted summary silently:
+#
+#   username  darkweb._pivot_targets DOES emit these, derived from an email
+#             local-part, and the username module runs. The result reaches the
+#             analyst's report as a lead and stops there. That is the intended
+#             ceiling: `alice@` -> the handle `alice` across a few thousand
+#             sites is an inference about a string, and minting evidence off it
+#             is what put an unrelated script author's GitHub and a mailing-list
+#             subscriber's 26 profiles into two dossiers. See _SECTION_RULES.
+#   breach /  The modules fetch them; nothing consumes them. Wiring these is a
+#   social    scoring decision, not plumbing, and it has not been made.
+#
+# occam: no registry, no plugin hook — a dict and a comment. The wiring map in
+# tests/test_correlate.py is what fails if any of this changes by accident.
 _ENRICHERS = {
     "ip":       ("IP", enrich_ip),
     "email":    ("EMAIL", enrich_email),
