@@ -520,12 +520,16 @@ def norm_ip(value: str) -> Optional[str]:
 #   quoted  content the page reproduces: a forwarded message, a pasted header
 #   roster  mailing-list membership: a subscriber, list user or list admin —
 #           roles that belong to USERS of a list service, not to whoever runs it
+#   demo    a program's output pasted into a walkthrough: gpg key-generation
+#           prompts, monero-wallet-cli transcripts. The cast of a tutorial, and
+#           on nowhere.moe's OPSEC Bible it reached the keyserver — see
+#           darkweb_module._DEMO_LEAD for the measurement
 #
 # Lives here rather than beside the section rules in darkweb_module because both
 # the collector (which refuses to pivot them) and evidence.ingest (which demotes
 # their edge to MENTIONS) have to agree on the set, and drift between those two
 # is silent: the artifact would keep its operator edge while looking suppressed.
-NON_ATTRIBUTIVE_SECTIONS = frozenset({"quoted", "roster"})
+NON_ATTRIBUTIVE_SECTIONS = frozenset({"quoted", "roster", "demo"})
 
 
 def norm_onion(value: str) -> Optional[str]:
@@ -600,13 +604,27 @@ signal.org whatsapp.com paypal.com patreon.com opencollective.com
 """.split())
 
 
+# Addresses of other overlay networks. `.onion` was already refused here — an
+# onion has its own entity type — and the same reasoning covers the rest: an I2P
+# b32 or a Lokinet address is a network identifier, not a clearnet host, so
+# admitting it as a DOMAIN buries it in the one entity class whose whole meaning
+# is "a name in the DNS a subpoena can reach".
+#
+# Measured on the v5+v6 corpus, where two of them were already entities shared by
+# two targets each: `4oymiquy…b32.i2p` (two imageboards linking one eepsite) and
+# `kqrtg5wz…loki`. `_registrable` also mangles them — the last two labels of a
+# b32 address are `b32.i2p`, so every eepsite in a corpus would group into one
+# namespace and draw the multi-host bonus meant for an operator's own subdomains.
+_OVERLAY_TLDS = frozenset({"onion", "i2p", "loki", "exit", "bit"})
+
+
 def norm_domain(value: str) -> Optional[str]:
     value = value.strip().lower()
     if "://" in value:
         value = value.split("://", 1)[1]
     value = value.split("/", 1)[0].split(":", 1)[0].rstrip(".")
-    if value.endswith(".onion"):
-        return None                                   # an onion is not a domain entity
+    if value.rpartition(".")[2] in _OVERLAY_TLDS:
+        return None                                   # another network's address
     if norm_ip(value):
         # A literal address in a URL is a host, and there is already an entity
         # type and an extractor for that. Admitted here it became a second,
@@ -616,6 +634,16 @@ def norm_domain(value: str) -> Optional[str]:
         # context bonus meant for an operator's own subdomains.
         return None
     if not _DOMAIN_RE.fullmatch(value):
+        return None
+    # RFC 2606 documentation names, same list norm_email already refuses. The
+    # asymmetry was the defect: `webmaster@example.com` was correctly no mailbox
+    # while `example.com` beside it became a DOMAIN entity, and two sites whose
+    # docs quote the same example host would then share it. Measured — zzzchan's
+    # FAQ prints `example.com` in an instruction — and a documentation name is
+    # the one host guaranteed to appear on unrelated sites for unrelated reasons.
+    if (value in _PLACEHOLDER_DOMAINS
+            or _registrable(value) in _PLACEHOLDER_DOMAINS
+            or value.rpartition(".")[2] in _PLACEHOLDER_TLDS):
         return None
     if value in _BOILERPLATE_DOMAINS or _registrable(value) in _BOILERPLATE_DOMAINS:
         return None

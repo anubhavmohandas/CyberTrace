@@ -104,7 +104,7 @@ def test_misc_normalizers():
     assert norm_ip("999.1.1.1") is None
     assert norm_onion("http://" + ONION_A.upper() + "/index") == ONION_A
     assert norm_onion("short.onion") is None
-    assert norm_domain("https://Example.COM:8080/path?q=1") == "example.com"
+    assert norm_domain("https://Mail.RISEUP.net:8080/path?q=1") == "mail.riseup.net"
     assert norm_domain(ONION_A) is None                # an onion is not a domain
     # A literal address in a URL is a host — there is an entity type for that.
     # 81chan referenced http://78.17.212.207/, which became a DOMAIN whose
@@ -167,6 +167,35 @@ def test_boilerplate_domains_are_not_infrastructure():
                   "wordpress.org", "drive.google.com", "cdn.jsdelivr.net"):
         assert norm_domain(value) is None, value
     for value in ("riseup.net", "mail.riseup.net", "dnmx.cc", "cock.li"):
+        assert norm_domain(value) == value, value
+
+
+def test_documentation_and_overlay_names_are_not_domains():
+    """Two refusals norm_email already made and norm_domain did not.
+
+    RFC 2606 names: zzzchan's FAQ prints `example.com` in an instruction, so the
+    store minted it as a DOMAIN. `webmaster@example.com` was correctly no
+    mailbox while the host beside it became an entity — and a documentation name
+    is the one host guaranteed to turn up on unrelated sites for unrelated
+    reasons, so any two of them would have shared it.
+
+    Overlay addresses: `.onion` was already refused because an onion has its own
+    entity type, and an I2P b32 or Lokinet address is the same kind of thing.
+    Both were live entities on the v5+v6 corpus, each shared by two targets, and
+    `_registrable` reads the last two labels of a b32 as `b32.i2p` — so every
+    eepsite in a corpus would group into one namespace and draw the multi-host
+    bonus meant for an operator's own subdomains.
+    """
+    for value in ("example.com", "www.example.org", "mail.example.net",
+                  "yourdomain.com", "host.localhost", "site.test", "foo.invalid"):
+        assert norm_domain(value) is None, value
+    for value in ("4oymiquy7qobjgx36tejs35zeqt24qpemsnzgtfeswmrw6csxbkq.b32.i2p",
+                  "kqrtg5wz4qbyjprujkz33gza7r73iw3ainqp1mz5zmu16symcdwy.loki",
+                  f"{ONION_A}", f"http://{ONION_A}/x"):
+        assert norm_domain(value) is None, value
+    # Real hosts that merely resemble them must survive: `.li` is a TLD,
+    # `example` as a label is not the reserved name.
+    for value in ("example.cock.li", "exemple.fr", "test.riseup.net"):
         assert norm_domain(value) == value, value
 
 
@@ -368,7 +397,7 @@ def test_index_hits_do_not_become_target_links():
 
 def _ip_summary(**over):
     return {'ip': '5.5.5.5', 'org': 'DigitalOcean LLC', 'asn': 'AS14061',
-            'hostname': 'vps.example.com', 'is_hosting': True, **over}
+            'hostname': 'vps.morke.ru', 'is_hosting': True, **over}
 
 
 def _pivot_result(target, pivots, seen=datetime(2026, 1, 12, tzinfo=timezone.utc)):
@@ -401,7 +430,7 @@ def test_pivot_enrichment_lands_on_the_ip_entity(tmp_path):
         asn = store.find_entity("ASN", "AS14061")
         assert store._one("SELECT 1 FROM relationships WHERE source_entity_id=? "
                           "AND target_entity_id=? AND rtype='BELONGS_TO_ASN'", (ip, asn))
-        assert store.find_entity("DOMAIN", "vps.example.com")
+        assert store.find_entity("DOMAIN", "vps.morke.ru")
 
 
 def test_pivot_enrichment_never_mints_a_market(tmp_path):

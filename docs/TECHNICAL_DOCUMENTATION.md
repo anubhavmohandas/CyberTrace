@@ -2019,6 +2019,9 @@ data:
 | Temporal overlap | Succession claimed between markets that were live at once; the link survives as `LINKED_TO`, the direction does not |
 | Timing is never sufficient | Two markets sharing nothing but a schedule cannot become a hypothesis |
 | Index provenance | A search engine co-ranking two onions reading as one linking to the other |
+| Demonstration output (`demo` section) | A walkthrough's cast becoming the operator. nowhere.moe's OPSEC Bible prints gpg key-generation prompts and monero-wallet-cli transcripts; `alice@nowhere.com` and `bob@bob.com` were pivoted to keyservers, which answered with a real fingerprint and sixty-nine more plus a GitHub account, and three tutorial wallets landed in the confidence-promoting `wallet` section |
+| Geometry attributes and host use | SVG path data becoming a leaked host. Git Datura's icons yielded three quads that were enriched into SoftBank, Sify and Rostelecom subscriber networks. Page text now has to use an address AS a host — the denylist can only name noise already seen, and 81chan's `yonga 1.0.2.1` version tag was the next shape |
+| Soft-404 control | A catch-all site reading as three exposed endpoints. 81chan answers any unknown path with its front page, so `/server-status`, `/server-info` and `/status` all looked exposed and the footer's version tag was filed as a leaked host at confidence 0.9. The probe now asks for a path that cannot exist and reports nothing if that answers |
 | Contradiction rules | Attribution presented without its competing explanation. Four rules: cloning, identity bound to uncertified keys, shared platform, temporal overlap. A contradicted candidate can never be reported HIGH |
 
 ### 16.4 Monitoring
@@ -2052,6 +2055,16 @@ correlation and reports:
 - **leads surfaced** — pairs ranked but not asserted
 - **unevaluable** — pairs where a target was dark, so the engine had nothing to
   work with; counting those as misses would grade the engine on Tor's weather
+- **recall by evidence class** — the aggregate recall figure is the sum of three
+  unlike questions, so each same-operator family also declares what its sites
+  actually share (`evidence_class` in the labels):
+
+| Class | What a miss means |
+|-------|-------------------|
+| `operator-specific` | A real miss. A mailbox at the operator's own domain, a donation wallet, a unique key — the artifact is there to be found |
+| `namespace` | The engine declining to promote a co-referenced public-service host (riseup.net, cock.li) to shared control. That promotion is the move that manufactures false attribution, so this is the correct answer, not a defect to tune away |
+| `none` | Unrecoverable. One operator, several sites, nothing published in common — nowhere.moe's six services share only an nginx version, which is refused as an identity on purpose |
+| `unverified` | The operator is known from its own listing but the site never answered, so what the pair shares was never observed. These cannot be counted as successes or failures |
 
 Exit code 1 if any same-platform or unrelated pair was called same-operator, so
 a change to the scoring model can be gated on it.

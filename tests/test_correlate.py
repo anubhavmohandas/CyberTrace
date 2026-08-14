@@ -12,7 +12,7 @@ from cybertrace.correlate import (
     entity_discrimination, entity_funnel_profile, render_dossier_html, render_html,
     render_markdown, run_correlation, username_aliases,
 )
-from cybertrace.evidence import EvidenceStore, ingest
+from cybertrace.evidence import EvidenceStore, enrich_email, ingest
 from cybertrace.monitor import candidate_deltas
 
 from .test_evidence import BTC_VALID, KEY_A, KEY_B, ONION_A, ONION_B, _result
@@ -68,7 +68,7 @@ def test_a_second_funnel_compounds_the_score(tmp_path):
         email = store.find_entity("EMAIL", 'op@proton.me')
         before = entity_funnel_profile(store, email)
 
-        domain = store.upsert_entity("DOMAIN", "shop.example.com")
+        domain = store.upsert_entity("DOMAIN", "shop.dnmx.cc")
         store.upsert_relationship(email, domain, "MENTIONS", source_label="test", weight=0.7)
         after = entity_funnel_profile(store, email)
 
@@ -140,17 +140,17 @@ def test_infra_requires_two_markets_and_more_than_a_reference(tmp_path):
     link to satisfies the market floor while being nobody's infrastructure. It
     becomes a candidate only when an edge implies control — here, resolution."""
     with EvidenceStore(str(tmp_path / "e.db")) as store:
-        ingest(_result(ONION_A, clearnet_hosts_referenced=['shared.example.com',
-                                                           'only-a.example.com']), store)
-        ingest(_result(ONION_B, clearnet_hosts_referenced=['shared.example.com']), store)
+        ingest(_result(ONION_A, clearnet_hosts_referenced=['shared.dnmx.cc',
+                                                           'only-a.dnmx.cc']), store)
+        ingest(_result(ONION_B, clearnet_hosts_referenced=['shared.dnmx.cc']), store)
         assert candidate_infra(store, min_markets=2) == []       # referenced only
 
-        host = store.find_entity("DOMAIN", 'shared.example.com')
+        host = store.find_entity("DOMAIN", 'shared.dnmx.cc')
         for onion in (ONION_A, ONION_B):
             store.upsert_relationship(store.find_entity("MARKET", onion), host,
                                       "RESOLVES_TO", source_label="test", weight=0.8)
         values = {c["value"] for c in candidate_infra(store, min_markets=2)}
-        assert values == {'shared.example.com'}
+        assert values == {'shared.dnmx.cc'}
 
 
 # --- resolution --------------------------------------------------------------
@@ -257,8 +257,12 @@ def test_clone_verdict_suppresses_the_successor_edge(tmp_path):
         assert flag["severity"] == "HIGH" and set(flag["markets"]) == {ONION_A, ONION_B}
         # Every candidate resting on those markets carries the objection.
         contested = [d for d in results["dossiers"] if d["contradictions"]]
-        assert contested and any("clone finding contradicts" in l
+        assert contested and any("contradiction stands against" in l
                                  for l in contested[0]["limitations"])
+        # …and the brief names the rule that objected, so "a clone copied this"
+        # stays distinguishable from the other three objections.
+        assert "shared_artifacts_explained_by_cloning" in render_markdown(
+            results["dossiers"], results)
 
 
 # --- dossiers ----------------------------------------------------------------
@@ -403,6 +407,35 @@ def test_a_site_that_came_back_was_never_taken_down(tmp_path):
         assert "temporal_handoff" not in signals
 
 
+def test_a_keyserver_answer_is_not_the_markets_key(tmp_path):
+    """Anyone can upload a key under anyone's address, so a keyserver hit is
+    evidence about the ADDRESS, never about the sites that printed it.
+
+    Two markets naming one mailbox is already scored as a shared email. If the
+    fingerprint the keyserver returned were also read as theirs, one upload by a
+    third party would add a second, heavier funnel to that pair — and the key,
+    which no market ever published, would rank as the operator behind both.
+    """
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        for onion in (ONION_A, ONION_B):
+            ingest(_result(onion, emails=['op@proton.me']), store)
+        email = store.find_entity("EMAIL", 'op@proton.me')
+        snapshot = store._one("SELECT snapshot_id FROM snapshots LIMIT 1")["snapshot_id"]
+        enrich_email(store, snapshot, email, {'pgp_fingerprints': [KEY_A]},
+                     collector='email:pivot')
+        key = store.find_entity("PGP_KEY", KEY_A)
+        assert key and store._one(
+            "SELECT 1 FROM relationships WHERE source_entity_id=? AND target_entity_id=? "
+            "AND rtype='ASSOCIATED_WITH'", (email, key))
+
+        operators = candidate_operators(store, min_conf=0.0)
+        by_id = {c["entity_id"]: c for c in operators}
+        # The mailbox both sites published is the claim the evidence supports.
+        assert by_id[email]["n_markets"] == 2
+        # The uploaded key is not, however strongly the keyserver asserted it.
+        assert key not in by_id, by_id.get(key)
+
+
 def test_a_shared_certifier_is_not_a_shared_operator(tmp_path):
     """The worst false-attribution path the engine had.
 
@@ -537,6 +570,24 @@ def test_timing_alone_never_makes_a_successor(tmp_path):
                           collector='target_onion', note='Onion unreachable via Tor')
         ingest(_result(ONION_B, seen=AUG, emails=['b@twohost.net']), store)
         assert detect_successors(store, min_score=0.1) == []
+
+
+def test_an_objection_is_reported_as_the_rule_that_made_it(tmp_path):
+    """Four rules write contradictions; the brief called every one of them a
+    clone finding. On the corpus that misdescribed the real DNMX candidate — its
+    only objection is that both addresses were live at once — as contradicted by
+    a clone finding the store does not contain, in the one section a careful
+    reader goes to precisely because they distrust the score."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        for onion in (ONION_A, ONION_B):
+            ingest(_result(onion, seen=JAN, emails=['op@proton.me']), store)
+            ingest(_result(onion, seen=AUG, emails=['op@proton.me']), store)
+        results = run_correlation(store, min_conf=0.0)
+        assert not results["clones"]
+        brief = render_markdown(results["dossiers"], results)
+        assert "overlap_contradicts_succession" in brief
+        assert "clone finding" not in brief
+        assert "A clone finding contradicts" not in brief
 
 
 def test_a_contradicted_candidate_cannot_be_reported_high():

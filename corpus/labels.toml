@@ -26,6 +26,33 @@
 # it is counting coincidences — so those pairs are labeled explicitly and the
 # eval reports them as their own class instead of folding them into UNRELATED.
 
+# `evidence_class` is the second half of a SAME_OPERATOR label, and without it
+# the recall number is unreadable. Every row of an operator family carries the
+# same value, naming what those sites actually SHARE:
+#
+#   operator-specific  something only that operator holds and publishes as its
+#                      own — a mailbox at its own domain, a donation wallet, a
+#                      unique key. Recovering these is the engine's job, and a
+#                      miss here is a real miss.
+#   namespace          a public-service domain the family's sites all reference
+#                      (riseup.net, cock.li). Real positives, but promoting a
+#                      co-referenced host to shared control is the exact move
+#                      that manufactures false attribution elsewhere, so a miss
+#                      here is the engine declining to make a claim it should
+#                      not make — count it, do not chase it.
+#   none               one operator, several sites, and nothing shared that any
+#                      engine could key on (nowhere.moe's services publish
+#                      nothing in common). Unrecoverable by construction, kept
+#                      because pretending otherwise would hide it.
+#   unverified         the operator is known from its own published listing, but
+#                      the site never answered, so what the pair shares was
+#                      never observed. Predicting the class from what the live
+#                      half publishes would be inventing ground truth, and these
+#                      are exactly the rows an acceptance count must not borrow.
+#
+# Pairs whose two sides disagree on the class are reported unclassified rather
+# than folded into either — that only happens if a family is labeled wrong.
+
 [corpus]
 name = "cybertrace-eval-v1"
 collected = "2026-08-13"
@@ -50,6 +77,7 @@ name = "riseup-main"
 onion = "vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.onion"
 operator = "riseup"
 platform = "riseup"
+evidence_class = "namespace"
 basis = "Riseup's own onion services page lists this as riseup.net / help.riseup.net; dark.fail also publishes it under its PGP-signed listing"
 
 [[target]]
@@ -57,6 +85,7 @@ name = "riseup-account"
 onion = "3xeiol2bnhrsqhcsaifwtnlqkylrerdspzua7bcjrh26qlrrrctfobid.onion"
 operator = "riseup"
 platform = "riseup"
+evidence_class = "namespace"
 basis = "Riseup's own onion services page lists this as account.riseup.net"
 
 [[target]]
@@ -64,6 +93,7 @@ name = "riseup-mail"
 onion = "5gdvpfoh6kb2iqbizb37lzk2ddzrwa47m6rpdueg2m656fovmbhoptqd.onion"
 operator = "riseup"
 platform = "riseup"
+evidence_class = "namespace"
 basis = "Riseup's own onion services page lists this as mail/imap/pop/smtp.riseup.net"
 
 [[target]]
@@ -71,6 +101,7 @@ name = "riseup-lists"
 onion = "7sbw6jufrirhyltzkslhcmkik4z7yrsmbpnptyritvz5nhbk35hncsqd.onion"
 operator = "riseup"
 platform = "sympa"
+evidence_class = "namespace"
 basis = "Riseup's own onion services page lists this as lists.riseup.net"
 
 [[target]]
@@ -78,6 +109,7 @@ name = "riseup-pad"
 onion = "kfahv6wfkbezjyg4r6mlhpmieydbebr5vkok5r34ya464gqz6c44bnyd.onion"
 operator = "riseup"
 platform = "etherpad"
+evidence_class = "namespace"
 basis = "Riseup's own onion services page lists this as pad.riseup.net"
 
 [[target]]
@@ -85,6 +117,7 @@ name = "riseup-we"
 onion = "zkdppoahhqu5ihjqd4qqvyfd2bm4wejrhjosim67t6yopl77jitg2nad.onion"
 operator = "riseup"
 platform = "crabgrass"
+evidence_class = "namespace"
 basis = "Riseup's own onion services page lists this as we.riseup.net"
 
 [[target]]
@@ -92,6 +125,7 @@ name = "riseup-0xacab"
 onion = "wmj5kiic7b6kjplpbvwadnht2nh2qnkbnqtcv3dyvpqtz7ssbssftxid.onion"
 operator = "riseup"
 platform = "gitlab"
+evidence_class = "namespace"
 basis = "Riseup's own onion services page lists this as 0xacab.org, the code-hosting service Riseup runs"
 
 # Dark at collection time, kept labeled on purpose: a target that stops
@@ -102,6 +136,7 @@ name = "riseup-share"
 onion = "2pyimbpxocupne6nbekma4dygkobl36sblei6ttknbm4kfh3r7jlpzyd.onion"
 operator = "riseup"
 platform = "riseup"
+evidence_class = "namespace"
 basis = "Riseup's own onion services page lists this as share.riseup.net"
 
 # --- Endchan: one operator, two onion services ------------------------------
@@ -111,6 +146,7 @@ name = "endchan"
 onion = "enxx3byspwsdo446jujc52ucy2pf5urdbhqw3kbsfhlfjwmbpj5smdad.onion"
 operator = "endchan"
 platform = "lynxchan"
+evidence_class = "operator-specific"
 basis = "dark.fail publishes this as Endchan; the site itself links the endchancxfb address as its own mirror"
 
 [[target]]
@@ -118,6 +154,7 @@ name = "endchan-alt"
 onion = "endchancxfbnrfgauuxlztwlckytq7rgeo5v6pc2zd4nyqo3khfam4ad.onion"
 operator = "endchan"
 platform = "lynxchan"
+evidence_class = "operator-specific"
 basis = "published as an alternate address on Endchan's own enxx3 landing page"
 
 # --- OnionMail family: one platform, independent operators ------------------
@@ -137,6 +174,11 @@ name = "mail2tor"
 onion = "mail2torjgmxgexntbrmhvgluavhj7ouul5yar6ylbvjkxwqf6ixkwyd.onion"
 operator = "mail2tor"
 platform = "mail2tor"
+# `unverified`, not `operator-specific`: this address publishes the operator's
+# own mailbox, and whether the two mirrors below carry it too was never seen,
+# because neither answered. Claiming the class from one side of the pair would
+# be exactly the invented ground truth the basis rule exists to forbid.
+evidence_class = "unverified"
 basis = "independent Tor mail service; nginx, its own template, no OnionMail banner"
 
 # --- Independent mail providers ---------------------------------------------
@@ -153,6 +195,7 @@ name = "dnmx"
 onion = "dnmxjaitaiafwmss2lx7tbs5bv66l7vjdmb5mtb3yqpxqhk3it5zivad.onion"
 operator = "dnmx"
 platform = "dnmx"
+evidence_class = "operator-specific"
 basis = "Dark Net Mail Exchange, self-hosted Apache/PHP stack under its own brand"
 
 [[target]]
@@ -160,6 +203,7 @@ name = "dnmx-2"
 onion = "hxuzjtocnzvv5g2rtg2bhwkcbupmk7rclb6lly3fo4tvqkk5oyrv3nid.onion"
 operator = "dnmx"
 platform = "dnmx"
+evidence_class = "operator-specific"
 basis = "this address's own page publishes the dnmxjait address as its mirror, and both serve the DNMX brand under the same support@dnmx.cc mailbox"
 
 [[target]]
@@ -572,6 +616,7 @@ name = "cockli-main"
 onion = "rurcblzhmdk22kttfkel2zduhyu3r6to7knyc7wiorzrx5gw4c3lftad.onion"
 operator = "cock.li"
 platform = "cockli"
+evidence_class = "namespace"
 basis = "cock.li's own clearnet front page publishes this onion; the page served here is the Cock.li site and it links the webmail onion below"
 
 [[target]]
@@ -579,6 +624,7 @@ name = "cockli-webmail"
 onion = "xdkriz6cn2avvcr2vks5lvvtmfojz2ohjzj4fhyuka55mvljeso2ztqd.onion"
 operator = "cock.li"
 platform = "cockli"
+evidence_class = "namespace"
 basis = "cock.li's own clearnet front page publishes this onion as its webmail, and the Cock.li onion above links it"
 
 # --- Singletons reached from other targets' link lists -----------------------
@@ -647,3 +693,164 @@ onion = "digdig2nugjpszzmqe5ep2bk7lqfpdlyrkojsx2j6kzalnrqtwedr3id.onion"
 operator = ""
 platform = ""
 basis = "reached from 81chan's link list; never answered, and no public statement identifies its operator"
+
+# --- Mail2Tor's own published mirrors: dead-target controls -----------------
+# Mail2Tor's landing page prints these two addresses beside its own — the
+# operator naming its own services, the same basis class as Endchan's mirror
+# list. Both were unreachable when collected, and they stay here precisely
+# because of that: they are a SAME_OPERATOR pair on the strongest evidence class
+# the corpus has (the operator's mailbox at its own domain, admin@Mail2Tor.com)
+# that the engine cannot be graded on, and the eval must say so out loud rather
+# than let the pair vanish.
+
+[[target]]
+name = "mail2tor-mirror-g77k"
+onion = "g77kjrad6bafzzyldqvffq6kxlsgphcygptxhnn4xlnktfgaqshilmyd.onion"
+operator = "mail2tor"
+platform = "mail2tor"
+evidence_class = "unverified"
+basis = "published on Mail2Tor's own onion landing page as one of its addresses; unreachable at collection, so what it shares with the live Mail2Tor address was never observed"
+
+[[target]]
+name = "mail2tor-mirror-xc7t"
+onion = "xc7tgk2c5onxni2wsy76jslfsitxjbbptejnqhw6gy2ft7khpevhc7ad.onion"
+operator = "mail2tor"
+platform = "mail2tor"
+evidence_class = "unverified"
+basis = "published on Mail2Tor's own onion landing page as one of its addresses; unreachable at collection, so what it shares with the live Mail2Tor address was never observed"
+
+# --- Nowhere: one operator, six live onion services -------------------------
+# The `none` evidence class, instantiated. nowhere.moe's front page lists its
+# own services by name and address — the OPSEC Bible, Git Datura, Darknet
+# Lantern, the library, Lain Radio — which is an operator statement of exactly
+# the kind the basis rule asks for, and all six answered.
+#
+# What they publish in common is nothing. Only the OPSEC Bible carries contact
+# or payment artifacts at all; the git, library and radio services carry none.
+# The one thing all six share is `Server: nginx/1.31.1`, which is a web server
+# version and is refused as an identity on purpose — see
+# evidence._GENERIC_BANNER. So this family is fifteen SAME_OPERATOR pairs that
+# no evidence in the capture can support, and they are labeled so the recall
+# figure has to carry them instead of quietly excluding the hard case.
+
+[[target]]
+name = "nowhere-main"
+onion = "nowherejezfoltodf4jiyl6r56jnzintap5vyjlia7fkirfsnfizflqd.onion"
+operator = "nowhere"
+platform = "nowhere"
+evidence_class = "none"
+basis = "the Nowhere front page lists the five services below as its own, under its administrators' pages"
+
+[[target]]
+name = "nowhere-opsec-bible"
+onion = "opbible7nans45sg33cbyeiwqmlp5fu7lklu6jd6f3mivrjeqadco5yd.onion"
+operator = "nowhere"
+platform = "nowhere"
+evidence_class = "none"
+basis = "listed as 'The OPSEC Bible' on nowhere.moe's own front page"
+
+[[target]]
+name = "nowhere-git-datura"
+onion = "gdatura24gtdy23lxd7ht3xzx6mi7mdlkabpvuefhrjn4t5jduviw5ad.onion"
+operator = "nowhere"
+platform = "forgejo"
+evidence_class = "none"
+basis = "listed as 'Git Datura' on nowhere.moe's own front page"
+
+[[target]]
+name = "nowhere-lantern"
+onion = "lantern6vrwheap4iahuktz3jtwvovrzhxgwgzvrvp46brdzzekxibqd.onion"
+operator = "nowhere"
+platform = "nowhere"
+evidence_class = "none"
+basis = "listed as 'Darknet Lantern' on nowhere.moe's own front page"
+
+[[target]]
+name = "nowhere-library"
+onion = "libraryhmny4k3t424tznkzs3776hkn3tw5wijt2bqjvavpwh4544mqd.onion"
+operator = "nowhere"
+platform = "nowhere"
+evidence_class = "none"
+basis = "listed as 'Nowhere Library' on nowhere.moe's own front page; answers with an autoindex and no artifacts"
+
+[[target]]
+name = "nowhere-lain-radio"
+onion = "6z6g6lv4v7xhupvtjvo4jockd4af5dn47nrxcexu475tbhiflx6ln6ad.onion"
+operator = "nowhere"
+platform = "nowhere"
+evidence_class = "none"
+basis = "listed as 'Lain Radio' on nowhere.moe's own front page"
+
+# --- Reached from other targets' link lists: negative controls --------------
+# Both self-brand and name their own clearnet domain, the standard already used
+# for darkforest and pogachan. deep-swarm is the sharper control of the two: it
+# links itmens' onion AND references three of itmens' own subdomains, while
+# itmens links back — mutual co-reference between two people who read each
+# other. If co-reference were operator evidence, this pair would be the first
+# thing to break.
+
+[[target]]
+name = "deep-swarm"
+onion = "dswarmsikhttkg7jgsoyfiqpj3ighupfrvuz5ri3lu5q2dlqyrpgk7ad.onion"
+operator = "deepswarm"
+platform = "unknown"
+basis = "self-branded deep-swarm.xyz and references its own git./kairos. subdomains; links itmens, which links back"
+
+[[target]]
+name = "zzzchan"
+onion = "crghlabr45r5pqkgnbgehywk5nxutdks5iss7tabyux5psikqqjirryd.onion"
+operator = "zzzchan"
+platform = "unknown"
+basis = "self-branded zzzchan; reached from itmens' link list, and its FAQ prints example.com in an instruction"
+
+# --- Unlabeled: linked, but no statement of who runs them -------------------
+# A link on somebody's page is not a claim about who operates the destination,
+# and that distinction is the whole point of the negative controls above. Both
+# rows stay in the corpus for their collection evidence and score nothing.
+
+[[target]]
+name = "blockchair-401"
+onion = "ot4kxl6lzab3vr6yp7netcv4xonwt3e7so6srj2wxrfv77vkn5mbfbyd.onion"
+operator = ""
+platform = ""
+basis = "linked from Blockchair's onion, which says nothing about who runs it; answers 401 with no content, so nothing identifies it either"
+
+[[target]]
+name = "pogachan-linked"
+onion = "mytkgbaijbsfuvhmwp457sktajghtmogwlfl47cipfukyj36o5hv5sid.onion"
+operator = ""
+platform = ""
+basis = "referenced by Pogachan without saying whose it is; never answered"
+
+# --- Cryptostorm: one operator, two onion services --------------------------
+# The third operator-specific positive, and the one that took six tries to
+# find: two simultaneously live onions of one operator that each publish the
+# same controlled artifact. Cryptostorm's own onion footer lists the stormu36
+# address beside its warrant canary and token-verify links, the two share a
+# `storm` vanity prefix, and the stormu36 capture links the stormways address
+# back.
+#
+# What they share is `support@cryptostorm.is` — a mailbox at the operator's own
+# domain, the same evidence class as DNMX's support@dnmx.cc.
+#
+# Recorded caveat, because the capture says so and a reader must not have to
+# find out later: both addresses answered HTTP 403 to this collector, so the
+# artifact comes from Cryptostorm's own branded error template rather than from
+# its content pages. Both refused all further requests afterwards — the site
+# rate-limits, which is why there is one capture of each and not more.
+
+[[target]]
+name = "cryptostorm-main"
+onion = "stormwayszuh4juycoy4kwoww5gvcu2c4tdtpkup667pdwe4qenzwayd.onion"
+operator = "cryptostorm"
+platform = "cryptostorm"
+evidence_class = "operator-specific"
+basis = "dark.fail publishes this as Cryptostorm's onion, and the page served under it carries the operator's own support@cryptostorm.is"
+
+[[target]]
+name = "cryptostorm-2"
+onion = "stormu36id5e62n2i7kq3v7batuy34dimpijx5euklgl5bwi65eaycyd.onion"
+operator = "cryptostorm"
+platform = "cryptostorm"
+evidence_class = "operator-specific"
+basis = "published in the footer of Cryptostorm's own onion beside its warrant canary; serves the same branded page and the same support@cryptostorm.is, and links the stormways address back"

@@ -1117,8 +1117,13 @@ def limitations(role: str, etype: str, has_contradiction: bool) -> List[str]:
         out.append("Shared hosting and CDNs produce this same overlap with no "
                    "relationship between the sites")
     if has_contradiction:
-        out.append("A clone finding contradicts part of this candidate's support — "
-                   "read the contradictions before relying on the score")
+        # Not necessarily a clone: four rules write contradictions, and this line
+        # named only the first of them. The DNMX candidate, whose objection is
+        # that both addresses were live at once, was reported to the reader as
+        # contradicted by "a clone finding" that the store does not contain —
+        # misdescribing the evidence in the one section a careful reader trusts.
+        out.append("A contradiction stands against part of this candidate's "
+                   "support — read the contradictions before relying on the score")
     return out
 
 
@@ -1238,7 +1243,8 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
             lines.append("- funnels: " + ", ".join(
                 f"{f} {v['best_conf']:.2f}" for f, v in sorted(d["funnels"].items())))
         if d["contradictions"]:
-            lines.append(f"- ⚠ contradicted by {len(d['contradictions'])} clone finding(s)")
+            lines.append("- ⚠ contradicted by "
+                         + ", ".join(sorted({c["rule"] for c in d["contradictions"]})))
         if d["aliases"]:
             lines.append("- look-alike handles: " + ", ".join(
                 f"{a['a_value']}~{a['b_value']} ({a['similarity']})" for a in d["aliases"]))

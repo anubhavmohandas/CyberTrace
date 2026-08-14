@@ -55,6 +55,21 @@ def load_labels(path: Path) -> dict:
     return {t["onion"].strip().lower(): t for t in data.get("target", [])}
 
 
+def evidence_class(a: dict, b: dict) -> str:
+    """What a same-operator pair actually shares, per corpus/labels.toml.
+
+    Recall over all positives mixes three different questions. Riseup's 21 pairs
+    share a public-service domain and nothing else, so recovering them would
+    mean promoting co-reference to shared control — the move that manufactures
+    false attribution. The nowhere.moe family shares nothing recoverable at all.
+    Only the `operator-specific` pairs ask the question the engine exists to
+    answer, and averaging them together hides both the successes and the
+    honest impossibilities.
+    """
+    ca, cb = a.get("evidence_class"), b.get("evidence_class")
+    return ca if ca and ca == cb else "unclassified"
+
+
 def truth(a: dict, b: dict) -> str | None:
     """Ground-truth relation between two labeled targets, None if unlabeled.
 
@@ -159,12 +174,14 @@ def evaluate(paths: list[Path], labels_path: Path, show_pairs: bool,
         # silently dropping it would inflate precision the same way.
         dark = [t["name"] for t, url in ((la, a), (lb, b)) if url not in live]
         if dark:
-            unevaluable.append((actual, la["name"], lb["name"], ", ".join(dark)))
+            unevaluable.append((actual, la["name"], lb["name"], ", ".join(dark),
+                                evidence_class(la, lb)))
             continue
         verdict, why = predicted.get(frozenset((a, b)), (UNRELATED, ""))
         scored = UNRELATED if verdict == LEAD else verdict
         matrix[(actual, scored)] = matrix.get((actual, scored), 0) + 1
-        rows.append((actual, verdict, la["name"], lb["name"], why))
+        rows.append((actual, verdict, la["name"], lb["name"], why,
+                     evidence_class(la, lb)))
 
     print(f"\ningested {ingested}/{len(paths)} runs · "
           f"{len(in_store)} targets · {len(rows)} labeled pairs scored"
@@ -198,16 +215,39 @@ def evaluate(paths: list[Path], labels_path: Path, show_pairs: bool,
           f"{len([r for r in leads if r[0] == SAME_OPERATOR])} of them true positives)")
     print(f"  false attribution    {false_attr}  (unrelated pairs called same-operator)")
 
+    # Recall by what the pair actually shares. The aggregate above is the sum of
+    # three unlike questions; this is the one an acceptance gate can read.
+    positives = [r for r in rows if r[0] == SAME_OPERATOR]
+    dark_positives = [u for u in unevaluable if u[0] == SAME_OPERATOR]
+    print("\n=== operator recall by evidence class ===")
+    print(f"{'class':20}{'found':>7}{'evaluable':>11}{'dark':>7}  what a miss means")
+    meaning = {
+        "operator-specific": "a real miss — the artifact is there to be found",
+        "namespace": "the engine declining to promote co-reference; correct",
+        "none": "unrecoverable: the sites publish nothing in common",
+        "unverified": "operator known from its own listing, shared evidence never observed",
+        "unclassified": "family not labeled with an evidence class",
+    }
+    for klass in ("operator-specific", "namespace", "none", "unverified",
+                  "unclassified"):
+        group = [r for r in positives if r[5] == klass]
+        dark_n = len([u for u in dark_positives if u[4] == klass])
+        if not group and not dark_n:
+            continue
+        found = len([r for r in group if r[1] == SAME_OPERATOR])
+        print(f"{klass:20}{found:>7}{len(group):>11}{dark_n:>7}  {meaning[klass]}")
+
     if unevaluable:
         print("\n=== unevaluable — target never answered, not the engine's miss ===")
-        for actual, na, nb, dark in sorted(unevaluable):
+        for actual, na, nb, dark, _klass in sorted(unevaluable):
             print(f"  {actual:14} {na} ~ {nb}   (dark: {dark})")
 
     if show_pairs:
         print("\n=== pairs ===")
-        for actual, verdict, na, nb, why in sorted(rows):
+        for actual, verdict, na, nb, why, klass in sorted(rows):
             mark = "ok " if actual == verdict else "MISS"
-            print(f"  [{mark}] {actual:14} -> {verdict:14} {na} ~ {nb}"
+            klass = f" [{klass}]" if actual == SAME_OPERATOR else ""
+            print(f"  [{mark}] {actual:14} -> {verdict:14} {na} ~ {nb}{klass}"
                   + (f"  ({why})" if why else ""))
 
     return 1 if (leak or false_attr) else 0

@@ -6,82 +6,158 @@ live dark web sites and stays out of git — see the `runs/` block in
 
 ```
 runs/
-  raw/          saved `cybertrace search --save` JSON, one file per target
-  raw/v2/       the labeled evaluation corpus (below)
-  corpora/      .db + .html written by `correlate --db --html --dossier`
+  raw/            saved `cybertrace search --save` JSON, one file per target
+  raw/v5,v6,v7/   the labeled evaluation corpus (below)
+  raw/superseded/ captures taken before an extractor fix, kept as the "before"
+                  half of the comparison and excluded from the corpus
+  corpora/        .db + .html written by `correlate --db --html --dossier`
 ```
 
 Both derived directories are regenerable from the raw JSON:
 
 ```bash
-cybertrace correlate runs/raw/v2/*.json \
-    --db runs/corpora/case.db --html runs/corpora/case-graph.html \
-    --dossier runs/corpora/case.html
+cybertrace correlate runs/raw/v5/*.json runs/raw/v6/*.json runs/raw/v7/*.json \
+    --db runs/corpora/v7.db --html runs/corpora/v7-graph.html \
+    --dossier runs/corpora/v7-case.html
 ```
 
-## raw/v2 — the evaluation corpus
+## The evaluation corpus
 
-Seventeen live captures, collected 2026-08-13 over Tor, labeled in
-`corpus/labels.toml` and scored by `tools/eval_corpus.py`. It is not a sample
+93 captures of **89 labeled targets**, collected 2026-08-13/14 over Tor, labeled
+in `corpus/labels.toml` and scored by `tools/eval_corpus.py`. It is not a sample
 of the dark web; it is a set of **controls**, chosen so the engine's failure
-modes are checkable rather than hypothetical:
+modes are checkable rather than hypothetical. Every target is classified: **74
+answered, 15 were dark, none unaccounted for.**
 
 | Control | Targets | What it tests |
 |---------|---------|---------------|
-| Same operator, two addresses | Riseup main + Riseup account portal; Endchan + its published mirror | Can the engine find a real link at all |
-| Same platform, different operators | OnionMail servers (xyrasoru, others), independent mail providers | Does a software family read as one operator — the failure that matters most |
-| Unrelated, different categories | Tor Project, Blockchair, keys.openpgp.org, Dread, DarkForest, Black Hat Chat | False attribution rate |
-| Unidentified | sector-city | Kept in the corpus for its artifacts, excluded from scoring — a guessed label would make the precision figure fiction |
+| Same operator, operator-specific evidence | DNMX ×2 (`support@dnmx.cc` on both), Endchan ×2 (one donation wallet on both), Cryptostorm ×2 (`support@cryptostorm.is` on both) | The question the engine exists to answer |
+| Same operator, namespace evidence only | Riseup ×7, Cock.li ×2 | Whether a co-referenced public-service domain gets promoted to shared control. It must **not** be |
+| Same operator, nothing shared | Nowhere ×6 (OPSEC Bible, Git Datura, Lantern, library, radio, main) | An honest floor: one operator, six live services, no artifact in common |
+| Same platform, different operators | OnionMail ×26, SecureDrop ×8 | Does a software family read as one operator — the failure that matters most |
+| Unrelated, different categories | Tor Project, Blockchair, keys.openpgp.org, DarkForest, Black Hat Chat, five imageboards, two blogs | False attribution rate |
+| Co-reference controls | 81chan (linked by Endchan), deep-swarm ↔ itmens (they link each other), DNM Bible, Pogachan | Being linked by a target, or co-linking what it links, must create no operator relationship |
+| Dead / unreachable | 15 targets, including Mail2Tor's two published mirrors and Dread | A dark target must contribute collection evidence and no artifacts |
+| Unidentified | sector-city, itmens-2, anon01–03, blockchair-401, pogachan-linked | Kept for their artifacts, never scored — a guessed label would make the precision figure fiction |
 
-`raw/` (without `v2`) holds the earlier captures of overlapping targets. They
-are kept: a second capture of one target is a second snapshot in the store, and
-the chain between them is what the monitoring and successor logic read.
+## Measured, 2026-08-14
 
-## Measured, 2026-08-13
-
-`python tools/eval_corpus.py runs/raw/v2/*.json`, 17 targets, 91 labeled pairs
-scored and 29 unevaluable because a target was dark that day:
+`python tools/eval_corpus.py runs/raw/v5/*.json runs/raw/v6/*.json runs/raw/v7/*.json`
+— 89 labeled targets, 2346 labeled pairs scored, 894 unevaluable because a
+target was dark:
 
 | Metric | Result |
 |--------|--------|
+| Operator precision | **3/3 = 1.00** |
 | False attribution (unrelated called same-operator) | **0** |
 | Ecosystem leakage (same-platform called same-operator) | **0** |
-| Operator claims asserted | 0 |
-| Operator recall on claims | 0/1 |
-| True positives surfaced as leads | 1/1 |
+| Operator recall, `operator-specific` pairs | **3/3 = 1.00** |
+| Operator recall, `namespace` pairs | 0/22 — declined, and correctly so |
+| Operator recall, `none` pairs | 0/15 — unrecoverable by construction |
+| Operator recall, aggregate | 3/40 = 0.07 |
 
-Read honestly, that is: on a corpus of well-run services the engine asserted
-nothing and got nothing wrong, and the one evaluable same-operator pair (the
-two Riseup onions) was ranked and surfaced as a **lead** rather than claimed.
-Its only shared evidence is that both sites reference the same eight
-`riseup.net` hosts — co-reference, not control — and that genuinely does not
-support asserting shared operation. The Endchan pair, the corpus's other true
-positive, was unevaluable: `enxx3…` was dark on every attempt.
-
-Three defects were found by these runs and fixed, which is what the corpus is
-for:
-
-1. **Eight false successor edges** between unrelated markets. Collecting targets
-   one after another made every pair look like a takedown-and-relaunch. A
-   handoff now requires the predecessor to have been *observed dark*.
-2. **A false pair at 0.51** (an Endchan mirror and a Riseup onion) because both
-   donation pages linked to `www.paypal.com` and `en.bitcoin.it`. Sharing
-   something you link to is now scored far below sharing something you control.
-3. **Fifteen junk INFRA candidates** — `t.me`, `twitter.com`, `duckduckgo.com` —
-   admitted purely on "referenced by 2+ markets".
+Read the aggregate only with the class breakdown beside it. It is the sum of
+three unlike questions, and `corpus/labels.toml` explains the split: promoting
+the 22 namespace pairs is the same move that would manufacture the ecosystem
+leakage this corpus exists to catch, and the 15 nowhere.moe pairs share nothing
+any engine could key on.
 
 Extractor precision over the same corpus (`tools/audit_corpus.py`) is 1.00 for
-every entity type: nothing the collectors emitted was refused by normalization,
-because the collectors validate before emitting.
+every artifact type except DOMAIN 0.88 and EMAIL 0.60, where the shortfall *is*
+the normalizer refusing page furniture, documentation names and placeholder
+mailboxes before they can become entities.
+
+The three claims the engine asserted are the three operator-specific pairs:
+
+- `stormways… ~ stormu36…` — OPERATOR candidate `support@cryptostorm.is`,
+  MEDIUM at 0.797.
+- `dnmxjait… ~ hxuzjtoc…` — OPERATOR candidate `support@dnmx.cc`, LOW at 0.592,
+  carrying its own objection (both addresses were live at once, so neither
+  succeeded the other).
+- `endchancxfb… ~ enxx3bysp…` — LINKED_TO at 0.986 on a shared donation wallet.
+
+### Separation, and why the scoring is frozen
+
+Scoring every pair with the assertion floor removed (`min_score=0`) puts the
+whole corpus on one scale:
+
+| Band | Score | Pairs |
+|------|-------|-------|
+| operator-specific positives | 0.761 – 0.986 | 3 |
+| *assertion threshold* | *0.50* | — |
+| namespace positives (Riseup, Cock.li) | 0.058 – 0.124 | 9 |
+| everything negative (ecosystem + unrelated) | ≤ 0.051 | rest |
+
+The weakest true positive outranks the strongest negative by 15×, and the band
+between 0.124 and 0.761 is empty — no threshold anywhere in it changes a single
+verdict, so there is nothing for tuning to buy. Note also that the namespace
+positives, which the engine deliberately does not assert, still rank above every
+negative: they are ordered correctly and claimed anyway not at all, which is the
+behaviour the corpus asks for. Weights, commonness floors and thresholds are
+therefore left exactly as they were.
+
+### Defects these runs found, and what fixed them
+
+Each was reproduced on a live capture before anything changed, and each has a
+regression test naming the site it came from:
+
+1. **A tutorial's cast reached the keyservers.** nowhere.moe's OPSEC Bible
+   prints gpg key-generation prompts and monero-wallet-cli transcripts;
+   `alice@nowhere.com` and `bob@bob.com` were pivoted, and the keyserver
+   answered with one real fingerprint and sixty-nine more plus a GitHub
+   account. Three tutorial wallets landed in the confidence-*promoting*
+   `wallet` section. Fixed by a `demo` section, non-attributive like `quoted`;
+   that capture now pivots nothing.
+2. **SVG path data became three leaked hosts.** Git Datura's icons yielded
+   `1.5.75.75`, `1.7.75.75` and `5.142.75.75`, enriched into SoftBank, Sify and
+   Rostelecom subscriber networks. Fixed by refusing coordinate attributes, and
+   by requiring page text to use an address *as a host*.
+3. **A catch-all site read as three exposed endpoints.** 81chan answers any
+   unknown path with its front page, so `/server-status`, `/server-info` and
+   `/status` all looked exposed, and the `yonga 1.0.2.1` version tag in that
+   page's footer was filed as a leaked host at confidence 0.9. The probe now
+   sends a control path that cannot exist. The store's only remaining IP is
+   `78.17.212.207`, which that site's own text calls its clearnet address.
+4. **Documentation domains became entities.** `example.com`, off zzzchan's FAQ,
+   and two overlay-network addresses (`…b32.i2p`, `…loki`) each shared by two
+   targets. `norm_email` already refused these; `norm_domain` did not.
+5. **Every objection was labelled a clone finding.** The brief told the reader
+   the DNMX candidate was contradicted by "a clone finding" the store does not
+   contain — its actual objection is the temporal overlap.
+
+## What the corpus still cannot test
+
+Three same-operator pairs carry the `unverified` class: Mail2Tor publishes two
+further addresses on its own landing page and both were unreachable, so whether
+they share `admin@Mail2Tor.com` with the live address was never observed. They
+are labeled and reported, never counted.
+
+Three operator-specific positives is the floor for an evaluation, not a
+comfortable sample. Finding the third took seven attempts, and the six that
+failed are in the corpus as dead or artifact-free targets: Mail2Tor's two
+mirrors, a Pogachan mirror, Blockchair's second onion (401, no content) and the
+nowhere.moe family (six live services, nothing published in common). What is
+scarce is not operators with several onions — it is operators with several
+onions *live at the same moment* that each publish the same controlled artifact.
+
+Two consequences worth stating plainly:
+
+- All three positives rest on one artifact class each (two mailboxes, one
+  wallet). Nothing here tests PGP-keyed reuse, crypto-cluster convergence or
+  the successor path end to end on real data, because no live pair in reach
+  exercised them. Those paths have unit coverage and no field measurement.
+- The Cryptostorm pair was captured through the operator's own 403 error
+  template, and the site refused all further requests afterwards. The artifact
+  is real and the basis is published, but one capture each is all there is.
 
 ## Reproducing a corpus run
 
 ```bash
-# every target in the labels file, one at a time (a full sweep takes ~1 min each)
-cybertrace search "<onion>" -t darkweb -q --save runs/raw/v2/<name>.json
+# every target in the labels file, one at a time (~1-2 min each over Tor)
+cybertrace search "<onion>" -t darkweb -q --save runs/raw/v7/<name>.json
 
-python tools/eval_corpus.py runs/raw/v2/*.json --pairs      # score it
-python tools/audit_corpus.py runs/raw/v2/*.json --values    # extractor precision
+python tools/eval_corpus.py runs/raw/v5/*.json runs/raw/v6/*.json runs/raw/v7/*.json --pairs
+python tools/audit_corpus.py runs/raw/v5/*.json runs/raw/v6/*.json runs/raw/v7/*.json --values
 ```
 
 Expect targets to be dark on any given day. That is a property of the subject

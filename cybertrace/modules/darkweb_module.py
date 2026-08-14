@@ -7,6 +7,7 @@ import ipaddress
 import logging
 import re
 import time
+import uuid
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from html import unescape
@@ -32,6 +33,34 @@ _QUOTED_LEAD = re.compile(
 _QUOTED_NEAR = re.compile(
     _QUOTED_LEAD.pattern + r'|written by|authored by|\bauthor\s*:|all copies', re.I)
 
+# A program's own output, pasted into a walkthrough. Every string here is
+# something a tool prints, not something a person writes on a contact page, and
+# each one was measured on nowhere.moe's OPSEC Bible:
+#
+#   `Real name: alice / Email address: alice@nowhere.com`  gpg --gen-key prompts
+#   `gpg: Good signature from "bob bob <bob@bob.com>"`     gpg verification output
+#   `Generated new wallet: 46XVF…` / `Multisig address: …` monero-wallet-cli
+#
+# All five artifacts were minted as the site's own. The two addresses went
+# through the email pivot: the keyserver answered `alice@nowhere.com` with a
+# real fingerprint and `bob@bob.com` with sixty-nine of them plus the GitHub
+# account `caverobot`, so a tutorial's placeholder cast became named third
+# parties in the site's dossier. The wallets landed in the `wallet` section —
+# the one that PROMOTES confidence — because "Generated new wallet" contains the
+# word `wallet`, so demonstration output outranked a real donate box.
+#
+# Read like the quoted rule, and for the same reason: the page is displaying
+# this, not claiming it. Given the wide look-back below, a transcript header
+# covers the addresses printed underneath it, which is where wallet output puts
+# them.
+_DEMO_LEAD = re.compile(
+    r'gpg:\s|gpg\s+-|Real name:.{0,60}Email address:|You selected this USER-ID'
+    r'|Generated new wallet|Multisig address|wallet-cli|Good signature from'
+    # `change to <addr>` is monero-wallet-cli reporting where a transfer's change
+    # went. Anchored, so only the address that line is naming is covered — the
+    # bare phrase in prose says nothing.
+    r'|change to\s*$', re.I)
+
 # Where on the page an artifact was seen. A BTC address under "donate" is the
 # operator's; the same string in passing prose is a mention. Checked against the
 # raw HTML window, so class="footer" / id="wallet" count as evidence too.
@@ -47,6 +76,10 @@ _SECTION_RULES = (
     # does. Downstream: evidence.ingest demotes the edge to MENTIONS and
     # _pivot_targets refuses to enrich it.
     ('quoted', _QUOTED_NEAR),
+    # Demonstration output, checked beside 'quoted' and for the same reason: it
+    # has to override 'wallet' and 'pgp', which sit below and would otherwise
+    # promote a tutorial's example address. See _DEMO_LEAD.
+    ('demo', _DEMO_LEAD),
     # Mailing-list membership, for the same reason and with the same effect.
     # Riseup's list manager renders the logged-in user's own address into its
     # menu — `<a href="mailto:honeytroll@riseup.net">` beside a link captioned
@@ -94,6 +127,44 @@ _VERSION_LEAD = re.compile(
     r'|[A-Za-z]/$'                           # `PHP/5.4.9.9` — not `http://1.2.3.4`
     r'|\b(?:version|ver|release|build|rev|sdk)\b[^\w]{0,3}$', re.I)
 _VERSION_TAIL = re.compile(r'^\.\d')         # `5.4.9.9.9h` — the run continues
+
+# …and the same family one level up: an attribute whose value IS a coordinate
+# run. The version guard above works on the ±70 window, so it only catches a
+# quad whose neighbours are dotted; inside SVG path data the neighbours are
+# space-separated (`a6 6 0 0 1 3.432 5.142.75.75 0 1 1-1.498`) and it does not
+# fire. Measured on Git Datura (nowhere.moe's Forgejo): three icon paths yielded
+# `1.5.75.75`, `1.7.75.75` and `5.142.75.75`, all three were promoted to
+# candidate operator IPs, and the pivot enriched them into SoftBank, Sify and
+# Rostelecom subscriber networks — three unrelated people's addresses filed as
+# leads on a site none of them has anything to do with.
+#
+# Decided on where the match sits, not on what it looks like: an address has no
+# checksum to fail, so the attribute it lives in is the only thing that can rule
+# it out. `[^"\']*$` anchors the search inside ONE attribute value, so a real
+# address in `content="… 1.2.3.4"` is untouched — only geometry attributes are
+# refused. The window is wider than the context window because path data
+# routinely runs to hundreds of characters before the coordinate that matched.
+_COORD_ATTR = re.compile(
+    r'\b(?:d|points|viewbox|transform|patharray)\s*=\s*["\'][^"\']*$', re.I)
+_COORD_LOOKBACK = 2000
+
+# The positive half of the same problem, for page text only. A dotted quad in
+# prose is a leak when the page is USING it as a host — a URL authority, a
+# port, or a word that names what it is. Anything else is a number that happens
+# to have three dots in it, and the denylist above can only ever name the shapes
+# already seen. See _public_ipv4_in.
+_HOST_CUE = re.compile(
+    r'(?:https?://|\b(?:ip|ips|ipv4|host|hostname|server|srv|addr|address|origin|'
+    r'backend|upstream|proxy|gateway|router|dns|ns\d?|mx|resolver|node|peer|'
+    r'connect|ping|traceroute|ssh|rdp|whois|forwarded|real[-_]ip|client|'
+    r'adres|adresi)\b\W{0,12})$', re.I)
+_PORT_TAIL = re.compile(r'^:\d{2,5}\b')
+
+
+def _used_as_host(context: str, value: str) -> bool:
+    """True when `value` reads as a host in the snippet it was seen in."""
+    head, _, tail = context.partition(value)
+    return bool(_HOST_CUE.search(head) or _PORT_TAIL.match(tail))
 
 
 class DarkwebModule(BaseModule):
@@ -290,8 +361,10 @@ class DarkwebModule(BaseModule):
             # _DOTTED_QUAD for the captures that forced each.
             if '@' in raw and _URL_USERINFO.search(before):
                 continue
-            if _DOTTED_QUAD.fullmatch(raw) and (_VERSION_LEAD.search(before)
-                                                or _VERSION_TAIL.match(after)):
+            if _DOTTED_QUAD.fullmatch(raw) and (
+                    _VERSION_LEAD.search(before)
+                    or _VERSION_TAIL.match(after)
+                    or _COORD_ATTR.search(html[max(0, m.start() - _COORD_LOOKBACK):m.start()])):
                 continue
             if normalizer(raw) is None:
                 continue
@@ -314,6 +387,12 @@ class DarkwebModule(BaseModule):
             if section != 'quoted' and (_QUOTED_LEAD.search(lead)
                                         or lead.rfind('<blockquote') > lead.rfind('</blockquote')):
                 section = 'quoted'
+            # Same wide look-back for demonstration output, and it is load-bearing
+            # rather than cosmetic: monero-wallet-cli prints the transcript header
+            # once and the addresses several lines below it, so the third wallet on
+            # nowhere.moe's page had no marker inside the ±70 window at all.
+            elif section != 'demo' and _DEMO_LEAD.search(lead):
+                section = 'demo'
             evidence[raw] = {
                 'section': section,
                 'context': re.sub(
@@ -410,7 +489,9 @@ class DarkwebModule(BaseModule):
         return (DarkwebModule._public_ipv4([value]) or [None])[0]
 
     @classmethod
-    def _public_ipv4_in(cls, text: str) -> Tuple[List[str], Dict[str, Dict[str, str]]]:
+    def _public_ipv4_in(cls, text: str,
+                        require_host_use: bool = False
+                        ) -> Tuple[List[str], Dict[str, Dict[str, str]]]:
         """Public IPv4 in some text, gated on context like every other artifact.
 
         A bare `findall` here is what let SVG path coordinates become a leaked
@@ -418,8 +499,22 @@ class DarkwebModule(BaseModule):
         fail, so where it was seen is the ONLY validation available. Routing it
         through _validated also earns it a section and a context snippet, which
         is what stops a quoted or roster address reaching the ip-module pivot.
+
+        `require_host_use` turns the denylist round for PAGE TEXT, where the
+        claim is strongest and the evidence weakest: a body address is a leak
+        only if the page is using it AS A HOST. Every denylist entry above names
+        one shape of dotted-number noise after it burned us, and the corpus keeps
+        producing new ones — 81chan's footer reads `yonga 1.0.2.1`, a product
+        version tag with no version keyword in front of it, which was promoted to
+        a candidate operator IP and enriched into an unrelated APNIC network.
+        Response headers and misconfig endpoint bodies stay permissive: those are
+        network output already, so a bare address in them IS the leak.
         """
-        return cls._validated(text, cls._RE_IPV4, cls._norm_public_ipv4)
+        values, evidence = cls._validated(text, cls._RE_IPV4, cls._norm_public_ipv4)
+        if not require_host_use:
+            return values, evidence
+        kept = {v: ev for v, ev in evidence.items() if _used_as_host(ev['context'], v)}
+        return [v for v in values if v in kept], kept
 
     async def _fetch_full(self, url: str) -> Tuple[Optional[int], Dict[str, str], str]:
         """Fetch url (.onion auto-routes through Tor) returning status, headers,
@@ -534,7 +629,7 @@ class DarkwebModule(BaseModule):
         emails, ev_email = self._validated(html, self._RE_EMAIL, norm_email)
         eth, ev_eth = self._validated(html, self._RE_ETH, norm_eth)
         xmr, ev_xmr = self._validated(html, self._RE_XMR, norm_xmr)
-        ips, ev_ip = self._public_ipv4_in(html)
+        ips, ev_ip = self._public_ipv4_in(html, require_host_use=True)
         # Sectioned like every other artifact. An analytics id is the one class
         # that reaches correlation at FULL control weight — USES_ANALYTICS is not
         # in CONTEXT_WEIGHT, and "one account id across two markets is an
@@ -762,7 +857,17 @@ class DarkwebModule(BaseModule):
 
     async def _probe_misconfigs(self, base: str) -> List[Dict[str, Any]]:
         """Probe common info-leak endpoints; report any that return 200 and the
-        public IPs found in their bodies. Runs concurrently over Tor."""
+        public IPs found in their bodies. Runs concurrently over Tor.
+
+        A control path goes out with them, and nothing is reported unless it
+        404s. Plenty of sites answer every unknown path with their front page,
+        and read literally that is `/server-status`, `/server-info` and
+        `/status` all "exposed": 81chan returned its 17 kB index for all three,
+        and the version tag in its footer was filed as a leaked host IP at
+        confidence 0.9 — HOSTED_ON, the strongest claim the IP model can make.
+        A soft 404 cannot be told from a real exposure by looking at the
+        response alone, so the probe asks for something that cannot exist.
+        """
         async def probe(path: str) -> Optional[Dict[str, Any]]:
             status, _headers, body = await self._fetch_full(f"{base}{path}")
             if status == 200 and body:
@@ -770,12 +875,21 @@ class DarkwebModule(BaseModule):
                     'path': path,
                     'status': status,
                     'bytes': len(body),
+                    # Permissive on purpose: a server-status body is network
+                    # output, so a bare address in one IS the leak. That is only
+                    # sound once the catch-all case above is excluded.
                     'leaked_ips': self._public_ipv4_in(body)[0],
                 }
             return None
 
-        results = await asyncio.gather(*(probe(p) for p in self._MISCONFIG_PATHS))
-        return [r for r in results if r]
+        control = f"/cybertrace-{uuid.uuid4().hex[:12]}"
+        results = await asyncio.gather(
+            probe(control), *(probe(p) for p in self._MISCONFIG_PATHS))
+        if results[0] is not None:
+            logger.debug("%s answers 200 for %s — soft 404, misconfig probe void",
+                         base, control)
+            return []
+        return [r for r in results[1:] if r]
 
     async def _favicon_pivot(self, base: str, html: str) -> Dict[str, Any]:
         """

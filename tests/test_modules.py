@@ -14,7 +14,7 @@ from cybertrace.modules import (
     IndianModule,
 )
 from cybertrace.modules.base import ModuleResult, SourceResult
-from cybertrace.normalize import norm_btc, norm_email
+from cybertrace.normalize import norm_btc, norm_email, norm_xmr
 
 
 class TestModuleRegistry:
@@ -294,6 +294,68 @@ class TestDarkwebOperatorIntel:
                 'emails': [genuine],
                 'artifact_evidence': {genuine: {'section': section}}})
 
+    def test_tutorial_transcripts_are_not_the_operators_identity(self):
+        """A walkthrough's cast, measured on nowhere.moe's OPSEC Bible.
+
+        The gpg key-generation prompts, a signature-verification line and
+        monero-wallet-cli output yielded `alice@nowhere.com`, `bob@bob.com` and
+        three Monero addresses, all filed as the site's own. Both addresses then
+        went through the email pivot: the keyserver answered alice with a real
+        fingerprint and bob with sixty-nine of them plus the GitHub account
+        `caverobot`. The wallets were worse than merely accepted — "Generated new
+        wallet" contains the word `wallet`, so they landed in the section that
+        PROMOTES confidence, outranking a real donate box.
+
+        Markup below is the page text as captured, cut to the windows the
+        section rules see.
+        """
+        keygen = ('You need a user ID to identify your key. Real name: alice '
+                  'Email address: alice@nowhere.com You selected this USER-ID')
+        verify = ('gpg: Signature made Fri 14 Aug 2026 gpg: issuer "bob@bob.com" '
+                  'gpg: Good signature from "bob bob"')
+        for html, value in ((keygen, 'alice@nowhere.com'), (verify, 'bob@bob.com')):
+            _v, ev = DarkwebModule._validated(html, DarkwebModule._RE_EMAIL, norm_email)
+            assert ev[value]['section'] == 'demo', html
+            assert ('email', value) not in DarkwebModule._pivot_targets({
+                'emails': [value], 'artifact_evidence': {value: {'section': 'demo'}}})
+            # and no username pivot either: `alice` reached 26 social sites.
+            assert ('username', value.split('@')[0]) not in DarkwebModule._pivot_targets({
+                'emails': [value], 'artifact_evidence': {value: {'section': 'demo'}}})
+
+        wallet_run = (
+            'Generated new wallet: 46XVFMwQiY1L4WEbuQr9kS2huy39b7xQV7voVEQyDiEu'
+            '5ge2YA9C5c9HWLvYnG33iEgmC8ENX9oSsDfBQu2PCjZWDUzMqKy'
+            + ' filler line of transcript output. ' * 6 +
+            'spent 0.000414840330, change to 4Avk37RuxDWEPz17ZNdG9nKtnpXgC5ip5fk1'
+            'eyw27CQ871GfLdA4EjvA2DRe61syBvdZnEBK5gBbuDEU2brrEJfQ8rRdm1B')
+        _v, ev = DarkwebModule._validated(
+            wallet_run, DarkwebModule._RE_XMR, norm_xmr)
+        # The second address has no marker within ±70 — the transcript header is
+        # lines above it — which is why demo gets the wide look-back.
+        assert {e['section'] for e in ev.values()} == {'demo'}, ev
+
+        # Two more shapes off the same site, both of which survived the first
+        # cut: a gpg invocation that uses a short option rather than `--`, and
+        # monero-wallet-cli naming where a transfer's change went.
+        _v, ev = DarkwebModule._validated(
+            'gpg -u nihilist@contact.nowhere.moe --clearsign message.txt',
+            DarkwebModule._RE_EMAIL, norm_email)
+        assert ev['nihilist@contact.nowhere.moe']['section'] == 'demo'
+        # …and the bare phrase in prose is not a marker: only the address the
+        # line is naming is covered.
+        _v, ev = DarkwebModule._validated(
+            '<div id="donate">no change to our address: support@dnmx.cc</div>',
+            DarkwebModule._RE_EMAIL, norm_email)
+        assert ev['support@dnmx.cc']['section'] == 'wallet'
+
+        # A real donate box on a page that also shows a canary transcript keeps
+        # its section: the rule is the program's own output, not the topic.
+        donate = ('<div id="donate">Monero XMR 46XVFMwQiY1L4WEbuQr9kS2huy39b7xQ'
+                  'V7voVEQyDiEu5ge2YA9C5c9HWLvYnG33iEgmC8ENX9oSsDfBQu2PCjZWDUzMqKy'
+                  '</div>')
+        _v, ev = DarkwebModule._validated(donate, DarkwebModule._RE_XMR, norm_xmr)
+        assert [e['section'] for e in ev.values()] == ['wallet']
+
     def test_url_userinfo_is_not_a_mailbox(self):
         """Reddit's onion embeds a Sentry DSN, `https://<key>@<host>/<project>`.
         The key@host half is regex-shaped like an address and normalizes
@@ -331,6 +393,151 @@ class TestDarkwebOperatorIntel:
         # and it arrives with provenance, which is what the pivot gate reads.
         _v, ev = DarkwebModule._public_ipv4_in('<div id="footer">host 8.8.8.8</div>')
         assert ev['8.8.8.8']['section'] == 'footer'
+
+    def test_svg_geometry_is_not_a_leaked_host(self):
+        """The same family as the test above, one level up, and the version
+        guard could not see it: inside path data the quad's neighbours are
+        space-separated, not dotted, so `_VERSION_LEAD` never fires.
+
+        Measured on Git Datura (nowhere.moe's Forgejo instance): three icon
+        paths yielded `1.5.75.75`, `1.7.75.75` and `5.142.75.75`, every one was
+        promoted to a candidate operator IP, and the pivot enriched them into
+        SoftBank, Sify and Rostelecom subscriber networks — three uninvolved
+        people's addresses filed as leads on that site.
+        """
+        forgejo = (
+            '<svg aria-hidden="true" width="16" height="16"><path d="M10.561 '
+            '8.073a6 6 0 0 1 3.432 5.142.75.75 0 1 1-1.498.07 4.5 4.5 0 0 0-8.99 '
+            '0 .75.75 0 0 1-1.498-.07 6 6 0 0 1 3.431-5.142"/></svg>'
+            '<path d="M5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0m6.75.75a.75.75 '
+            '0 1 0 0-1.5.75.75 0 0 0 0 1.5m-3 8.75a.75.75 0 0 1 0-1.5h1.75v-2h-8a1 '
+            '1 0 0 0-.714 1.7.75.75 0 1 1-1.072 1.05A2.5 2.5 0 0 1 0 10.5"/>')
+        assert DarkwebModule._public_ipv4_in(forgejo)[0] == []
+        # Long path data: the coordinate that matches can sit hundreds of
+        # characters after the attribute opened, which is why the look-back for
+        # this test is wider than the context window.
+        long_path = ('<path d="M0 0' + ' 1.5 2.25' * 120
+                     + ' 5.142.75.75 0 1 1-1.498"/>')
+        assert DarkwebModule._public_ipv4_in(long_path)[0] == []
+        # An address in an ordinary attribute is still an address: the gate is
+        # the geometry attribute, not "inside markup".
+        for markup in ('<meta name="origin" content="behind 8.8.8.8">',
+                       '<a href="http://8.8.8.8/admin">panel</a>',
+                       '<div data-host="8.8.8.8">'):
+            assert '8.8.8.8' in DarkwebModule._public_ipv4_in(markup)[0], markup
+
+    def test_page_text_needs_the_address_used_as_a_host(self):
+        """The denylist can only name the noise already seen, and the corpus
+        keeps producing more: 81chan's footer reads `yonga 1.0.2.1` — a product
+        version tag with no version keyword in front of it, so every guard above
+        passed it, and it was promoted to a candidate operator IP and enriched
+        into an unrelated APNIC network.
+
+        So page text carries the burden the other way round: an address there is
+        a leak when the page uses it AS a host. Headers and misconfig bodies stay
+        permissive — those are network output already, so a bare address in them
+        is the leak.
+        """
+        footer = '<p class="footer">- yonga 1.0.2.1 - </p>'
+        assert DarkwebModule._public_ipv4_in(footer, require_host_use=True)[0] == []
+        assert DarkwebModule._public_ipv4_in(footer)[0] == ['1.0.2.1']   # header path
+
+        # The genuine self-declared clearnet host on that very same site, in the
+        # site's own words, still lands.
+        declared = ('sitenin a&ccedil;&#305;k a&#287; adresi: http://78.17.212.207/ '
+                    'sitenin TOR &ouml;zel a&#287; adresi')
+        assert DarkwebModule._public_ipv4_in(declared, require_host_use=True)[0] \
+            == ['78.17.212.207']
+        for text in ('MySQL host 8.8.8.8 refused', 'proxy_pass http://8.8.8.8/;',
+                     'connect to 8.8.8.8:8443 for the backend',
+                     'X-Real-IP: 8.8.8.8'):
+            assert DarkwebModule._public_ipv4_in(text, require_host_use=True)[0] \
+                == ['8.8.8.8'], text
+
+    def test_redirects_follow_the_onion_and_stop_at_clearnet(self):
+        """Two failures with one gate between them.
+
+        Unfollowed, the big clearnet-backed onions answer `/` with a 307 to
+        their `www.` vhost and the capture is a 168-byte redirect stub recorded
+        as a live site that publishes nothing — worse than an error, because it
+        reads as a real observation.
+
+        Followed too far, a `Location:` pointing at clearnet is a request we must
+        not make: it leaves Tor for a host the target chose, which is a
+        deanonymising fetch. Any vhost of the same 56-char address is still one
+        hidden service and is fine.
+        """
+        import asyncio
+        onion = 'r' * 56 + '.onion'
+        module = DarkwebModule()
+
+        async def noop(*a, **k):
+            return []
+
+        module._crawl_pages = noop
+        module._probe_misconfigs = noop
+
+        async def no_favicon(*a, **k):
+            return {}
+
+        module._favicon_pivot = no_favicon
+
+        def run(chain):
+            seen = []
+
+            async def fake_fetch(url):
+                seen.append(url)
+                return chain.get(url, (None, {}, ''))
+
+            module._fetch_full = fake_fetch
+            return asyncio.run(module._fetch_target_onion(onion)), seen
+
+        result, seen = run({
+            f'http://{onion}/': (307, {'Location': f'http://www.{onion}/'}, ''),
+            f'http://www.{onion}/': (301, {'Location': f'http://www.{onion}/en'}, ''),
+            f'http://www.{onion}/en': (200, {'Server': 'nginx'},
+                                       '<title>Home</title>op@morke.ru'),
+        })
+        assert result.success and result.data['title'] == 'Home'
+        assert result.data['emails'] == ['op@morke.ru']    # the real page was read
+
+        # A clearnet Location is never requested, and what was already captured
+        # is what gets reported.
+        result, seen = run({
+            f'http://{onion}/': (302, {'Location': 'https://mail.riseup.net/'},
+                                 '<title>Gone</title>'),
+        })
+        assert all('.onion' in url for url in seen), seen
+        assert result.success and result.data['title'] == 'Gone'
+
+    def test_a_catch_all_site_exposes_nothing(self):
+        """81chan answers every unknown path with its 17 kB front page, so
+        `/server-status`, `/server-info` and `/status` all read as exposed —
+        and the `yonga 1.0.2.1` version tag in that page's footer was filed as a
+        leaked host IP at confidence 0.9, which is HOSTED_ON, the strongest
+        claim the IP model makes. A soft 404 is indistinguishable from a real
+        exposure by the response alone, so the probe also asks for a path that
+        cannot exist and reports nothing if that answers too."""
+        import asyncio
+        module = DarkwebModule()
+
+        def run(responder):
+            module._fetch_full = responder
+            return asyncio.run(module._probe_misconfigs('http://x.onion'))
+
+        async def catch_all(url):
+            return 200, {}, '<html>front page ... yonga 1.0.2.1 ...</html>'
+
+        assert run(catch_all) == []
+
+        async def real_exposure(url):
+            if url.endswith('/server-status'):
+                return 200, {}, 'Server at 8.8.8.8 Port 80'
+            return 404, {}, 'not found'
+
+        found = run(real_exposure)
+        assert [(f['path'], f['leaked_ips']) for f in found] \
+            == [('/server-status', ['8.8.8.8'])]
 
     def test_validated_excludes_onion_slices(self):
         onion = 'a' * 56 + '.onion'
