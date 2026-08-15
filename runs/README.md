@@ -177,6 +177,26 @@ unrelated imageboards, `blog.itinerariummentis.org` on two blogs that link each
 other, `datura.network` on two of nowhere.moe's own services. All correctly
 inert.
 
+Re-run on 2026-08-15 against the four-positive store, the search for a **fifth**
+returns the same answer, and the enumeration is short enough to state in full.
+Excluding DOMAIN and ONION_ADDRESS — the two classes that are references by
+construction — the entire corpus contains six artifacts observed on more than
+one target:
+
+| Artifact | Targets | Verdict |
+|----------|---------|---------|
+| `support@dnmx.cc` | 2 | positive already counted |
+| `support@cryptostorm.is` | 2 | positive already counted |
+| `contact@tor.taxi` | 2 | positive already counted |
+| `A5E0A839…1588778A` | 2 | the same tor.taxi pair, second class |
+| `18smo6eg…` (BTC) | 2 | positive already counted (Endchan) |
+| `{"server":"onionmail"}` | **27** | shared software, not a shared operator |
+
+Four artifact groups, four pairs, and they are the four already asserted. There
+is no fifth pair to recover, and nothing was withheld by scoring: the shortfall
+is in the corpus, not the engine. Reproduce with `--db`, then group
+`relationships` by artifact entity and count distinct markets.
+
 Collection then cost twelve candidate operators to buy one pair. Both Mail2Tor
 mirrors were still dark, re-probed on 2026-08-15. DDoSecrets, Recon,
 danwin1210.de and one Monero onion did not answer. Qubes, Mullvad, Njalla,

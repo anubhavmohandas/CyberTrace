@@ -878,6 +878,26 @@ basis = "published in the footer of Cryptostorm's own onion beside its warrant c
 # two privacy wikis on the web. Their donation wallets are different addresses,
 # and they share no mailbox and no key. So a miss here is correct behaviour.
 #
+# The obvious rescue is rarity: `encrypted-support.com` is referenced by these
+# two targets and by nothing else in the corpus, so score a co-referenced host
+# by how few sites cite it and the pair comes back. That was measured on
+# 2026-08-15 rather than argued, over every domain in the store:
+#
+#   domains cited by exactly 2 targets   72 same-operator, 4 unrelated  (0.95)
+#   domains cited by exactly 3 targets    9 same-operator, 6 unrelated  (0.60)
+#
+# So the rule buys 0.95 precision where the engine holds 1.00, and the four it
+# invents are the co-reference controls this corpus was built out of:
+# `pogachan.icu` (pogachan ~ 81chan), `8kun.top` (endchan ~ itinerarium-mentis),
+# `blog.itinerariummentis.org` (deep-swarm ~ itinerarium-mentis) and — the one
+# that settles it — `archive.ph`, which would attribute zzzchan and Kicksecure
+# to one operator. Whonix and Kicksecure uniquely share `archive.today`. The
+# same evidence shape, at the same rarity, on the same kind of host: one
+# instance is the true pair and the other is two strangers who both link a web
+# archive. Rarity cannot tell those apart, because what is missing is not
+# frequency information but the fact that one of the 24 uniquely-shared hosts
+# belongs to the operator — which is exactly what the pages never say.
+#
 # What would make this operator-specific is on a page the engine does not read:
 # the Impressum is not in the crawler's priority set, and a phone number is not
 # an entity type. Both are recorded here as limitations rather than chased —
