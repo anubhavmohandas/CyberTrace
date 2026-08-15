@@ -695,6 +695,13 @@ class DarkwebModule(BaseModule):
         # chose, which is a deanonymising fetch, not a redirect. Any vhost of
         # the same 56-char address is fine — that is still one hidden service,
         # and it is exactly where these redirects lead.
+        #
+        # A Location naming a DIFFERENT hidden service is refused too, for the
+        # attribution reason rather than the network one: the fetch would be
+        # safe, and every artifact on the page it returned would then be filed
+        # against THIS target. A redirect is not evidence of common ownership,
+        # so the address stays whatever the captured stub makes it — an ordinary
+        # LINKS_TO if the body links there, and nothing at all if it does not.
         for _ in range(4):
             if status not in (301, 302, 303, 307, 308):
                 break

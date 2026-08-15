@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 
 from cybertrace.correlate import (
     FUNNELS,
-    COMMON_ARTIFACT_FLOOR, canonical_entity_key, candidate_infra, candidate_operators,
+    COMMON_ARTIFACT_FLOOR, LEAD_FLOOR,
+    canonical_entity_key, candidate_infra, candidate_operators,
     confidence_level, contradictions_from_identity, crypto_clusters, detect_successors,
     entity_discrimination, entity_funnel_profile, markets_for_entity,
     render_dossier_html, render_html, render_markdown, run_correlation,
@@ -756,6 +757,146 @@ def test_torch_discovered_onions_never_become_an_operator_link(tmp_path):
             entity = store.find_entity(etype, value)
             assert entity is not None, f"{etype} {value} was dropped, not demoted"
             assert markets_for_entity(store, entity) == []
+
+
+def test_an_unrecognised_collector_is_discovery_not_a_capture(tmp_path):
+    """The gate is asked "did you fetch the site?", never "do I know this name?".
+
+    Every scenario above names a collector the guard already knows, so all of
+    them pass whichever way the question is asked. This one names collectors it
+    does not know — which is the only case where the two readings differ, and
+    the case the next provider integration arrives as.
+
+    Asked as recognition, the default is capture: an unlisted collector's whole
+    payload is filed as a first-party observation, at full confidence, of a site
+    nobody reached. The four here are not invented for the test — the domain
+    module already emits crtsh/whois/dns_records/hackertarget down this path,
+    and they are inert today only because their payloads carry no ARTIFACT_MAP
+    key. `onionsearch` is the one this actually guards: it is next on the
+    integration list, and adding it is a one-line collector that would inherit
+    a capture's authority without anyone editing this file.
+    """
+    for collector in ('onionsearch', 'fofa', 'crtsh', 'whois'):
+        with EvidenceStore(str(tmp_path / f"{collector}.db")) as store:
+            store_result = _index_only(ONION_A, JAN, emails=['op@morke.ru'],
+                                       bitcoin_addresses=[BTC_VALID],
+                                       onion_addresses_found=[ONION_B])
+            # Same payload, delivered by a collector the guard has no entry for.
+            store_result.sources[collector] = store_result.sources.pop('torch')
+            ingest(store_result, store)
+
+            assert store._one("SELECT status FROM snapshots WHERE collector=?",
+                              (collector,))["status"] == "DISCOVERY", collector
+            # The target was never reached, so nothing may be observed on it, and
+            # every artifact is demoted to the edge that says somebody else
+            # recorded this: MENTIONS scores 0.15 as context and USES_EMAIL /
+            # USES_BTC would assert the operator's own contact and wallet.
+            for etype, value in (("EMAIL", 'op@morke.ru'), ("BTC_ADDRESS", BTC_VALID)):
+                entity = store.find_entity(etype, value)
+                assert markets_for_entity(store, entity) == [], collector
+                assert [r["rtype"] for r in store._all(
+                    "SELECT rtype FROM relationships WHERE target_entity_id=?",
+                    (entity,))] == ["MENTIONS"], collector
+                # Context, not identity: visible to an analyst, and nowhere near
+                # carrying a candidate on its own.
+                assert 0 < entity_funnel_profile(store, entity)["total_conf"] < LEAD_FLOOR
+            # …and a co-ranked onion is provenance, never a link the site made.
+            assert [r["rtype"] for r in store._all(
+                "SELECT rtype FROM relationships WHERE target_entity_id=?",
+                (store.find_entity("ONION_ADDRESS", ONION_B),))] == ["DISCOVERED_VIA"], collector
+            assert run_correlation(store)["operators"] == [], collector
+
+
+def _discovered_beside(result, seen, *addresses, indexes=('torch', 'dargle', 'ahmia')):
+    """The same neighbours returned by several indexes, as a real sweep returns
+    them — every index in phase 2 answers the same query."""
+    for name in indexes:
+        result.sources[name] = SourceResult(
+            source=name, success=True, timestamp=seen,
+            data={'result_count': len(addresses),
+                  'onion_addresses_found': list(addresses),
+                  'results': [{'onion_url': f'http://{a}'} for a in addresses]})
+    return result
+
+
+def test_a_reachable_target_discovers_without_attributing(tmp_path):
+    """The live half of the index guard, and the case that motivated it.
+
+    Every other scenario here has the target dark, where refusing an index
+    answer is easy — there is nothing else in the run. A site that ANSWERED is
+    the harder case: the result set holds a real capture, so a co-ranking
+    arriving beside it reads as part of the same observation. Measured on
+    donionsix… — online, HTTP 301, one page, no artifacts, `Server: nginx` —
+    beside which Torch returned itself and two strangers.
+
+    Repetition is tested in the same scenario because the two failures compound:
+    three indexes returning one address is still one search result, and a repeat
+    observation that raised anything would raise it here.
+    """
+    onion_c = onion("c")
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        for _ in range(3):              # re-running the sweep must not accumulate
+            ingest(_discovered_beside(
+                _result(ONION_A, seen=JAN, http_status=301, pages_fetched=1,
+                        server_fingerprint={'Server': 'nginx'}),
+                JAN, ONION_A, ONION_B, onion_c), store)
+
+        # The target answered, so its own capture is an observation OF it; what
+        # the indexes said about it is filed apart from that.
+        assert {r["collector"]: r["status"] for r in store._all(
+            "SELECT collector, status FROM snapshots")} == {
+                'target_onion': 'OK', 'torch': 'DISCOVERY',
+                'dargle': 'DISCOVERY', 'ahmia': 'DISCOVERY'}
+        # Discovery mints no target, so nothing downstream — recheck, crawl,
+        # correlation — ever reaches the neighbours.
+        assert [r["url"] for r in store._all("SELECT url FROM targets")] == [ONION_A]
+        assert {r["rtype"] for r in store._all("SELECT rtype FROM relationships")} \
+            == {'HAS_ADDRESS', 'DISCOVERED_VIA'}
+        # Nine sightings of two addresses are two search results, not nine, and
+        # neither one is attributed to the market it was ranked beside.
+        assert store._one("SELECT COUNT(*) AS n FROM relationships "
+                          "WHERE rtype='DISCOVERED_VIA'")["n"] == 2
+        for addr in (ONION_B, onion_c):
+            entity = store.find_entity("ONION_ADDRESS", addr)
+            assert markets_for_entity(store, entity) == []
+            assert entity_funnel_profile(store, entity)["total_conf"] == 0.0
+        assert run_correlation(store)["operators"] == []
+
+
+def test_discovery_chains_do_not_compound_into_operator_chains(tmp_path):
+    """A -> B -> C, a different index at each hop, every site actually visited.
+
+    Discovery is transitive as a lead and must not be transitive as evidence.
+    Were a co-ranking worth anything, the neighbourhood of every index would
+    fuse into one operator graph as deep as the chain runs — and the sites here
+    share exactly what unrelated onions do share: a stock nginx and a couple of
+    the same clearnet references.
+    """
+    onion_c = onion("c")
+    # A stock banner and two co-referenced hosts — hosts normalize actually
+    # keeps, so the chain really does share artifacts rather than sharing
+    # nothing and passing by default.
+    ecosystem = dict(server_fingerprint={'Server': 'nginx'},
+                     clearnet_hosts_referenced=['cryptostorm.is', 'mediawiki.org'])
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_discovered_beside(_result(ONION_A, seen=JAN, **ecosystem), JAN,
+                                  ONION_B, indexes=('torch',)), store)
+        ingest(_discovered_beside(_result(ONION_B, seen=AUG, **ecosystem), AUG,
+                                  onion_c, indexes=('dargle',)), store)
+        ingest(_result(onion_c, seen=AUG, **ecosystem), store)
+
+        # Each hop is reached only as provenance, so no link in the chain is
+        # ever observed on the site that was ranked beside it.
+        for addr in (ONION_B, onion_c):
+            assert markets_for_entity(store, store.find_entity("ONION_ADDRESS", addr)) == []
+        assert {r["rtype"] for r in store._all("SELECT rtype FROM relationships")} \
+            == {'HAS_ADDRESS', 'DISCOVERED_VIA', 'MENTIONS'}
+
+        results = run_correlation(store)
+        assert results["operators"] == [] and results["infra"] == []
+        assert [s for s in results["successors"] if not s.get("suppressed")] == []
+        assert not store._all(
+            "SELECT 1 FROM relationships WHERE rtype IN ('SUCCESSOR_OF','LINKED_TO')")
 
 
 def test_an_index_payload_seeds_no_enrichment_pivot():

@@ -287,6 +287,21 @@ _INDEX_SOURCES = {"ahmia", "torch", "dargle", "intelx", "onion_directories",
 
 # Collectors that actually visit the site, so their failure says something about
 # the site rather than about an index.
+#
+# This set — not _INDEX_SOURCES — is what ingest() reads to decide whether a
+# snapshot is an observation OF the target, and the direction matters. Deciding
+# by "is it a known index?" makes the unsafe branch the default: a collector on
+# neither list is filed as a first-party capture, so its whole payload is
+# attributed to the target at full confidence. That is not hypothetical. The
+# domain module's crtsh/whois/dns_records/hackertarget already reach ingest on
+# this path and are on neither list; they leak nothing today only because their
+# payloads happen to carry no ARTIFACT_MAP key, which is a property of those
+# collectors and not of this boundary. Measured on a dark target with an
+# unlisted collector: a search-result email scored 0.70 across one market and a
+# co-ranked onion was minted LINKS_TO — a link claim the site was never asked
+# about. Naming the three collectors that genuinely fetch the site instead means
+# a new provider (OnionSearch, FOFA, Shodan, Censys) is DISCOVERY until someone
+# deliberately says otherwise, which is the safe direction to forget in.
 _SITE_COLLECTORS = {"target_onion", "operator_pivot", "watch"}
 
 # Snapshot status vocabulary. The column already separated a capture from an
@@ -775,7 +790,12 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
         # marked so no read can mistake "Torch has this on file" for "we looked
         # at the site and saw this" — the two are indistinguishable once they
         # are rows in the same table under the same status.
-        discovery = name in _INDEX_SOURCES
+        #
+        # Asked as "did this collector actually fetch the site?", never as "is
+        # this a search engine I recognise": an unrecognised collector is the
+        # one whose provenance we know least about, so it is the last thing that
+        # should inherit a first-party capture's authority. See _SITE_COLLECTORS.
+        discovery = name not in _SITE_COLLECTORS
         sid = store.insert_snapshot(target_id, payload, collector=name,
                                     observed_at=observed_at,
                                     status="DISCOVERY" if discovery else "OK")

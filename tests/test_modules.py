@@ -16,6 +16,10 @@ from cybertrace.modules import (
 from cybertrace.modules.base import ModuleResult, SourceResult
 from cybertrace.normalize import norm_btc, norm_email, norm_xmr
 
+# norm_onion verifies the checksum a v3 address carries, so a fixture has to be
+# an address that could exist — `'b' * 56` is exactly what that gate refuses.
+from .test_evidence import onion as checksummed_onion
+
 
 class TestModuleRegistry:
     """Test module registry functionality."""
@@ -454,7 +458,7 @@ class TestDarkwebOperatorIntel:
             assert DarkwebModule._public_ipv4_in(text, require_host_use=True)[0] \
                 == ['8.8.8.8'], text
 
-    def test_redirects_follow_the_onion_and_stop_at_clearnet(self):
+    def test_redirects_follow_this_onion_and_stop_anywhere_else(self):
         """Two failures with one gate between them.
 
         Unfollowed, the big clearnet-backed onions answer `/` with a 307 to
@@ -466,6 +470,11 @@ class TestDarkwebOperatorIntel:
         not make: it leaves Tor for a host the target chose, which is a
         deanonymising fetch. Any vhost of the same 56-char address is still one
         hidden service and is fine.
+
+        A Location naming a DIFFERENT hidden service is refused for a third
+        reason, and the one this gate is easiest to lose: the fetch would be
+        safe — still Tor — but it would read another operator's page into this
+        market's capture and hand every artifact on it to this target.
         """
         import asyncio
         onion = 'r' * 56 + '.onion'
@@ -509,6 +518,19 @@ class TestDarkwebOperatorIntel:
         })
         assert all('.onion' in url for url in seen), seen
         assert result.success and result.data['title'] == 'Gone'
+
+        # Another hidden service is not this one. The redirect is not followed,
+        # and the address the stub links to stays an ordinary published link —
+        # LINKS_TO, which no funnel scores — never a common-ownership claim.
+        other = checksummed_onion('b')
+        result, seen = run({
+            f'http://{onion}/': (301, {'Location': f'http://{other}/'},
+                                 f'<title>Moved</title><a href="http://{other}/">go</a>'),
+        })
+        assert seen == [f'http://{onion}/']
+        assert result.success and result.data['http_status'] == 301
+        assert result.data['url'] == f'http://{onion}/'
+        assert result.data['onion_addresses_found'] == [other]
 
     def test_a_catch_all_site_exposes_nothing(self):
         """81chan answers every unknown path with its 17 kB front page, so
