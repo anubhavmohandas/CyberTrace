@@ -172,8 +172,19 @@ RELATIONSHIP_TYPES = {
 #                   "this market links there".
 #   PART_OF_CLUSTER address -> address co-spent in one transaction (undirected in
 #                   meaning; correlate takes connected components).
+#   HAS_FINGERPRINT market -> a build or branding fingerprint it served: an HTTP
+#                   header signature or a favicon hash. In no funnel, on purpose
+#                   — see FUNNELS.
+#   ASSOCIATED_WITH_IP
+#                   fingerprint -> host an EXTERNAL INDEX reports serving it.
+#                   Read it as "Shodan saw this hash on that address", never as
+#                   "the operator runs that address": the index observed a host,
+#                   not an owner, and the hop from market to host runs through
+#                   the fingerprint precisely so a reader can see which of the
+#                   two it is. In no funnel either.
 
-IP_CLASSES = {"INFRA_IP", "PERSONAL_IP", "VPN_IP", "EXCHANGE_IP", "UNKNOWN"}
+IP_CLASSES = {"INFRA_IP", "PERSONAL_IP", "VPN_IP", "TOR_RELAY", "EXCHANGE_IP",
+              "UNKNOWN"}
 
 # Netblock owners that are anonymity egress rather than origin hosting. The
 # distinction changes the next investigative step, not the score: for a tunnel
@@ -198,8 +209,19 @@ def classify_ip(org: str, isp: Optional[str] = None,
     Everything unmatched stays UNKNOWN on purpose: an org name alone cannot
     separate a rented VPS from a residential line, and guessing that difference
     is how an investigation attributes a market to the wrong address.
+
+    TOR_RELAY outranks the rest and is the one class that argues AGAINST the
+    candidate it is attached to. It comes from ExoneraTor — Tor Metrics' own
+    archive, checked for the date the address was observed — and it means the
+    machine carries traffic for the whole network, so a service or an icon seen
+    there is much less likely to say anything about this operator. Kept distinct
+    from VPN_IP because the follow-up differs: a VPN provider has subscriber
+    records that may or may not exist, while a volunteer relay has no
+    subscriber at all.
     """
     flags = flags or {}
+    if flags.get("tor_relay"):
+        return "TOR_RELAY"
     if flags.get("is_tor") or flags.get("is_proxy"):
         return "VPN_IP"
     if flags.get("is_hosting"):
@@ -907,9 +929,42 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
                 store.add_evidence(
                     rel, [obs], note="third-party certification inside the published key")
 
+        # The icon the site served, as an entity of its own. Collected on 34 of
+        # the 79 live captures in the corpus and, until now, used for nothing but
+        # a Shodan query string — so the one artifact class that survives a site
+        # being rewritten was invisible to every read below.
+        #
+        # It is deliberately NOT operator evidence. Measured over the corpus, the
+        # five hashes served by more than one target are: Endchan x2, Riseup x4,
+        # Cock.li x2 and tor.taxi x2 (one operator each) and the SecureDrop
+        # template x5 (five newsrooms, five operators). As a pair-forming signal
+        # that is 9 same-operator pairs against 10 same-platform ones — a coin
+        # flip — and commonness cannot rescue it: at 5 targets in 94 the
+        # SecureDrop icon measures RARE (0.65, over the 0.5 floor), the same way
+        # its `gettor@` mailbox does. So the hash is a pivot key and a lead, and
+        # correlate.NON_ATTRIBUTIVE_SIGNALS is what stops it asserting anything.
+        favicon = payload.get("favicon") or {}
+        favicon_id = None
+        if favicon.get("favicon_mmh3") is not None:
+            favicon_id = _link(store, sid, market_id, "FAVICON", "HAS_FINGERPRINT",
+                               f"mmh3:{favicon['favicon_mmh3']}", name,
+                               section="favicon", confidence=0.7,
+                               context=str(favicon.get("favicon_url") or ""),
+                               observed_at=observed_at)
+
         for match in ((payload.get("favicon") or {}).get("shodan_matches") or []):
             ip_id = _link(store, sid, market_id, "IP", "CANDIDATE_IP", str(match.get("ip") or ""),
                           name, section="favicon", confidence=0.5, observed_at=observed_at)
+            # …and the same host again, hung off the hash it was found by. The
+            # market->IP edge says "this is a candidate host for this market";
+            # this one says "an index reports that hash on this host", which is
+            # the only thing actually observed. Keeping both is what makes the
+            # chain ONION -> HASH -> IP walkable instead of collapsing a
+            # third-party index hit into a claim about the operator.
+            if ip_id and favicon_id:
+                store.upsert_relationship(favicon_id, ip_id, "ASSOCIATED_WITH_IP",
+                                          source_label=f"{name}:shodan",
+                                          observed_at=observed_at)
             if ip_id and match.get("org"):
                 # The owner is evidence about the host, so it belongs on the IP
                 # entity too — correlate reads org/ip_class off metadata when it
@@ -926,6 +981,38 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
                 _link(store, sid, market_id, "IP", "HOSTED_ON", str(ip), name,
                       section=f"misconfig{mc.get('path', '')}", confidence=0.9,
                       observed_at=observed_at)
+            # An exposed .git/config names the code host and the account the
+            # deployment pulls from. The observation is as solid as evidence
+            # gets — the server handed us its own configuration — and the
+            # INFERENCE from it is not: a checkout can point at an upstream
+            # project the operator merely cloned, and then the account belongs
+            # to that project's author. Nothing in the file separates "my repo"
+            # from "somebody's repo I deployed".
+            #
+            # So it is recorded at high confidence on a MENTIONS edge, which is
+            # this model's existing way of saying "really observed, not
+            # demonstrated control": 0.15 context weight, visible in the dossier
+            # and in a lead, unable to carry an operator candidate by itself.
+            # occam: two exposures in the corpus, both the operator's own repo.
+            # Promote the edge to USES_USERNAME if a corpus ever shows that
+            # deployment remotes are reliably the operator's own — two samples
+            # cannot carry the weight of an identity claim.
+            for remote in mc.get("git_remotes") or []:
+                where = f"git_remote{mc.get('path', '')}"
+                context = f"deployment remote {remote.get('url', '')}"
+                if remote.get("account"):
+                    _link(store, sid, market_id, "USERNAME", "MENTIONS",
+                          str(remote["account"]), name, section=where,
+                          confidence=0.8, context=context, observed_at=observed_at)
+                _link(store, sid, market_id, "DOMAIN", "MENTIONS",
+                      str(remote.get("host") or ""), name, section=where,
+                      confidence=0.8, context=context, observed_at=observed_at)
+
+        # A second crawler's record of when an address was alive. Attached to the
+        # address entity, never to the market: AIL observed an onion, and what
+        # it can attest to is that the service existed on those dates.
+        for record in (payload.get("results") or []) if name == "onion_lookup" else []:
+            _record_external_observation(store, sid, record, name, observed_at)
 
         # The onion visit pivots its artifacts through the ip/email modules and
         # carries each summary back here. Those are already-paid-for enrichment
@@ -941,6 +1028,39 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
                 snapshot_ids.append(sub)
 
     return snapshot_ids
+
+
+def _record_external_observation(store: EvidenceStore, snapshot_id: str, record: dict,
+                                 collector: str, observed_at: str) -> Optional[str]:
+    """One external observer's history for one onion, as walkable evidence.
+
+    Deliberately narrow. It writes an observation and address metadata, and no
+    relationship at all, so the record cannot enter a funnel or a pair signal:
+    `entity_funnel_profile` scores relationships, and there is none to score.
+    That is the whole design. A third party's crawl dates are corroboration
+    about a service's lifetime — they say nothing about who ran it, and a
+    lifetime is exactly the kind of fact that reads like attribution once it
+    sits on an edge.
+
+    The dates are kept apart from the entity's own `first_seen`/`last_seen`
+    columns, which mean "when did WE see this". Merging them would let another
+    crawler's schedule set our capture window, and `market_windows` — which
+    decides succession direction — reads that window.
+    """
+    addr = record.get("onion")
+    entity_id = store.upsert_entity("ONION_ADDRESS", str(addr or ""),
+                                    observed_at=observed_at)
+    if not entity_id:
+        return None
+    first, last = record.get("first_seen") or "", record.get("last_seen") or ""
+    store.insert_observation(
+        snapshot_id, entity_id, method=f"{collector}:external_observation",
+        section="external_observation",
+        context=f"{collector} observed this address {first or '?'} to {last or '?'}",
+        confidence=0.3, observed_at=observed_at)
+    store.set_metadata(entity_id, external_observer=collector,
+                       external_first_seen=first, external_last_seen=last)
+    return entity_id
 
 
 def _ingest_pages(store: EvidenceStore, target_id: str, payload: dict, collector: str,

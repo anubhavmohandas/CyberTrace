@@ -14,7 +14,7 @@ Sources (API key required):
 - Shodan          — open ports, banners, CVEs, hostnames
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from .base import BaseModule, ModuleResult, SourceResult
@@ -47,6 +47,7 @@ class IPModule(BaseModule):
             ('ip_api', self._check_ip_api(ip)),
             ('greynoise', self._check_greynoise(ip)),
             ('threatfox', self._check_threatfox(ip)),
+            ('exonerator', self._check_exonerator(ip)),
         ]
 
         # Key-gated sources
@@ -130,6 +131,70 @@ class IPModule(BaseModule):
         }
 
         return SourceResult(source='ip_api', success=True, data=parsed)
+
+    # Tor Metrics' own archive of which addresses ran a relay on which date.
+    # HTML rather than an API because ExoneraTor has no JSON endpoint; the three
+    # verdict strings below are the page's Summary block and are what it is
+    # designed to be read for.
+    EXONERATOR_URL = "https://metrics.torproject.org/exonerator.html"
+    # How far back to ask. Relay descriptors reach the archive on a delay, and
+    # ExoneraTor refuses a date it cannot answer for rather than guessing —
+    # measured on 2026-08-15, yesterday returns "Date parameter too recent" and
+    # two days back answers. It matches within a day of the date given, so this
+    # covers the window from three days ago to one, and a machine that became a
+    # relay in the last 48 hours is missed. That is the safe direction to be
+    # wrong in: the check exists to weaken a hosting hypothesis, so failing to
+    # fire leaves the candidate exactly as cautious as it already was.
+    EXONERATOR_LAG = timedelta(days=2)
+
+    async def _check_exonerator(self, ip: str) -> SourceResult:
+        """Was this address running a Tor relay around the observation date?
+
+        This is a NEGATIVE control, and reading it as anything else inverts it.
+        A candidate operator host that turns out to be Tor infrastructure is a
+        machine thousands of unrelated flows pass through, so a service or a
+        favicon seen there is much weaker evidence about the target's operator,
+        not stronger. It weakens a hosting hypothesis; it never supports one,
+        and nothing downstream scores it — it lands as `ip_class` and as a
+        caveat on the candidate.
+
+        Three states, kept apart on purpose. ExoneraTor answers "Result is
+        positive", "Result is negative", or "Server problem" — the last for
+        address ranges its database cannot answer for at all, which is what
+        8.8.8.8 and 1.1.1.1 both return. Folding an unanswerable lookup into
+        "not a relay" would quietly retire the control exactly where it is
+        least informed.
+
+        occam: substring match on the rendered verdict, no HTML parsing and no
+        relay fingerprint. The verdict is the whole question; if a case ever
+        needs the relay's identity, the same page carries it in a table.
+        """
+        day = (datetime.now(timezone.utc) - self.EXONERATOR_LAG).date().isoformat()
+        html = await self.fetch(
+            f"{self.EXONERATOR_URL}?ip={ip}&timestamp={day}&lang=en", retries=1)
+        verdict = ('positive' if html and 'Result is positive' in html else
+                   'negative' if html and 'Result is negative' in html else None)
+        if verdict is None:
+            # Every way of not knowing carries the same warning, because every
+            # one of them is a lookup that did not happen and a reader skimming
+            # a source list should not have to tell them apart to know that.
+            return SourceResult(
+                source='exonerator', success=False,
+                error=('No response from Tor Metrics' if not html else
+                       'ExoneraTor has no data for this date yet' if 'too recent' in html
+                       else 'ExoneraTor could not answer for this address (no relay '
+                            'data for its range)') + ' — this is NOT a negative result')
+        return SourceResult(
+            source='exonerator', success=True,
+            data={'tor_relay': verdict == 'positive',
+                  'checked_date': day,
+                  'source': 'Tor Metrics ExoneraTor',
+                  'note': ('address ran a Tor relay on or within a day of '
+                           f'{day} — shared Tor infrastructure, not evidence of '
+                           'who operates the hidden service')
+                  if verdict == 'positive' else
+                  f'no Tor relay on this address on or within a day of {day}'},
+        )
 
     async def _check_greynoise(self, ip: str) -> SourceResult:
         """
@@ -384,6 +449,16 @@ class IPModule(BaseModule):
         tf = result.sources.get('threatfox')
         if tf and tf.success:
             summary['ioc_hits'] = tf.data.get('ioc_count', 0)
+
+        # --- ExoneraTor (historical Tor relay) ---
+        # Only a POSITIVE verdict is carried forward. A negative and an
+        # unanswerable lookup are both "no reason to reclassify", and the key
+        # stays absent for both so nothing downstream can read the difference
+        # between "checked, not a relay" and "checked" as evidence either way.
+        exo = result.sources.get('exonerator')
+        if exo and exo.success:
+            summary['tor_relay'] = exo.data.get('tor_relay')
+            summary['tor_relay_checked'] = exo.data.get('checked_date')
 
         # --- Derived risk level ---
         risk_score = 0

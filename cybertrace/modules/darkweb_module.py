@@ -268,13 +268,22 @@ class DarkwebModule(BaseModule):
                         if onion_match:
                             discovered_onions.add(onion_match.group(1))
 
-        if discovered_onions:
+        # The target itself is the address whose history matters most, and it was
+        # the one address never looked up: `discovered_onions` holds what the
+        # indexes and the page returned, which is everything except the site we
+        # came for. Its external first/last seen is what turns "we met this
+        # address on Thursday" into a lifetime. Ordered target-first, and sorted
+        # after it, because the lookup is capped — a set's iteration order would
+        # decide which addresses make the cut and would differ between runs of
+        # the same sweep.
+        lookup = ([onion_host] if onion_host.endswith('.onion') else []) + \
+            sorted(discovered_onions - {onion_host})
+
+        if lookup:
             # Through run_sources for its progress row: probing every discovered
             # onion over Tor can outlast phases 0-5 combined.
             await self.run_sources(
-                [('onion_lookup', self._search_onion_lookup(list(discovered_onions)))],
-                result,
-            )
+                [('onion_lookup', self._search_onion_lookup(lookup))], result)
 
         # Phase 7: Auto-pivot operator artifacts (emails, crypto) found on the
         # live onion into their own modules for a one-command operator profile.
@@ -896,6 +905,8 @@ class DarkwebModule(BaseModule):
                     # output, so a bare address in one IS the leak. That is only
                     # sound once the catch-all case above is excluded.
                     'leaked_ips': self._public_ipv4_in(body)[0],
+                    **({'git_remotes': self._git_remotes(body)}
+                       if path == '/.git/config' else {}),
                 }
             return None
 
@@ -907,6 +918,58 @@ class DarkwebModule(BaseModule):
                          base, control)
             return []
         return [r for r in results[1:] if r]
+
+    # `url = <remote>` inside a git config. Only the value is taken; the section
+    # header is not required, because a config with a url line has a remote by
+    # construction and requiring `[remote "…"]` above it would miss the
+    # `[remote]`-less forms git itself accepts.
+    _RE_GIT_REMOTE = re.compile(r'^\s*url\s*=\s*(\S+)\s*$', re.M)
+    # scp-style, which is not a URL and does not parse as one: `git@host:acct/repo`
+    _RE_SCP_REMOTE = re.compile(r'^(?:([^@/]+)@)?([^:/]+):(.+)$')
+
+    @classmethod
+    def _git_remotes(cls, body: str) -> List[Dict[str, str]]:
+        """Remotes named by an exposed `.git/config`, each split into host and
+        the account the repository sits under.
+
+        This is the strongest artifact class an exposed config carries and it
+        was being thrown away: `_probe_misconfigs` fetched the file and mined it
+        for IP addresses only. Measured on the corpus, both exposures name an
+        account —
+            ssh://git@git.disroot.org/coldxenine/deepswarm.git
+            http://git.<the site's own onion>/nihilist/nowhere-website.git
+        — which is the deploying operator's handle on a code host, written by
+        the deployment itself rather than published on a page.
+
+        The account is returned, never interpreted. A checkout's remote can just
+        as easily be an UPSTREAM project the operator cloned, in which case the
+        handle belongs to that project's author and has nothing to do with this
+        site; nothing in the file distinguishes the two. evidence.ingest is where
+        that caution is priced, and it prices it as a reference.
+        """
+        out: List[Dict[str, str]] = []
+        for raw in cls._RE_GIT_REMOTE.findall(body or ''):
+            parts = urlsplit(raw)
+            if parts.scheme and parts.netloc:
+                host, path = parts.hostname or '', parts.path
+            else:
+                m = cls._RE_SCP_REMOTE.match(raw)
+                if not m:
+                    continue
+                host, path = m.group(2), m.group(3)
+            segments = [s for s in path.split('/') if s]
+            # The account is the path segment above the repository. A remote
+            # with a single segment (`host/repo.git`) names no account, and
+            # inventing one out of the repository name would attribute a site to
+            # a project.
+            account = segments[-2] if len(segments) >= 2 else ''
+            record = {'url': raw[:300], 'host': host.lower(),
+                      'repository': segments[-1].removesuffix('.git') if segments else ''}
+            if account:
+                record['account'] = account
+            if host and record not in out:
+                out.append(record)
+        return out
 
     async def _favicon_pivot(self, base: str, html: str) -> Dict[str, Any]:
         """
@@ -945,6 +1008,16 @@ class DarkwebModule(BaseModule):
             'favicon_url': fav_url,
             'favicon_mmh3': fav_hash,
             'shodan_query': f'http.favicon.hash:{fav_hash}',
+            # FOFA indexes the same number under a different name — mmh3 over
+            # the base64 of the icon, byte for byte the Shodan scheme — so the
+            # hash already computed is portable and the query costs a line.
+            #
+            # Censys deliberately has none. Its favicon field is a digest of the
+            # raw bytes rather than of their base64, so this integer would be
+            # the wrong query there; and with no account to check the field name
+            # against, a plausible-looking query string that silently matches
+            # nothing is worse than saying it is not supported.
+            'fofa_query': f'icon_hash="{fav_hash}"',
         }
 
         key = self.config.api_keys.get('shodan')
@@ -1230,7 +1303,14 @@ class DarkwebModule(BaseModule):
 
         return SourceResult(
             source='dargle',
-            success=True,
+            # Answered-with-nothing is not the same as answered, and reporting
+            # it as success made a broken index look like a working one: dargle
+            # returned a green tick and zero addresses on all 97 corpus runs and
+            # on both live probes, so discovery coverage counted a provider that
+            # has never contributed an address. Matches _search_torch, which has
+            # always reported this way.
+            success=len(results) > 0,
+            error=None if results else 'Dargle returned no parseable results',
             data={
                 'result_count': len(results),
                 'results': results[:20],
@@ -1353,50 +1433,70 @@ class DarkwebModule(BaseModule):
             },
         )
 
+    # AIL's public onion-lookup: a second observer's record of when an address
+    # was seen alive, independent of our own crawl.
+    #
+    # It replaced onion.al, which answered 0 of 81 calls across the whole corpus
+    # — a source that costs a request per address and has never once returned a
+    # row is worse than no source, because the summary still lists it as one.
+    ONION_LOOKUP_API = "https://onion.ail-project.org/api/lookup"
+
     async def _search_onion_lookup(self, onion_addresses: List[str]) -> SourceResult:
         """
-        Validate and enrich onion addresses via onion.al API.
+        Historical observation of an onion by an external observer (AIL/CIRCL).
 
-        Free API, no key required. Returns online status, title, description,
-        and last-seen timestamp for each onion address.
+        Free, no key. Returns `first_seen`, `last_seen`, page titles, detected
+        languages and AIL's own content tags — or `{}` for an address it has
+        never crawled.
 
-        API: https://onion.al/api/{onion_address}
+        What this is NOT is a capture of the site. AIL saw the address on its own
+        schedule, so `onion_lookup` sits outside `_SITE_COLLECTORS` and every
+        snapshot it writes is DISCOVERY: the dates are evidence about what
+        another crawler has on file, and evidence about who runs the service is
+        not something a third party's index can supply. The value is temporal
+        corroboration — an address our sweep first met yesterday and AIL has
+        been seeing since 2023 has a life the capture window cannot show, and a
+        dead target that AIL also knows is a real service that stopped rather
+        than an address that never existed.
         """
         if not onion_addresses:
             return SourceResult(
                 source='onion_lookup',
                 success=False,
-                error='No onion addresses to validate',
+                error='No onion addresses to look up',
             )
 
-        base_url = "https://onion.al/api"
         results = []
+        for addr in onion_addresses[:10]:      # cap: one request each, over clearnet
+            clean = norm_onion(addr)
+            if not clean:
+                continue                       # not an address; nothing to look up
+            data = await self.fetch_json(f"{self.ONION_LOOKUP_API}/{clean}")
+            # A JSON body is not a JSON object. The endpoint answers some
+            # addresses with a bare list, and reading `.get` off one raised
+            # through the whole source — so a single odd response cost the
+            # lookup for every other address in the sweep.
+            if not isinstance(data, dict) or not data.get('id'):
+                continue                       # unknown to AIL — recorded as absence below
+            results.append({
+                'onion': clean,
+                'first_seen': data.get('first_seen') or '',
+                'last_seen': data.get('last_seen') or '',
+                'titles': (data.get('titles') or [])[:10],
+                'languages': data.get('languages') or [],
+                'tags': data.get('tags') or [],
+            })
 
-        for onion in onion_addresses[:10]:  # Cap to avoid hammering the API
-            clean = onion.replace('http://', '').replace('https://', '').split('/')[0]
-            try:
-                data = await self.fetch_json(f"{base_url}/{clean}")
-                if data:
-                    results.append({
-                        'onion': clean,
-                        'online': data.get('online', False),
-                        'title': data.get('title', ''),
-                        'description': (data.get('description', '') or '')[:200],
-                        'last_seen': data.get('last_online', ''),
-                        'first_seen': data.get('first_online', ''),
-                    })
-            except Exception:
-                results.append({'onion': clean, 'online': None, 'error': 'lookup failed'})
-
-        online_count = sum(1 for r in results if r.get('online') is True)
-
+        known = {r['onion'] for r in results}
         return SourceResult(
             source='onion_lookup',
             success=len(results) > 0,
             data={
-                'checked': len(results),
-                'online': online_count,
-                'offline': len(results) - online_count,
+                'observer': 'ail-project/onion-lookup',
+                'checked': len(onion_addresses[:10]),
+                'known': len(results),
+                'unknown': [a for a in onion_addresses[:10]
+                            if (norm_onion(a) or a) not in known],
                 'results': results,
             },
         )
@@ -1548,7 +1648,32 @@ class DarkwebModule(BaseModule):
         """Pick operator artifacts worth pivoting into other modules, capped per
         kind to bound external calls. ETH addresses go to the bitcoin module too
         (it auto-detects the coin); email local-parts become candidate usernames;
-        candidate operator IPs get RDAP/ASN/geo enrichment via the ip module."""
+        candidate operator IPs get RDAP/ASN/geo enrichment via the ip module.
+
+        This is the typed pivot table, and the type is what decides the
+        provider — there is deliberately no "send every artifact to every OSINT
+        source" path, because the cost of one is unbounded and the evidence from
+        it is unattributable. The full routing, including the pivots that do not
+        run from here:
+
+            email       -> email module (keyserver, breach, GitHub)
+            username    -> username module (sherlock/maigret)
+            btc / eth   -> bitcoin module (balance, co-spend cluster)
+            ip          -> ip module (RDAP, ASN, geo, Shodan, ExoneraTor)
+            onion       -> onion_lookup, in search() — an address is not
+                           "enriched", it is either visited or looked up
+            favicon     -> _favicon_pivot, which hashes the icon and queries
+                           Shodan when a key exists; the hash and the equivalent
+                           FOFA query are emitted either way
+            pgp key     -> reached through the email pivot's keyserver lookup,
+                           not directly: a fingerprint with no address to bind
+                           it to answers a question nobody asked
+
+        Every one of them returns observations with provenance. None of them
+        returns a conclusion — what a provider says is that it saw a thing, and
+        the edge types in evidence.ingest are what keep that distinct from
+        control of it.
+        """
         # Artifacts belonging to somebody else — quoted third-party content, a
         # list subscriber — are never enriched. Enrichment is the step that
         # turns a string into a named person (keyserver, GitHub, Gravatar), so
@@ -1617,7 +1742,7 @@ class DarkwebModule(BaseModule):
         all_onions = set()
         ransomware_hits = []
         paste_hits = []
-        onion_validation = {}
+        onion_history = {}
 
         for source, res in result.sources.items():
             if not res.success:
@@ -1643,14 +1768,19 @@ class DarkwebModule(BaseModule):
             if source == 'paste_sites' and data.get('results'):
                 paste_hits = data['results']
 
-            # Onion validation summary
+            # Historical observation by an external crawler. Reported as what it
+            # is — another observer's record — rather than as liveness: AIL says
+            # when it last SAW the address, which is not the same claim as the
+            # site answering us now, and the two were conflated while this read
+            # `online`/`offline` off a provider that never answered at all.
             if source == 'onion_lookup':
-                onion_validation = {
+                onion_history = {
+                    'observer': data.get('observer'),
                     'checked': data.get('checked', 0),
-                    'online': data.get('online', 0),
-                    'offline': data.get('offline', 0),
-                    'live_services': [
-                        r for r in data.get('results', []) if r.get('online')
+                    'known_to_observer': data.get('known', 0),
+                    'history': [
+                        {k: r[k] for k in ('onion', 'first_seen', 'last_seen')}
+                        for r in data.get('results', [])
                     ],
                 }
 
@@ -1681,8 +1811,8 @@ class DarkwebModule(BaseModule):
                 'sample_pastes': paste_hits[:5],
             }
 
-        if onion_validation:
-            summary['onion_validation'] = onion_validation
+        if onion_history:
+            summary['onion_history'] = onion_history
 
         # Operator de-anonymisation intel from the live onion visit — the headline
         # result for this tool. Surfaced up top so candidate IPs aren't buried.

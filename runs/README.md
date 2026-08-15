@@ -8,6 +8,9 @@ live dark web sites and stays out of git — see the `runs/` block in
 runs/
   raw/            saved `cybertrace search --save` JSON, one file per target
   raw/v5..v8/     the labeled evaluation corpus (below)
+  raw/v9/         live re-captures used to validate the pivot fabric end to end,
+                  kept OUT of the graded corpus so before/after stays comparable
+                  (scoring them in changes no figure — checked, 99 runs)
   raw/superseded/ captures taken before an extractor fix, kept as the "before"
                   half of the comparison and excluded from the corpus
   corpora/        .db + .html written by `correlate --db --html --dossier`
@@ -55,6 +58,38 @@ target was dark:
 | Operator recall, `namespace` pairs | 0/23 — declined, and correctly so | 0/22 |
 | Operator recall, `none` pairs | 0/15 — unrecoverable by construction | 0/15 |
 | Operator recall, aggregate | 4/42 = 0.10 | 3/40 = 0.07 |
+| Leads surfaced (ranked, never asserted) | 19, of which 9 are true pairs | 4, of which 4 |
+
+Every figure above except the lead count is unchanged by the pivot-fabric work
+below. That is the result: three new evidence classes and two new external
+observers were added, and no verdict moved. What moved is what the analyst
+sees — 15 more pairs are now ranked as leads, including all six Riseup pairs
+that share an icon and all ten SecureDrop pairs, none of them asserted.
+
+### Which layer loses the true pairs
+
+The aggregate recall figure cannot say whether to build a crawler, an extractor
+or a scorer, so `eval_corpus.py` now separates them. Of the 42 SAME_OPERATOR
+pairs:
+
+| Layer | Pairs | What would have to change |
+|-------|-------|---------------------------|
+| recovered | 4 | nothing — the engine asserted these |
+| discovery | **0** | no labeled sibling was ever missed by collection |
+| collection | 10 | the site did not answer; retry, or accept it as dark |
+| **artifact** | **22** | the pair shares **no artifact at all** — extraction/enrichment |
+| correlation | 16 | they share an artifact and the engine declined |
+
+The two numbers that decide where work goes are the first and the last. Discovery
+is **0**: every labeled sibling was collected, so adding search providers cannot
+recover a single pair. And all 16 "correlation" pairs share exactly one artifact
+class — `DOMAIN`, a co-referenced host — which the engine refuses by design and
+which `corpus/labels.toml` labels `namespace` precisely because promoting it is
+the move that manufactures false attribution. So there is no scoring change that
+recovers a pair without breaking the controls.
+
+**The bottleneck is artifact recall**: 22 true pairs where both sites answered
+and published nothing in common that CyberTrace extracts.
 
 The fourth positive was added **with the scoring model untouched** — no weight,
 floor or threshold moved — and was recovered on the first run. Re-scoring the
@@ -70,7 +105,35 @@ any engine could key on.
 Extractor precision over the same corpus (`tools/audit_corpus.py`) is 1.00 for
 every artifact type except DOMAIN 0.90 and EMAIL 0.62, where the shortfall *is*
 the normalizer refusing page furniture, documentation names and placeholder
-mailboxes before they can become entities.
+mailboxes before they can become entities. FAVICON joins the table at 24
+entities and 1.00 — an mmh3 hash of bytes we fetched has nothing to reject.
+
+### The evidence classes added, and what each may conclude
+
+| Class | Where it comes from | How far it travels | Why not further |
+|-------|--------------------|--------------------|-----------------|
+| `FAVICON` | icon already hashed for the Shodan pivot, on 34 of 79 live captures | ranks a lead; **never** an edge | 5 shared hashes in the corpus: Endchan ×2, Riseup ×4, Cock.li ×2, tor.taxi ×2 — and the SecureDrop template ×5. As a pair signal that is **9 same-operator against 10 same-platform**, and rarity cannot separate them (the SecureDrop icon measures 0.65, over the 0.5 floor) |
+| git remote (`USERNAME` + `DOMAIN`) | `/.git/config`, already fetched, previously mined for IPs only | `MENTIONS`, so it ranks a lead | a checkout can point at an upstream project the operator merely cloned, and nothing in the file separates that from their own repo. Two exposures in the corpus, both the operator's own — two samples cannot carry an identity claim |
+| external observation | AIL onion-lookup `first_seen`/`last_seen` | address metadata + an observation, **no edge at all** | another crawler's dates are corroboration about a service's lifetime, not evidence about who ran it. Kept out of `market_windows` so a third party's crawl schedule cannot set succession direction |
+| `TOR_RELAY` | Tor Metrics ExoneraTor, per candidate IP | `ip_class` + the first line of the candidate's next steps | it argues **against** an operator-hosting reading; a relay carries the whole network's traffic |
+
+### External sources, measured rather than assumed
+
+| Source | Before | Now |
+|--------|--------|-----|
+| onion-lookup (was `onion.al`) | 0 answers in 81 calls | AIL knows **77 of 78** live targets and **12 of 15** dark ones |
+| torch | 81/97, 141 unique onions | unchanged — the only index that returns anything |
+| ahmia | 0/97 | still 0: `/search/?q=` 302s to the homepage |
+| dargle | "success" on 97/97, **0 addresses ever** | reports failure when it parses nothing, so coverage stops counting it |
+| paste_sites, ransomwhat | 0/97 | unchanged |
+| Shodan / FOFA / Censys | favicon → Shodan, key-gated | unchanged live (no key in this environment); the FOFA query is emitted beside the Shodan one because it is the same hash, and Censys is deliberately absent because its favicon digest is a different scheme |
+
+The dark targets are the interesting half. AIL last saw riseup-share, dread and
+elude within days of our sweep, so "dark" here is Tor reachability at our
+moment, not a dead service. The two Mail2Tor mirrors are the exception: dark to
+us and **unknown to AIL as well**, across a crawler that has been recording
+onions since 2023 — which is the strongest available support for the corpus note
+that those three `unverified` pairs cannot be graded.
 
 The four claims the engine asserted are the four operator-specific pairs:
 

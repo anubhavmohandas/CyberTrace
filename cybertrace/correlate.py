@@ -89,13 +89,36 @@ SUCCESSOR_SIGNALS = {
 DERIVED_TARGET = "m5.correlate.local"
 
 SUCCESSOR_SIGNALS["shared_cluster"] = 1.0   # two wallets proven one by co-spend
+SUCCESSOR_SIGNALS["shared_favicon"] = 0.4   # same icon served — see NON_ATTRIBUTIVE_SIGNALS
 
 SHARED_ARTIFACTS = (
     ("shared_pgp_key", "PGP_KEY"), ("shared_btc", "BTC_ADDRESS"),
     ("shared_xmr", "XMR_ADDRESS"), ("shared_email", "EMAIL"),
     ("shared_ip", "IP"), ("shared_username", "USERNAME"),
     ("shared_analytics", "ANALYTICS_ID"), ("shared_domain", "DOMAIN"),
+    ("shared_favicon", "FAVICON"),
 )
+
+# Signals that can rank a pair as a lead and can never assert a relationship,
+# however many of them agree or how rare they measure. Not a weight — a
+# category: what these have in common is that the thing being shared is not
+# something either party had to control.
+#
+#   shared_domain   both pages cite one clearnet host. Whonix and Kicksecure —
+#                   one operator, correct answer — are joined by twenty of
+#                   these and nothing else, and any two wikis on one subject
+#                   reproduce that.
+#   shared_favicon  both sites serve one icon. Measured across this corpus:
+#                   9 same-operator pairs against 10 same-platform ones (the
+#                   five SecureDrop newsrooms shipping the template's logo).
+#                   A signal at 0.47 precision must not be able to conclude
+#                   anything on its own, and rarity cannot separate the two
+#                   cases — the SecureDrop icon measures rare here.
+#
+# The gate is categorical rather than numeric for the reason the corpus notes
+# record: a threshold that refuses these today is one corpus away from
+# admitting them, while "a reference is not control" holds at any score.
+NON_ATTRIBUTIVE_SIGNALS = frozenset({"shared_domain", "shared_favicon"})
 
 # Below this, an artifact is judged too common in the corpus to evidence shared
 # control — see entity_discrimination. Calibrated to sit just under an artifact
@@ -694,6 +717,13 @@ def _pair_signals(store: EvidenceStore, artifacts: dict, windows: dict,
                 "signal": name, "weight": SUCCESSOR_SIGNALS[name] * rarity * context,
                 "direction": None, "discrimination": round(rarity, 3),
                 "context": round(context, 3),
+                # Whether this signal may support an EDGE, as opposed to a rank.
+                # `context` already prices how much the pair's sharing implies
+                # control; below full control weight the pair merely referenced
+                # the thing, and a pile of references is the one shape that
+                # reaches the assertion threshold on arithmetic no single signal
+                # supports. See detect_successors.
+                "attributive": context >= DEFAULT_CONTEXT,
                 "evidence": [o for e in entities
                              for o in (_observations_of(store, a_id, e)
                                        + _observations_of(store, b_id, e))],
@@ -827,7 +857,20 @@ def detect_successors(store: EvidenceStore, min_score: float = 0.5,
         # mediawiki.org, forums.openvpn.net, catb.org) and nothing else. Any two
         # wikis on one subject reproduce that, so the pair is ranked as a lead
         # and left for an analyst rather than asserted as a relationship.
-        attributive = any(s["signal"] != "shared_domain" for s in signals
+        #
+        # Two ways a signal fails to be attributive, and both are categorical.
+        # By CLASS: a shared citation or a shared icon is not control, whatever
+        # it scores. By CONTEXT: the same artifact type says different things
+        # depending on the edge that joins the market to it, so an address the
+        # page merely quotes and an account named by a deployment remote are
+        # references too — `_pair_signals` marks those as it prices them. Keying
+        # only on the class was a hole exactly the width of the next evidence
+        # class: shared_username is attributive when a site publishes the handle
+        # and was still attributive when the handle came off a cloned upstream
+        # project's `.git/config`.
+        attributive = any(s.get("attributive", True)
+                          and s["signal"] not in NON_ATTRIBUTIVE_SIGNALS
+                          for s in signals
                           if s["signal"] not in ("temporal_handoff", "temporal_overlap"))
         if score < min_score or not attributive:
             # Too weak to assert, too specific to throw away. A pair joined only
@@ -1160,6 +1203,16 @@ def recommended_actions(role: str, etype: str, value: str, markets: List[str],
         if ip_class == "VPN_IP":
             actions.append("Flagged VPN egress: provider logs may not exist — confirm "
                            "retention before building on this")
+        if ip_class == "TOR_RELAY":
+            # The one recommendation that tells the reader to stop rather than
+            # to proceed. ExoneraTor places a Tor relay on this address at the
+            # time it was observed, so whatever was seen there was seen on a
+            # machine carrying the whole network's traffic.
+            actions.insert(0, "Tor Metrics places a relay on this address at the "
+                              "observed date: it is shared Tor infrastructure, so "
+                              "treat this as evidence AGAINST an operator-hosting "
+                              "reading unless something else ties the host to the "
+                              "target")
         return actions
     return []
 
@@ -1338,6 +1391,7 @@ NODE_STYLE = {
     "HOSTING_PROVIDER": ("#27ae60", "box", 18),
     "ASN":              ("#27ae60", "box", 18),
     "ANALYTICS_ID":     ("#8e44ad", "triangleDown", 18),
+    "FAVICON":          ("#7f8c8d", "triangleDown", 16),
     "CERTIFICATE":      ("#34495e", "box", 18),
     "NAMESERVER":       ("#34495e", "box", 18),
 }

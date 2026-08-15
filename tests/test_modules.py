@@ -561,6 +561,106 @@ class TestDarkwebOperatorIntel:
         assert [(f['path'], f['leaked_ips']) for f in found] \
             == [('/server-status', ['8.8.8.8'])]
 
+    def test_an_exposed_git_config_yields_its_remote(self):
+        """Both bodies are the real files, fetched over Tor from the two corpus
+        targets that expose `/.git/config`. The probe already retrieved them and
+        read nothing out but IP addresses, so the account a deployment pulls
+        from — the strongest thing an exposed config carries — was discarded.
+
+        The scp form is here because it is not a URL and `urlsplit` cannot parse
+        it: `git@github.com:acct/repo` has the account after a colon, and read
+        as a URL the whole thing collapses into a scheme-less path.
+        """
+        import asyncio
+        module = DarkwebModule()
+
+        async def exposed(url):
+            if url.endswith('/.git/config'):
+                return 200, {}, (
+                    '[core]\n\trepositoryformatversion = 0\n'
+                    '[remote "origin"]\n'
+                    '\turl = ssh://git@git.disroot.org/coldxenine/deepswarm.git\n'
+                    '\tfetch = +refs/heads/*:refs/remotes/origin/*\n')
+            return 404, {}, 'not found'
+
+        module._fetch_full = exposed
+        found = asyncio.run(module._probe_misconfigs('http://x.onion'))
+        assert [f['git_remotes'] for f in found] == [[{
+            'url': 'ssh://git@git.disroot.org/coldxenine/deepswarm.git',
+            'host': 'git.disroot.org', 'repository': 'deepswarm',
+            'account': 'coldxenine'}]]
+
+        # The second real exposure: the remote is a vhost of the site's OWN
+        # onion, so the host carries nothing new and only the account does.
+        nowhere = ('[remote "origin"]\n\turl = http://git.'
+                   + checksummed_onion('n') + '/nihilist/nowhere-website.git\n')
+        assert DarkwebModule._git_remotes(nowhere)[0]['account'] == 'nihilist'
+
+        # scp-style, and a remote naming no account at all — inventing one out
+        # of the repository name would attribute a site to a project.
+        assert DarkwebModule._git_remotes(
+            '\turl = git@github.com:someone/theme.git\n')[0]['account'] == 'someone'
+        assert 'account' not in DarkwebModule._git_remotes(
+            '\turl = https://code.example.net/repo.git\n')[0]
+        assert DarkwebModule._git_remotes('nothing here') == []
+
+    def test_onion_lookup_survives_a_response_that_is_not_an_object(self):
+        """One odd answer must not cost the whole sweep.
+
+        Measured on a live run against nowhere.moe: the endpoint answered one
+        address with a bare JSON list, `data.get('id')` raised, and the
+        exception took down the lookup for every OTHER address in the same
+        call — the source came back failed with nothing in it.
+        """
+        import asyncio
+        module = DarkwebModule()
+        bodies = {'a': [], 'b': {'id': 'known.onion', 'first_seen': '2024-01-01',
+                                 'last_seen': '2026-08-01'}}
+        good, bad = checksummed_onion('b'), checksummed_onion('a')
+
+        async def fetch_json(url, **kw):
+            return bodies['b' if good[:8] in url else 'a']
+
+        module.fetch_json = fetch_json
+        r = asyncio.run(module._search_onion_lookup([bad, good]))
+        assert r.success and r.data['known'] == 1
+        assert r.data['results'][0]['first_seen'] == '2024-01-01'
+        assert r.data['unknown'] == [bad]
+
+    def test_exonerator_never_reports_unknown_as_not_a_relay(self):
+        """ExoneraTor answers three ways and the third one is not a negative.
+
+        Both strings here are the real page. "Server problem — the database
+        appears to be empty" is what an address outside its relay data returns
+        (8.8.8.8 and 1.1.1.1 both do), and "Date parameter too recent" is what
+        yesterday returns, because descriptors reach the archive on a delay.
+        Read either as "not a relay" and the control quietly stops firing
+        exactly where it knows least.
+        """
+        import asyncio
+        from cybertrace.modules.ip_module import IPModule
+        module = IPModule()
+
+        def run(body):
+            async def fetch(url, **kw):
+                return body
+            module.fetch = fetch
+            return asyncio.run(module._check_exonerator('171.25.193.25'))
+
+        found = run('<p>Summary</p><h3>Result is positive</h3> We found one or more')
+        assert found.success and found.data['tor_relay'] is True
+        assert found.data['checked_date']
+
+        clear = run('<h3>Result is negative</h3> We did not find IP address')
+        assert clear.success and clear.data['tor_relay'] is False
+
+        for unknown in ('<h3>Server problem</h3> The database appears to be empty.',
+                        '<h3>Date parameter too recent</h3> may not yet contain',
+                        None):
+            answer = run(unknown)
+            assert not answer.success and 'NOT a negative' in answer.error, unknown
+            assert answer.data == {}
+
     def test_validated_excludes_onion_slices(self):
         onion = 'a' * 56 + '.onion'
         values, _ = DarkwebModule._validated(

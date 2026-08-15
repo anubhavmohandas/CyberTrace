@@ -39,7 +39,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from cybertrace.correlate import run_correlation
+from cybertrace.correlate import market_artifact_map, run_correlation
 from cybertrace.evidence import EvidenceStore, ingest
 
 SAME_OPERATOR, SAME_ECOSYSTEM, UNRELATED = "SAME_OPERATOR", "SAME_ECOSYSTEM", "UNRELATED"
@@ -135,6 +135,58 @@ def predictions(results: dict, urls: dict) -> dict:
     return out
 
 
+def shared_artifacts(store) -> dict:
+    """frozenset({url_a, url_b}) -> [etype …] observed on both targets.
+
+    Read off OK snapshots only, exactly as correlation reads them, so "the pair
+    had something in common to work with" means the same thing here as it does
+    inside the engine. MARKET and ONION_ADDRESS are excluded: a target's own
+    address and storefront node are definitional, and two markets never share
+    them without one linking the other, which is not an artifact they hold.
+    """
+    urls = {r["target_id"]: r["url"] for r in
+            store._all("SELECT target_id, url FROM targets")}
+    holders: dict = {}
+    for target_id, by_type in market_artifact_map(store).items():
+        for etype, entity_ids in by_type.items():
+            if etype in ("MARKET", "ONION_ADDRESS"):
+                continue
+            for entity_id in entity_ids:
+                holders.setdefault(entity_id, (etype, set()))[1].add(
+                    urls.get(target_id, target_id))
+    out: dict = {}
+    for etype, targets in holders.values():
+        ordered = sorted(targets)
+        for i, a in enumerate(ordered):
+            for b in ordered[i + 1:]:
+                out.setdefault(frozenset((a, b)), []).append(etype)
+    return out
+
+
+# Why a true SAME_OPERATOR pair was not recovered. Four separate layers, because
+# they call for four different pieces of engineering and the aggregate recall
+# number hides which one is actually binding.
+#
+#   discovery    a labeled sibling was never collected — no crawl reached it
+#   collection   collected, but the site never answered, so nothing was extracted
+#   artifact     both answered and share no artifact at all — extraction or
+#                enrichment did not produce the thing the pair has in common
+#   correlation  they DO share an artifact and the engine still declined
+#
+# Only the last is a scoring problem. Tuning weights against a pair that failed
+# at `artifact` moves a threshold to compensate for evidence that was never
+# collected, which is how a model gets fitted to its own corpus.
+BOTTLENECKS = ("discovery", "collection", "artifact", "correlation")
+
+
+def bottleneck(in_store: bool, dark: bool, shared: list) -> str:
+    if not in_store:
+        return "discovery"
+    if dark:
+        return "collection"
+    return "artifact" if not shared else "correlation"
+
+
 def evaluate(paths: list[Path], labels_path: Path, show_pairs: bool,
              db_path: str) -> int:
     labels = load_labels(labels_path)
@@ -156,29 +208,46 @@ def evaluate(paths: list[Path], labels_path: Path, show_pairs: bool,
             "SELECT DISTINCT t.url FROM targets t JOIN snapshots s "
             "ON s.target_id = t.target_id WHERE s.status='OK' "
             "AND s.collector LIKE 'target_onion%'")}
+        shared = shared_artifacts(store)
 
     predicted = predictions(results, urls)
 
     matrix: dict = {}
-    rows, unevaluable = [], []
-    for a, b in combinations(sorted(in_store), 2):
-        la, lb = labels.get(a.split("/")[0]), labels.get(b.split("/")[0])
-        if not (la and lb):
-            continue
+    rows, unevaluable, missed = [], [], []
+    # Every labeled pair, not only the pairs both of whose sides reached the
+    # store: a sibling that was never collected is a DISCOVERY failure, and
+    # iterating the store instead of the labels makes exactly that failure
+    # invisible — the pair simply never appears in any tally.
+    for a, b in combinations(sorted(labels), 2):
+        la, lb = labels[a], labels[b]
         actual = truth(la, lb)
         if actual is None:
             continue
+        collected = [url for url in (a, b) if url in in_store]
+        dark = [t["name"] for t, url in ((la, a), (lb, b))
+                if url in in_store and url not in live]
+        verdict, why = predicted.get(frozenset((a, b)), (UNRELATED, ""))
+        scored = UNRELATED if verdict == LEAD else verdict
+        gradable = len(collected) == 2 and not dark
+
+        in_common = shared.get(frozenset((a, b)), [])
+        if actual == SAME_OPERATOR:
+            missed.append((
+                "recovered" if gradable and scored == SAME_OPERATOR else
+                bottleneck(len(collected) == 2, bool(dark), in_common),
+                la["name"], lb["name"], evidence_class(la, lb),
+                ", ".join(sorted(set(in_common))) or "—"))
+
+        if len(collected) < 2:
+            continue                      # never collected: nothing to grade
         # A target that never answered contributes no artifacts, so the engine
         # had nothing to correlate. Counting that as a miss would grade the
         # engine on Tor's weather. Reported separately and loudly instead —
         # silently dropping it would inflate precision the same way.
-        dark = [t["name"] for t, url in ((la, a), (lb, b)) if url not in live]
         if dark:
             unevaluable.append((actual, la["name"], lb["name"], ", ".join(dark),
                                 evidence_class(la, lb)))
             continue
-        verdict, why = predicted.get(frozenset((a, b)), (UNRELATED, ""))
-        scored = UNRELATED if verdict == LEAD else verdict
         matrix[(actual, scored)] = matrix.get((actual, scored), 0) + 1
         rows.append((actual, verdict, la["name"], lb["name"], why,
                      evidence_class(la, lb)))
@@ -236,6 +305,27 @@ def evaluate(paths: list[Path], labels_path: Path, show_pairs: bool,
             continue
         found = len([r for r in group if r[1] == SAME_OPERATOR])
         print(f"{klass:20}{found:>7}{len(group):>11}{dark_n:>7}  {meaning[klass]}")
+
+    # Which layer lost each true pair. Recall alone cannot say whether to build
+    # a crawler, an extractor or a scorer, and those are the only three answers.
+    print("\n=== where the true pairs are lost ===")
+    print(f"{'layer':14}{'pairs':>7}  what would have to change")
+    fix = {
+        "recovered": "nothing — the engine asserted this pair",
+        "discovery": "collection: the sibling onion was never fetched",
+        "collection": "the site never answered; retry, or accept it as dark",
+        "artifact": "extraction/enrichment: the pair shares NO artifact at all",
+        "correlation": "scoring: they share an artifact and the engine declined",
+    }
+    for layer in ("recovered", *BOTTLENECKS):
+        group = [m for m in missed if m[0] == layer]
+        if group:
+            print(f"{layer:14}{len(group):>7}  {fix[layer]}")
+    stuck = [m for m in missed if m[0] == "correlation"]
+    if stuck:
+        print("\n  pairs that share an artifact and were still not asserted:")
+        for _layer, na, nb, klass, in_common in sorted(stuck)[:12]:
+            print(f"    {na} ~ {nb}  [{klass}]  shares: {in_common}")
 
     if unevaluable:
         print("\n=== unevaluable — target never answered, not the engine's miss ===")

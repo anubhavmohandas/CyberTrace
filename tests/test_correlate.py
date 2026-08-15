@@ -12,7 +12,7 @@ from cybertrace.correlate import (
     canonical_entity_key, candidate_infra, candidate_operators,
     confidence_level, contradictions_from_identity, crypto_clusters, detect_successors,
     entity_discrimination, entity_funnel_profile, markets_for_entity,
-    render_dossier_html, render_html, render_markdown, run_correlation,
+    market_windows, render_dossier_html, render_html, render_markdown, run_correlation,
     username_aliases,
 )
 from cybertrace.evidence import EvidenceStore, enrich_email, ingest
@@ -509,6 +509,124 @@ def test_a_pile_of_shared_citations_is_a_lead_and_not_an_edge(tmp_path):
         assert len(asserted) == 1 and asserted[0]["relation"] == "LINKED_TO"
 
 
+def test_five_newsrooms_serving_one_logo_are_not_one_operator(tmp_path):
+    """The SecureDrop case, and the reason a favicon hash cannot assert.
+
+    Not a constructed adversary: five independently-operated newsroom instances
+    in the corpus — Bloomberg, CBC, Forbes, the Guardian, the New York Times —
+    serve the SecureDrop template's icon, so `mmh3:-1412307033` is one hash on
+    five targets run by five organisations. Across the whole corpus the hash is
+    9 same-operator pairs against 10 same-platform ones: a coin flip.
+
+    Rarity cannot save it, and that is the load-bearing part. On the real corpus
+    the icon sits on 5 targets of 94 and measures 0.65 — comfortably over
+    COMMON_ARTIFACT_FLOOR — so the commonness model reads the platform's logo as
+    a DISTINCTIVE artifact, exactly as it reads the platform's `gettor@`
+    mailbox. This runs with no discrimination at all, i.e. the icon scored as if
+    it were unique to the pair, because that is the case the gate has to hold
+    in: what refuses it is the category in NON_ATTRIBUTIVE_SIGNALS, and the
+    score floor is removed here so a numeric refusal cannot pass for a
+    categorical one.
+    """
+    newsrooms = [onion(c) for c in "vwxyz"]
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        for site in newsrooms:
+            ingest(_result(site, seen=JAN,
+                           favicon={'favicon_mmh3': -1412307033,
+                                    'favicon_url': f'http://{site}/favicon.ico'}), store)
+
+        icon = store.find_entity("FAVICON", "mmh3:-1412307033")
+        assert len(markets_for_entity(store, icon)) == 5
+
+        # Ranked so an analyst sees them; asserted for none of them, at any score.
+        pairs = detect_successors(store, min_score=0.0)
+        assert len(pairs) == 10                      # every pair of the five
+        assert {p["suppressed"] for p in pairs} == {"REFERENCES_ONLY"}
+        assert {p["relation"] for p in pairs} == {None}
+        assert run_correlation(store)["operators"] == []
+        assert not store._all(
+            "SELECT 1 FROM relationships WHERE rtype IN ('SUCCESSOR_OF','LINKED_TO')")
+
+        # …and one artifact the sites actually control flips exactly one pair,
+        # so the icon is corroboration rather than dead weight.
+        for site in newsrooms[:2]:
+            ingest(_result(site, seen=AUG, emails=['op@ownbrand.cc'],
+                           favicon={'favicon_mmh3': -1412307033}), store)
+        asserted = [p for p in detect_successors(store) if not p["suppressed"]]
+        assert len(asserted) == 1 and asserted[0]["relation"] == "LINKED_TO"
+        assert "shared_favicon" in asserted[0]["signals"]
+
+
+def test_a_deployment_remote_is_a_lead_not_an_identity(tmp_path):
+    """Two sites that deployed the same upstream project are not one operator.
+
+    An exposed `.git/config` is the most authoritative artifact in the whole
+    collector — the server handed over its own configuration — and the account
+    in it is the least certain thing about it, because a checkout can point at
+    a project the operator merely cloned. Read at control weight, two sites
+    running one theme become one operator on the theme author's handle, which
+    is the same failure as the SecureDrop mailbox with a stronger provenance
+    story attached to it.
+
+    So the handle is an entity, it is in the graph, it ranks a pair as a lead —
+    and it cannot promote either site to a candidate on its own.
+    """
+    exposure = [{'path': '/.git/config', 'status': 200, 'bytes': 293,
+                 'leaked_ips': [],
+                 'git_remotes': [{'url': 'ssh://git@code.forge.test/upstream/theme.git',
+                                  'host': 'code.forge.test', 'repository': 'theme',
+                                  'account': 'upstream'}]}]
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        for site in (ONION_A, ONION_B):
+            ingest(_result(site, seen=JAN, misconfigurations=exposure), store)
+
+        handle = store.find_entity("USERNAME", 'upstream')
+        assert handle, "the account must be recorded — it is real, and it is evidence"
+        assert [r["rtype"] for r in store._all(
+            "SELECT rtype FROM relationships WHERE target_entity_id=?", (handle,))] \
+            == ["MENTIONS", "MENTIONS"]
+        assert run_correlation(store)["operators"] == []
+        assert not store._all(
+            "SELECT 1 FROM relationships WHERE rtype IN ('SUCCESSOR_OF','LINKED_TO')")
+
+        # It is not inert either: the pair ranks, so an analyst sees the two
+        # sites pulling from one repository.
+        pairs = detect_successors(store, min_score=0.0)
+        assert pairs and pairs[0]["suppressed"] and "shared_username" in pairs[0]["signals"]
+
+
+def test_a_favicon_hit_keeps_the_hop_it_was_found_through(tmp_path):
+    """ONION -> HASH -> IP, with the middle term still in the graph.
+
+    A Shodan answer says one thing: some host serves this icon. Hanging the
+    address straight off the market collapses that into "this market's host",
+    and the reader cannot see which of the two they were told. The chain is
+    kept whole so the dossier can answer why an address is in the case, and
+    neither hop is in a funnel — an index observing a host is not the operator
+    owning it, at any confidence.
+    """
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, seen=JAN, candidate_operator_ips=['203.0.113.7'],
+                       favicon={'favicon_mmh3': 12345, 'shodan_total': 1,
+                                'shodan_matches': [{'ip': '203.0.113.7',
+                                                    'org': 'Example Hosting'}]}), store)
+        market = store.find_entity("MARKET", ONION_A)
+        icon = store.find_entity("FAVICON", "mmh3:12345")
+        host = store.find_entity("IP", '203.0.113.7')
+        assert icon and host
+
+        hops = {(r["source_entity_id"], r["rtype"], r["target_entity_id"])
+                for r in store._all("SELECT source_entity_id, rtype, target_entity_id "
+                                    "FROM relationships")}
+        assert (market, "HAS_FINGERPRINT", icon) in hops
+        assert (icon, "ASSOCIATED_WITH_IP", host) in hops
+
+        # The hash and the host it was seen on are observations. Neither is an
+        # operator claim, and one market cannot make them one.
+        assert entity_funnel_profile(store, icon)["total_conf"] == 0.0
+        assert run_correlation(store)["operators"] == []
+
+
 def test_a_shared_certifier_is_not_a_shared_operator(tmp_path):
     """The worst false-attribution path the engine had.
 
@@ -899,6 +1017,60 @@ def test_discovery_chains_do_not_compound_into_operator_chains(tmp_path):
             "SELECT 1 FROM relationships WHERE rtype IN ('SUCCESSOR_OF','LINKED_TO')")
 
 
+def test_an_external_observers_history_is_not_our_capture_window(tmp_path):
+    """AIL has been seeing these addresses since 2023; our sweep met them this
+    week. Both facts belong in the case, and only one of them may set the clock.
+
+    `market_windows` decides which market is the predecessor, and
+    `temporal_handoff` measures a gap against it. Feeding another crawler's
+    dates into that window would let AIL's crawl schedule choose the direction
+    of a succession claim — and its dates are not observations of ours at all.
+    So the history lands on the ADDRESS as metadata plus a walkable observation,
+    with no relationship anywhere, and the capture window stays what we saw.
+
+    Measured on the corpus: AIL knows 77 of 78 live targets and 12 of 15 dark
+    ones, several with a `last_seen` days before our sweep — so a target we
+    record as dark is usually a service that stopped answering US, which is
+    exactly the corroboration a successor hypothesis needs and exactly the claim
+    that must not become evidence about who runs it.
+    """
+    lookup = ModuleResult(target=ONION_A, target_type='darkweb', module='darkweb')
+    lookup.sources['target_onion'] = SourceResult(
+        source='target_onion', success=True, timestamp=AUG,
+        data={'online': True, 'emails': ['op@ownbrand.cc']})
+    lookup.sources['onion_lookup'] = SourceResult(
+        source='onion_lookup', success=True, timestamp=AUG,
+        data={'observer': 'ail-project/onion-lookup', 'checked': 2, 'known': 2,
+              'results': [{'onion': ONION_A, 'first_seen': '2023-04-21',
+                           'last_seen': '2026-08-06', 'titles': ['DNMX'], 'tags': []},
+                          {'onion': ONION_B, 'first_seen': '2019-01-01',
+                           'last_seen': '2026-08-06', 'titles': [], 'tags': []}]})
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(lookup, store)
+
+        # An external observer is not a collector of ours.
+        assert store._one("SELECT status FROM snapshots WHERE collector='onion_lookup'"
+                          )["status"] == "DISCOVERY"
+
+        address = store.find_entity("ONION_ADDRESS", ONION_A)
+        assert store.metadata(address) == {
+            "external_observer": "onion_lookup",
+            "external_first_seen": "2023-04-21", "external_last_seen": "2026-08-06"}
+
+        # No edge, so nothing can score it and nothing can pair on it.
+        neighbour = store.find_entity("ONION_ADDRESS", ONION_B)
+        assert not store._all("SELECT 1 FROM relationships WHERE source_entity_id=? "
+                              "OR target_entity_id=?", (neighbour, neighbour))
+        assert entity_funnel_profile(store, neighbour)["total_conf"] == 0.0
+        assert markets_for_entity(store, neighbour) == []
+
+        # …and the window the successor logic reads is still our own capture.
+        window = next(iter(market_windows(store).values()))
+        assert window["first"] == AUG and window["last"] == AUG
+        assert run_correlation(store)["operators"] == []
+
+
 def test_an_index_payload_seeds_no_enrichment_pivot():
     """The module-side half of the same guarantee. Phase 7 only ever sees the
     live page's data, and enrichment is what turns a string into a named person
@@ -931,6 +1103,9 @@ def test_an_index_payload_seeds_no_enrichment_pivot():
 #
 #   domain       MENTIONS at CONTEXT_WEIGHT 0.15. Every site references the same
 #                handful of clearnet hosts; two doing so links nobody.
+#   favicon      reaches `pair`, and can never be more than a lead there: it is
+#                in NON_ATTRIBUTIVE_SIGNALS, so a favicon-only pair is refused
+#                REFERENCES_ONLY at any score. See the five-newsrooms test.
 #   fingerprint  Collected because a hand-written banner is a real tell, but in
 #                no funnel: a shared banner is shared software, not a shared
 #                operator. Same reasoning as DISCOVERED_VIA — see FUNNELS.
@@ -948,6 +1123,7 @@ WIRING_MAP = {
     'leaked_ip':   (dict(misconfigurations=[
                         {'path': '/s', 'leaked_ips': ['203.0.113.9']}]), 'pair'),
     'domain':      (dict(clearnet_hosts_referenced=['cryptostorm.is']), 'scored'),
+    'favicon':     (dict(favicon={'favicon_mmh3': 12345}),             'pair'),
     'fingerprint': (dict(server_fingerprint={
                         'X-Powered-By': 'the almighty n0tr1v'}),       'stored'),
     'breach':      (dict(breaches=[{'name': 'X', 'email': 'op@proton.me'}]), 'dropped'),

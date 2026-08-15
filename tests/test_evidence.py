@@ -524,6 +524,47 @@ def test_ingest_classifies_ip_owner(tmp_path):
         assert store.metadata(store.find_entity("IP", "2.2.2.2"))["ip_class"] == "UNKNOWN"
 
 
+def test_a_tor_relay_host_argues_against_the_candidate_that_named_it(tmp_path):
+    """The negative control, end to end.
+
+    A favicon match on an address that Tor Metrics places a relay on is the
+    weakest possible hosting evidence: the machine carries traffic for the whole
+    network, so an icon or a service seen there is shared with everyone. Read
+    the other way round — "the operator's host is on Tor infrastructure!" — it
+    would be the most confident wrong answer the tool could give.
+
+    Three states, and only one of them may reclassify. ExoneraTor answers
+    positive, negative, or cannot answer at all, and the module reports the
+    third as a failed source precisely so it cannot arrive here looking like a
+    clean negative.
+    """
+    from cybertrace.correlate import recommended_actions
+    from cybertrace.evidence import classify_ip
+
+    relay = {'tor_relay': True, 'checked_date': '2026-08-13'}
+    assert classify_ip("Some Hosting Ltd", None, relay) == "TOR_RELAY"
+    # …and it outranks every other reading of the same host, which is the point:
+    # a relay running on a rented VPS is still shared Tor infrastructure.
+    assert classify_ip("Some Hosting Ltd", None, {**relay, 'is_hosting': True}) \
+        == "TOR_RELAY"
+    assert classify_ip("Some Hosting Ltd", None, {'tor_relay': False}) == "UNKNOWN"
+    assert classify_ip("Some Hosting Ltd", None, {}) == "UNKNOWN"
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, favicon={'favicon_mmh3': 999, 'shodan_matches': [
+            {'ip': '171.25.193.25', 'org': 'Foreningen for digitala fri'}]}), store)
+        ip = store.find_entity("IP", "171.25.193.25")
+        ingest(_pivot_result(ONION_A, [
+            {'target': '171.25.193.25', 'type': 'ip',
+             'summary': {'org': 'Foreningen for digitala fri', **relay}},
+        ]), store)
+
+        assert store.metadata(ip)["ip_class"] == "TOR_RELAY"
+        # The reader is told to stop, in the first line, not in a footnote.
+        actions = recommended_actions("IP", "IP", "171.25.193.25", [ONION_A], "TOR_RELAY")
+        assert "AGAINST" in actions[0]
+
+
 def test_ingest_builds_provenance_chain(tmp_path):
     with EvidenceStore(str(tmp_path / "e.db")) as store:
         ingest(_result(ONION_A, title='Shop', emails=['darkoperator@proton.me'],
