@@ -126,32 +126,6 @@ def _format_evidence_graph(graph: Dict[str, Any], width: int) -> list:
     return lines
 
 
-def format_operator_candidates(corr: Dict[str, Any], graph=None) -> str:
-    """Render cross-market correlation output as ranked operator candidates."""
-    width = 70
-    cands = corr.get('operator_candidates', [])
-    lines = ["=" * width, " OPERATOR CANDIDATES (cross-market) ".center(width, "="), "=" * width, ""]
-    if graph is not None:
-        d = graph.to_dict()
-        lines.append(f"  Graph: {len(d['nodes'])} nodes, {len(d['edges'])} edges across markets")
-        lines.append("")
-    if not cands:
-        lines.append("  No cross-market operator links found (no shared artifacts).")
-        lines.append("=" * width)
-        return "\n".join(lines)
-    for i, cand in enumerate(cands, 1):
-        lines.append(f"  [{i}] confidence: {cand['confidence'].upper()}   markets: {len(cand['markets'])}")
-        lines.append(f"      {cand['note']}")
-        for m in cand['markets']:
-            lines.append(f"        - {m}")
-        lines.append("      shared artifacts:")
-        for a in cand['shared_artifacts'][:10]:
-            lines.append(f"        - {a['type']} {a['value']}  ({a['weight']}, {len(a['markets'])} markets)")
-        lines.append("")
-    lines.append("=" * width)
-    return "\n".join(lines)
-
-
 def format_table(result: ModuleResult, color: bool = False) -> str:
     """
     Format result as ASCII table.

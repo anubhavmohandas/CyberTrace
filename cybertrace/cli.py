@@ -9,7 +9,7 @@ import click
 from .config import config
 from .detector import detect_input_type, normalize_input
 from .modules import get_module, list_modules, TYPE_TO_MODULE
-from .output import print_result, save_result, format_operator_candidates
+from .output import print_result, save_result
 from .safety import is_blocked_query
 
 LOGO = r"""
@@ -206,13 +206,12 @@ def correlate(result_files, output_format: str, db_path: Optional[str],
     Correlate saved investigation results across markets.
 
     Investigate several onions with --save, then fold them into one evidence
-    graph. Artifacts (PGP key, crypto address, handle) reused across markets are
-    surfaced as ranked operator candidates.
+    store and run the full correlation engine: ranked dossiers with evidence
+    chains, successor hypotheses, and the clone findings that contradict them.
 
-    With --db the results are ingested into a persistent evidence store and run
-    through the full correlation engine: ranked dossiers with evidence chains,
-    successor hypotheses, and the clone findings that contradict them. The store
-    accumulates, so later runs correlate against everything ingested before.
+    Without --db the store is in-memory and discarded when the command exits.
+    With --db it persists to disk, so later runs correlate against everything
+    ingested before.
 
     \b
       cybertrace search "a.onion" --save a.json
@@ -220,30 +219,10 @@ def correlate(result_files, output_format: str, db_path: Optional[str],
       cybertrace correlate a.json b.json
       cybertrace correlate a.json b.json --db case.db --html case.html
     """
-    import json
-
     if (html_path or dossier_path) and not db_path:
         raise click.UsageError(
             "--html/--dossier need --db: both are rendered from the store")
-    if db_path:
-        _correlate_store(result_files, output_format, db_path, html_path, dossier_path)
-        return
-
-    from .graph import EvidenceGraph, build_graph_from_dict, correlate as run_correlate
-
-    graph = EvidenceGraph()
-    for path in result_files:
-        try:
-            with open(path) as fh:
-                build_graph_from_dict(json.load(fh), graph)
-        except (json.JSONDecodeError, OSError) as e:
-            click.echo(f"[!] Skipping {path}: {e}", err=True)
-
-    corr = run_correlate(graph)
-    if output_format == 'json':
-        click.echo(json.dumps({'graph': graph.to_dict(), **corr}, indent=2, default=str))
-    else:
-        click.echo(format_operator_candidates(corr, graph))
+    _correlate_store(result_files, output_format, db_path or ':memory:', html_path, dossier_path)
 
 
 def _correlate_store(result_files, output_format: str, db_path: str,

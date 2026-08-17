@@ -15,7 +15,7 @@ from cybertrace.correlate import (
     market_windows, render_dossier_html, render_html, render_markdown, run_correlation,
     username_aliases,
 )
-from cybertrace.evidence import EvidenceStore, enrich_email, ingest
+from cybertrace.evidence import EvidenceStore, enrich_bitcoin, enrich_email, ingest
 from cybertrace.modules.base import ModuleResult, SourceResult
 from cybertrace.modules.darkweb_module import DarkwebModule
 from cybertrace.monitor import candidate_deltas
@@ -709,6 +709,28 @@ def test_cospend_addresses_form_one_wallet(tmp_path):
 
         lone = store.upsert_entity("BTC_ADDRESS", "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy")
         assert lone not in clusters      # a component of one is not a wallet claim
+
+
+def test_counterparty_addresses_never_join_the_cluster(tmp_path):
+    """A paid address is not a co-spent one. enrich_bitcoin must read only
+    cospend_addresses — feeding it connected_addresses (cospend | counterparty)
+    would pull every customer of a market into the operator's wallet."""
+    cospend_peer = "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+    counterparty_peer = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        target = store.upsert_target("btc:" + BTC_VALID)
+        sid = store.insert_snapshot(target, {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr, {
+            "address": BTC_VALID,
+            "cospend_addresses": [cospend_peer],
+            "counterparty_addresses": [counterparty_peer],
+            "connected_addresses": [cospend_peer, counterparty_peer],
+        }, "bitcoin")
+
+        clusters = crypto_clusters(store)
+        assert store.find_entity("BTC_ADDRESS", counterparty_peer) is None  # never upserted
+        assert clusters[addr] == clusters[store.find_entity("BTC_ADDRESS", cospend_peer)]
 
 
 # --- broadened contradictions ------------------------------------------------
