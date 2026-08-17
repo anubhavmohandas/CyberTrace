@@ -1133,6 +1133,13 @@ def test_an_index_payload_seeds_no_enrichment_pivot():
 #                operator. Same reasoning as DISCOVERED_VIA — see FUNNELS.
 #   breach /     The modules fetch these and nothing consumes them. Wiring them
 #   social       is a scoring decision, not a plumbing one, and is unmade.
+#   certificate/ Declared in ENTITY_TYPES and already scored by candidate_infra
+#   nameserver   if an entity of this type existed (see the manual-construction
+#                tests below), but no producer writes one: ARTIFACT_MAP has no
+#                row for either, domain_module's crt.sh/dns_records output is
+#                never pivoted into from a darkweb crawl, and 'domain' is not
+#                in _ENRICHERS. See the comment above evidence.ARTIFACT_MAP and
+#                test_evidence.test_certificate_and_nameserver_stay_unwired.
 #
 # Changing a verdict here is allowed; changing one by accident is what this
 # catches.
@@ -1150,6 +1157,9 @@ WIRING_MAP = {
                         'X-Powered-By': 'the almighty n0tr1v'}),       'stored'),
     'breach':      (dict(breaches=[{'name': 'X', 'email': 'op@proton.me'}]), 'dropped'),
     'social':      (dict(social_accounts=[{'site': 'x', 'handle': 'op'}]),   'dropped'),
+    'certificate': (dict(certificates=[{'common_name': 'shop.example',
+                                        'issuer': "Let's Encrypt"}]),   'dropped'),
+    'nameserver':  (dict(nameservers=['ns1.example-registrar.com']),   'dropped'),
 }
 
 
@@ -1195,3 +1205,125 @@ def test_no_funnel_is_keyed_on_a_relationship_nothing_writes():
     # Every rtype ARTIFACT_MAP writes is either scored or a documented exception.
     unscored = {rtype for _, rtype in ARTIFACT_MAP.values()} - funnelled
     assert unscored == {'LINKS_TO'}, unscored
+
+
+# --- CERTIFICATE / NAMESERVER: consumption side, since nothing produces them -
+#
+# WIRING_MAP above pins that neither class gets past ingest() today (also
+# proven directly, from a domain_module-shaped payload, by
+# test_evidence.test_certificate_and_nameserver_stay_unwired). What follows
+# proves the other half: candidate_infra() already scores an entity of either
+# type if one exists (per the comment above evidence.ARTIFACT_MAP), and the
+# scoring is capped at INFRA by construction, not by a threshold that a future
+# corpus could nudge into SAME_OPERATOR.
+#
+#   candidate_operators() queries entities WHERE etype IN
+#   ('PGP_KEY','EMAIL','USERNAME') -- CERTIFICATE/NAMESERVER can never be a row
+#   there, whatever they score.
+#
+#   SHARED_ARTIFACTS -- the list _pair_signals() reads to score a successor
+#   pair -- names nine artifact types and neither of these is one, so a pair
+#   joined only by a shared cert or nameserver produces no signal at all, not
+#   even a weak one: detect_successors drops it before scoring (only
+#   temporal_overlap/temporal_handoff would be left, and those never stand
+#   alone).
+#
+# Entities and edges are built by hand with the public EvidenceStore API
+# (upsert_entity / insert_observation / upsert_relationship), the same way
+# test_infra_requires_two_markets_and_more_than_a_reference stands in for a
+# producer RESOLVES_TO never writes on its own -- there is no ingest() path to
+# drive this from a ModuleResult, and building one is a separate, larger
+# decision the comment above ARTIFACT_MAP argues against making blind.
+
+def _attach(store: EvidenceStore, onion: str, entity_id: str, rtype: str) -> None:
+    """Wire one market to an already-upserted entity: an observation on the
+    market's own snapshot (so markets_for_entity resolves it) plus the edge --
+    what `_link()` does for every artifact type that has a producer."""
+    target_id = store._one("SELECT target_id FROM targets WHERE url=?", (onion,))["target_id"]
+    sid = store.latest_snapshot(target_id)["snapshot_id"]
+    store.insert_observation(sid, entity_id, method="test:enrichment", section="test",
+                             confidence=0.8)
+    store.upsert_relationship(store.find_entity("MARKET", onion), entity_id, rtype,
+                              source_label="test")
+
+
+def test_shared_certificate_reaches_infra_never_operator(tmp_path):
+    """A cert seen on two storefronts (CDN, reseller panel, a misconfigured
+    multi-tenant host) is real infrastructure evidence and candidate_infra must
+    surface it -- but it must never become an OPERATOR candidate or a
+    successor edge, which is what a SAME_OPERATOR verdict actually requires
+    (see tools/eval_corpus.py predictions())."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        for onion in (ONION_A, ONION_B):
+            ingest(_result(onion), store)
+
+        cert = store.upsert_entity("CERTIFICATE", "shop.example")
+        assert cert is not None
+        for onion in (ONION_A, ONION_B):
+            _attach(store, onion, cert, "USES_CERT")
+
+        # The row and the edges are real, in the SQLite store.
+        assert store._one("SELECT 1 FROM entities WHERE entity_id=? AND etype='CERTIFICATE'",
+                          (cert,))
+        rels = store._all("SELECT source_entity_id FROM relationships "
+                          "WHERE target_entity_id=? AND rtype='USES_CERT'", (cert,))
+        assert {r["source_entity_id"] for r in rels} == \
+               {store.find_entity("MARKET", ONION_A), store.find_entity("MARKET", ONION_B)}
+
+        infra = candidate_infra(store, min_markets=2)
+        assert {c["value"] for c in infra} == {"shop.example"}
+        assert infra[0]["role"] == "INFRA"
+
+        assert candidate_operators(store) == []
+
+        results = run_correlation(store)
+        assert results["operators"] == []
+        pairs = {frozenset((s["source_url"], s["target_url"])) for s in results["successors"]}
+        assert frozenset((ONION_A, ONION_B)) not in pairs
+
+
+def test_shared_ca_alone_never_becomes_one_certificate_entity(tmp_path):
+    """The scenario a shared-CA/CDN worry is actually about: two unrelated
+    shops both on Let's Encrypt (or any commodity CA) must not converge.
+    CERTIFICATE identity is the certificate's own subject -- nothing keys an
+    entity on `issuer` -- so 'same CA' can never become the same entity_id,
+    and every downstream floor (min_markets, candidate_infra) only ever sees
+    one market per node."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        for onion in (ONION_A, ONION_B):
+            ingest(_result(onion), store)
+
+        cert_a = store.upsert_entity("CERTIFICATE", "shop-a.example")
+        cert_b = store.upsert_entity("CERTIFICATE", "shop-b.example")
+        assert cert_a != cert_b
+        _attach(store, ONION_A, cert_a, "USES_CERT")
+        _attach(store, ONION_B, cert_b, "USES_CERT")
+
+        assert candidate_infra(store, min_markets=2) == []
+
+
+def test_shared_nameserver_reaches_infra_never_operator(tmp_path):
+    """Same guarantee as the certificate case, for a bulk/shared DNS host:
+    convergence is real infrastructure evidence, capped at INFRA."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        for onion in (ONION_A, ONION_B):
+            ingest(_result(onion), store)
+
+        ns = store.upsert_entity("NAMESERVER", "ns1.bulk-registrar.example")
+        for onion in (ONION_A, ONION_B):
+            _attach(store, onion, ns, "USES_NS")
+
+        assert store._one("SELECT 1 FROM entities WHERE entity_id=? AND etype='NAMESERVER'",
+                          (ns,))
+        assert len(store._all(
+            "SELECT 1 FROM relationships WHERE target_entity_id=? AND rtype='USES_NS'",
+            (ns,))) == 2
+
+        infra = candidate_infra(store, min_markets=2)
+        assert {c["value"] for c in infra} == {"ns1.bulk-registrar.example"}
+        assert candidate_operators(store) == []
+
+        results = run_correlation(store)
+        assert results["operators"] == []
+        pairs = {frozenset((s["source_url"], s["target_url"])) for s in results["successors"]}
+        assert frozenset((ONION_A, ONION_B)) not in pairs

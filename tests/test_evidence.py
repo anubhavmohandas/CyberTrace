@@ -15,6 +15,7 @@ from cybertrace.evidence import (
     structural_similarity,
 )
 from cybertrace.modules.base import ModuleResult, SourceResult
+from cybertrace.modules.domain_module import DomainModule
 from cybertrace.modules.email_module import EmailModule
 from cybertrace.normalize import (
     dom_simhash, norm_asn, norm_btc, norm_domain, norm_email, norm_eth, norm_ip,
@@ -976,6 +977,41 @@ def test_certificate_and_nameserver_stay_unwired(tmp_path):
         ingest(result, store)
         assert store._all("SELECT * FROM entities WHERE etype='NAMESERVER'") == []
         assert store._all("SELECT * FROM entities WHERE etype='CERTIFICATE'") == []
+
+
+def test_the_real_domain_producers_shape_still_stays_unwired(tmp_path):
+    """The test above types its own dns_records/crtsh payload; this one keys it
+    exactly as DomainModule._get_dns_records/_check_crtsh actually do (`NS`,
+    not a `name_servers` key that happens to collide with nothing either way),
+    so the producer half of the trace rests on the real method's shape, not a
+    guess at it. Confirms the drop is total: not one upsert_entity call for
+    either type is even attempted, let alone refused by normalization -- the
+    two read as identical zeros in the entity count, and store.rejected is
+    what tells them apart.
+    """
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        result = ModuleResult(target='shop.example', target_type='domain',
+                              module=DomainModule.name)
+        result.sources['dns_records'] = SourceResult(
+            source='dns_records', success=True,
+            data={'NS': ['ns1.example-registrar.com', 'ns2.example-registrar.com'],
+                  'A': ['203.0.113.9'], 'ip_addresses': ['203.0.113.9']})
+        result.sources['crtsh'] = SourceResult(
+            source='crtsh', success=True,
+            data={'certificate_count': 3, 'subdomains': ['www.shop.example'],
+                  'subdomain_count': 1,
+                  'recent_certs': [{'common_name': 'shop.example',
+                                    'issuer': "Let's Encrypt", 'not_before': '2026-01-01',
+                                    'not_after': '2026-04-01'}]})
+        ingest(result, store)
+
+        assert store._all("SELECT * FROM entities WHERE etype='NAMESERVER'") == []
+        assert store._all("SELECT * FROM entities WHERE etype='CERTIFICATE'") == []
+        # Neither ARTIFACT_MAP key ('NS', 'recent_certs') exists, so upsert_entity
+        # is never called for this data at all -- nothing here was attempted and
+        # refused; it was never reached.
+        assert not any(etype in ("NAMESERVER", "CERTIFICATE")
+                       for etype, _ in store.rejected)
 
 
 if __name__ == "__main__":
