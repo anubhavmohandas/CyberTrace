@@ -958,5 +958,25 @@ def test_a_dark_site_is_evidence_but_a_dead_proxy_is_not(tmp_path):
             assert active == (0 if expected else 1)
 
 
+def test_certificate_and_nameserver_stay_unwired(tmp_path):
+    """CERTIFICATE/NAMESERVER are declared entity types and already scored by
+    candidate_infra() (correlate.py), but ARTIFACT_MAP has no row for them and
+    'domain' is not in _ENRICHERS -- deliberately, see the comment above
+    ARTIFACT_MAP. A domain-shaped result carrying raw DNS/crt.sh-style fields
+    must not silently start minting these entities from a payload key nobody
+    reviewed for shared-CA/shared-registrar noise."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        result = ModuleResult(target='shop.example', target_type='domain', module='domain')
+        result.sources['dns_records'] = SourceResult(
+            source='dns_records', success=True,
+            data={'name_servers': ['ns1.example-registrar.com', 'ns2.example-registrar.com']})
+        result.sources['crtsh'] = SourceResult(
+            source='crtsh', success=True,
+            data={'recent_certs': [{'common_name': 'shop.example', 'issuer': "Let's Encrypt"}]})
+        ingest(result, store)
+        assert store._all("SELECT * FROM entities WHERE etype='NAMESERVER'") == []
+        assert store._all("SELECT * FROM entities WHERE etype='CERTIFICATE'") == []
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

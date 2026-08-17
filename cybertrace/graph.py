@@ -161,11 +161,12 @@ def _evidence(data: Dict[str, Any], value: str, rel: str) -> tuple:
 def _borrowed(data: Dict[str, Any], value: str) -> bool:
     """True when the page reproduced this artifact rather than published it.
 
-    `correlate()` below clusters markets on any node holding two or more of
-    them, so attaching a market to a quoted address or a list subscriber is what
-    turns somebody else's identity into a shared operator. The store path gates
-    on the same set (evidence.ingest demotes the edge to MENTIONS); this is the
-    other consumer of it, reached by `cybertrace correlate` with no --db.
+    Cross-market attribution runs through the governed EvidenceStore engine
+    (evidence.ingest, which demotes the edge to MENTIONS on the same set of
+    sections) — not through this per-search graph. Marking the node borrowed
+    here just keeps a quoted address or list subscriber from reading as this
+    market's own artifact when darkweb_module.py attaches the graph to a
+    single search's summary.
     """
     return ((data.get('artifact_evidence') or {}).get(value) or {}).get(
         'section') in NON_ATTRIBUTIVE_SECTIONS
@@ -242,106 +243,3 @@ def _fold(g: EvidenceGraph, mkt: str, data: Dict[str, Any], ts: str) -> Evidence
             g.add_edge(nid, org, 'HOSTED_BY', 'target_onion', ts)
 
     return g
-
-
-# --- Cross-market correlation (evidence-model Section 5/6) -------------------
-
-# Weight a SINGLE shared instance of each artifact type carries when the same
-# value shows up on two markets. A shared PGP key is near-identity; a shared
-# host or handle alone is barely a lead.
-SHARED_ARTIFACT_WEIGHT = {
-    'PGP_KEY': 'strong',
-    'CRYPTO_ADDRESS': 'moderate',
-    'EMAIL': 'moderate',
-    'IP': 'moderate',
-    'DOMAIN': 'weak',
-    'USERNAME': 'weak',
-    'PROVIDER': 'very_weak',
-}
-
-
-def correlate(graph: EvidenceGraph) -> Dict[str, Any]:
-    """Group markets that share operator artifacts into ranked operator
-    candidates. Two markets join the same candidate when they reuse any artifact
-    node; the candidate's confidence is the strongest shared signal, bumped one
-    tier when two independent artifact TYPES corroborate (a shared key *and* a
-    shared address beats either alone).
-
-    Weak-only clusters are surfaced but flagged — a shared username or host is a
-    lead to check, never an attribution. Contradiction detection (same key,
-    conflicting operator claims) needs signals not yet extracted; deferred.
-    """
-    # occam: union-find + max-tier scoring. No probabilistic model — the plan
-    # itself disowns universal weights; tiers + a corroboration bump are enough
-    # until real ground-truth exists to calibrate against.
-    from collections import defaultdict
-
-    shared = [
-        n for n in graph.nodes.values()
-        if n['type'] in SHARED_ARTIFACT_WEIGHT and len(n.get('markets') or []) >= 2
-    ]
-
-    parent: Dict[str, str] = {}
-
-    def find(x: str) -> str:
-        parent.setdefault(x, x)
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a: str, b: str) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[ra] = rb
-
-    for n in shared:
-        markets = n['markets']
-        for other in markets[1:]:
-            union(markets[0], other)
-
-    clusters: Dict[str, set] = defaultdict(set)
-    for m in list(parent):
-        clusters[find(m)].add(m)
-
-    candidates = []
-    for members in clusters.values():
-        if len(members) < 2:
-            continue
-        arts = [n for n in shared if set(n['markets']) & members]
-        conf = _aggregate_confidence(arts)
-        candidates.append({
-            'markets': sorted(members),
-            'confidence': conf,
-            'note': _confidence_note(conf, arts),
-            'shared_artifacts': [
-                {
-                    'type': a['type'], 'value': a['value'],
-                    'weight': SHARED_ARTIFACT_WEIGHT[a['type']],
-                    'markets': sorted(a['markets']),
-                }
-                for a in sorted(arts, key=lambda a: CONFIDENCE_RANK[SHARED_ARTIFACT_WEIGHT[a['type']]], reverse=True)
-            ],
-        })
-
-    candidates.sort(key=lambda c: CONFIDENCE_RANK[c['confidence']], reverse=True)
-    return {'operator_candidates': candidates}
-
-
-def _aggregate_confidence(arts: List[Dict[str, Any]]) -> str:
-    if not arts:
-        return 'very_weak'
-    weights = [SHARED_ARTIFACT_WEIGHT[a['type']] for a in arts]
-    top = max(weights, key=lambda w: CONFIDENCE_RANK[w])
-    corroborating_types = {
-        a['type'] for a in arts
-        if CONFIDENCE_RANK[SHARED_ARTIFACT_WEIGHT[a['type']]] >= CONFIDENCE_RANK['moderate']
-    }
-    return EvidenceGraph._bump(top) if len(corroborating_types) >= 2 else top
-
-
-def _confidence_note(conf: str, arts: List[Dict[str, Any]]) -> str:
-    if CONFIDENCE_RANK[conf] <= CONFIDENCE_RANK['weak']:
-        return 'weak link — low-value signal (shared handle/host); corroborate before trusting'
-    types = sorted({a['type'] for a in arts})
-    return f"markets linked by shared {', '.join(types)}"

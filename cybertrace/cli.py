@@ -146,19 +146,34 @@ def search(target: str, input_type: str, output_format: str, save_path: Optional
     else:
         module_type = input_type
         specific_type = input_type
-    
+
     # Normalize input
     normalized = normalize_input(target, module_type)
     if normalized != target and not quiet:
         click.echo(f"[*] Normalized: {target} → {normalized}", err=True)
-    
+
     # Get module
     module = get_module(module_type)
     if not module:
         click.echo(f"[!] No module available for type: {module_type}", err=True)
         click.echo(f"[!] Available modules: {', '.join(list_modules().keys())}", err=True)
         sys.exit(1)
-    
+
+    # A module may accept several target shapes (breach, social); an explicit
+    # `--type breach` names the MODULE, not one of its own shapes, so it is
+    # never a member of module.supported_types. Detect what the STRING
+    # actually looks like and use that category instead, or every multi-shape
+    # module's options.get('target_type', <default>) silently takes the wrong
+    # branch (breach defaulted every `--type breach` search to 'email'). A
+    # module whose override already names one of its own shapes (geoint's
+    # `--type address`/`--type coordinates`) is left untouched — geoint has no
+    # detector pattern for free-text addresses, so re-detecting would replace
+    # a valid override with the 'username' fallback.
+    if specific_type not in getattr(module, 'supported_types', ()):
+        _, detected_category = detect_input_type(target)
+        if detected_category in getattr(module, 'supported_types', ()):
+            specific_type = detected_category
+
     module.show_progress = not quiet
     if not quiet:
         click.echo(f"[*] Using module: {module.name}", err=True)
@@ -166,7 +181,8 @@ def search(target: str, input_type: str, output_format: str, save_path: Optional
 
     # Run search
     try:
-        result = asyncio.run(_run_search(module, normalized, deep=deep, tor=tor, timeout=timeout))
+        result = asyncio.run(_run_search(
+            module, normalized, deep=deep, tor=tor, timeout=timeout, target_type=specific_type))
     except KeyboardInterrupt:
         click.echo("\n[!] Search interrupted", err=True)
         sys.exit(1)

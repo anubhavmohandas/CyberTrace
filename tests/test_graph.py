@@ -1,7 +1,7 @@
 """Evidence-graph tests: build shape, confidence-by-provenance, cross-market reuse."""
 
 from cybertrace.graph import (
-    EvidenceGraph, build_graph, build_graph_from_dict, correlate, CONFIDENCE_RANK,
+    EvidenceGraph, build_graph, build_graph_from_dict, CONFIDENCE_RANK,
 )
 from cybertrace.modules.base import ModuleResult, SourceResult
 
@@ -69,27 +69,6 @@ def test_corroboration_bumps_confidence_one_tier():
     assert CONFIDENCE_RANK[edge['confidence']] == CONFIDENCE_RANK['moderate']  # weak -> moderate
 
 
-def test_correlate_ranks_and_scores_operator_candidates():
-    key = {'key_id': 'deadbeefdeadbeef'}
-    shared_btc = '1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2'
-    # A + B share a PGP key AND a BTC address -> two corroborating types -> bumped
-    g = build_graph(_result('a.onion', pgp_keys=[key], bitcoin_addresses=[shared_btc]))
-    g = build_graph(_result('b.onion', pgp_keys=[key], bitcoin_addresses=[shared_btc]), graph=g)
-    # C + D share only a username (via email local-part) -> weak, flagged
-    g = build_graph(_result('c.onion', emails=['darkoperator@proton.me']), graph=g)
-    g = build_graph(_result('d.onion', emails=['darkoperator@tuta.io']), graph=g)
-
-    cands = correlate(g)['operator_candidates']
-    assert len(cands) == 2
-    # strongest cluster ranked first: shared strong PGP + moderate BTC -> very_strong
-    assert set(cands[0]['markets']) == {'a.onion', 'b.onion'}
-    assert cands[0]['confidence'] == 'very_strong'
-    # weak-only cluster is surfaced but flagged
-    weak = cands[1]
-    assert set(weak['markets']) == {'c.onion', 'd.onion'}
-    assert weak['confidence'] == 'weak' and 'corroborate' in weak['note']
-
-
 def test_page_section_carries_evidence_and_promotes_confidence():
     addr = '1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2'
     g = build_graph(_result(
@@ -121,11 +100,6 @@ def test_missing_evidence_leaves_confidence_unchanged():
     assert 'section' not in edge
 
 
-def test_correlate_empty_without_shared_artifacts():
-    g = build_graph(_result('solo.onion', emails=['unique@x.com']))
-    assert correlate(g)['operator_candidates'] == []
-
-
 def test_build_graph_from_dict_matches_object_path():
     r = _result('a.onion', bitcoin_addresses=['1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2'])
     from_obj = build_graph(r).to_dict()
@@ -134,11 +108,12 @@ def test_build_graph_from_dict_matches_object_path():
 
 
 def test_quoted_artifacts_never_cluster_two_markets():
-    """`cybertrace correlate a.json b.json` (no --db) reaches this path, not the
-    evidence store — and correlate() clusters markets on any node holding two of
-    them. Two sites quoting one third party's address therefore became a shared
-    operator candidate here, months after the store path learned not to. The
-    node stays: it is real, it is just nobody's identity.
+    """A quoted third-party address must never read as the market's own artifact.
+    Cross-market attribution runs through the governed EvidenceStore engine
+    (cybertrace/correlate.py), not this module — but EvidenceGraph is still
+    built per-search (see darkweb_module.py's evidence_graph summary field),
+    so its node/edge construction must not credit a quoted email to the
+    market that merely quoted it, or seed a username node from it.
     """
     a, b = 'a' * 56 + '.onion', 'b' * 56 + '.onion'
     graph = EvidenceGraph()
@@ -157,4 +132,3 @@ def test_quoted_artifacts_never_cluster_two_markets():
     assert quoted['markets'] == [], "quoted address belongs to whoever was quoted"
     # …and it must not have seeded a handle for the pivot chain either.
     assert EvidenceGraph.node_id('USERNAME', 'amrounix') not in graph.nodes
-    assert correlate(graph)['operator_candidates'] == []

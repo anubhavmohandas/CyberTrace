@@ -95,7 +95,10 @@ def _format_pivots(pivots: list, width: int) -> list:
             lines.append(f"{head}  [error: {p['error']}]")
             continue
         lines.append(f"{head}  ({p.get('sources_ok', '')})")
-        for k, v in list((p.get('summary') or {}).items())[:4]:
+        # 7 keeps identity/activity fields (incl. first_seen/last_seen) visible
+        # for a bitcoin pivot without reaching connected/cospend address lists —
+        # those stay a count here, not a spotlighted list, on purpose.
+        for k, v in list((p.get('summary') or {}).items())[:7]:
             if isinstance(v, list):
                 v = f"{len(v)} items"
             elif isinstance(v, dict):
@@ -210,7 +213,11 @@ def format_table(result: ModuleResult, color: bool = False) -> str:
             if value is not None:
                 # Format value based on type
                 if isinstance(value, list):
-                    if len(value) <= 3:
+                    # A short list of dicts (e.g. operator_pivots) would join
+                    # into a raw, unbounded repr; only scalars are safe to join.
+                    if value and any(isinstance(v, (dict, list)) for v in value):
+                        str_val = f"{len(value)} items"
+                    elif len(value) <= 3:
                         str_val = ", ".join(str(v) for v in value)
                     else:
                         str_val = f"{len(value)} items"

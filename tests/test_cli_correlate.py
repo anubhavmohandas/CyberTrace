@@ -1,0 +1,166 @@
+"""CLI-level regression for `cybertrace correlate`: both invocation forms
+(with and without --db) must reach the same governed engine
+(cybertrace.correlate.run_correlation via the EvidenceStore), never a
+separate ad-hoc attribution path.
+"""
+
+import json
+import sqlite3
+
+from click.testing import CliRunner
+
+from cybertrace.cli import cli
+
+from .test_evidence import KEY_A, onion
+
+ONION_X = onion("x")
+ONION_Y = onion("y")
+
+
+def _write_result(path, target, **onion_data):
+    """A saved `cybertrace search --save` file: ModuleResult.to_dict() as JSON."""
+    payload = {
+        'target': target, 'target_type': 'darkweb', 'module': 'darkweb',
+        'sources': {
+            'target_onion': {
+                'source': 'target_onion', 'success': True, 'error': None,
+                'timestamp': '2026-01-10T00:00:00',
+                'data': {'online': True, **onion_data},
+            }
+        },
+        'summary': {}, 'related': [],
+        'stats': {'success': 1, 'total': 1, 'duration_sec': 0.1},
+    }
+    path.write_text(json.dumps(payload))
+    return str(path)
+
+
+def _shared_key_pair(tmp_path):
+    """Two markets that genuinely share a published PGP key -> real positive."""
+    a = _write_result(tmp_path / 'a.json', ONION_X, pgp_keys=[{'armored': KEY_A}])
+    b = _write_result(tmp_path / 'b.json', ONION_Y, pgp_keys=[{'armored': KEY_A}])
+    return a, b
+
+
+def _quoted_third_party_pair(tmp_path):
+    """Two markets that both merely QUOTE a third party's email in a 'quoted'
+    section. A naive union-find over shared-artifact nodes (the graph.py path
+    this loop removed) would cluster these two markets as one operator purely
+    because the node has two markets attached. The governed engine must not:
+    quoted mentions are marked non-attributive at ingest and must never
+    surface as a SAME_OPERATOR dossier.
+    """
+    shared_email = 'thirdparty@example.com'
+    a = _write_result(
+        tmp_path / 'qa.json', ONION_X, emails=[shared_email],
+        artifact_evidence={shared_email: {'section': 'quoted'}},
+    )
+    b = _write_result(
+        tmp_path / 'qb.json', ONION_Y, emails=[shared_email],
+        artifact_evidence={shared_email: {'section': 'quoted'}},
+    )
+    return a, b
+
+
+# --- both CLI paths reach the same governed engine ---------------------------
+
+def test_correlate_without_db_finds_the_real_shared_key(tmp_path):
+    a, b = _shared_key_pair(tmp_path)
+    result = CliRunner().invoke(cli, ['correlate', a, b, '--output', 'json'])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert any(set(d.get('markets', [])) >= {ONION_X, ONION_Y}
+               for d in data['dossiers'])
+
+
+def test_correlate_with_db_finds_the_same_shared_key(tmp_path):
+    a, b = _shared_key_pair(tmp_path)
+    db = str(tmp_path / 'case.db')
+    result = CliRunner().invoke(cli, ['correlate', a, b, '--db', db, '--output', 'json'])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert any(set(d.get('markets', [])) >= {ONION_X, ONION_Y}
+               for d in data['dossiers'])
+
+
+def test_quoted_artifact_never_attributes_without_db(tmp_path):
+    a, b = _quoted_third_party_pair(tmp_path)
+    result = CliRunner().invoke(cli, ['correlate', a, b, '--output', 'json'])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert not any(set(d.get('markets', [])) >= {ONION_X, ONION_Y}
+                   for d in data['dossiers'])
+
+
+def test_quoted_artifact_never_attributes_with_db(tmp_path):
+    a, b = _quoted_third_party_pair(tmp_path)
+    db = str(tmp_path / 'case.db')
+    result = CliRunner().invoke(cli, ['correlate', a, b, '--db', db, '--output', 'json'])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert not any(set(d.get('markets', [])) >= {ONION_X, ONION_Y}
+                   for d in data['dossiers'])
+
+
+# --- --db input validation ----------------------------------------------------
+
+def test_missing_db_value_is_a_usage_error(tmp_path):
+    a, b = _shared_key_pair(tmp_path)
+    result = CliRunner().invoke(cli, ['correlate', a, b, '--db'])
+    assert result.exit_code == 2
+    assert 'requires an argument' in result.output.lower()
+
+
+def test_db_path_that_is_a_directory_is_rejected(tmp_path):
+    a, b = _shared_key_pair(tmp_path)
+    a_dir = tmp_path / 'not_a_file'
+    a_dir.mkdir()
+    result = CliRunner().invoke(cli, ['correlate', a, b, '--db', str(a_dir)])
+    assert result.exit_code != 0
+    # Click's own Path(dir_okay=False) check, not the correlation engine.
+    assert 'directory' in result.output.lower()
+
+
+def test_db_parent_directory_missing_fails_loudly_not_silently(tmp_path):
+    a, b = _shared_key_pair(tmp_path)
+    bad_db = str(tmp_path / 'no_such_dir' / 'case.db')
+    result = CliRunner().invoke(cli, ['correlate', a, b, '--db', bad_db])
+    assert result.exit_code != 0
+    assert not (tmp_path / 'no_such_dir').exists()
+
+
+def test_db_file_that_is_not_a_sqlite_database_fails_loudly(tmp_path):
+    a, b = _shared_key_pair(tmp_path)
+    garbage_db = tmp_path / 'garbage.db'
+    garbage_db.write_bytes(b'not a sqlite file at all, just bytes\x00\x01\x02')
+    result = CliRunner().invoke(cli, ['correlate', a, b, '--db', str(garbage_db)])
+    assert result.exit_code != 0
+    # Must not have silently produced a candidate from a corrupt store.
+    assert 'dossiers' not in result.output
+
+
+def test_db_with_incompatible_existing_schema_fails_loudly(tmp_path):
+    """A pre-existing sqlite file with a same-named but foreign `targets` table
+    (CREATE TABLE IF NOT EXISTS is a no-op here) must fail at first write
+    rather than silently ingesting into the wrong shape."""
+    incompatible_db = tmp_path / 'incompatible.db'
+    conn = sqlite3.connect(str(incompatible_db))
+    conn.execute("CREATE TABLE targets (nothing_like_our_schema TEXT)")
+    conn.commit()
+    conn.close()
+
+    a, b = _shared_key_pair(tmp_path)
+    result = CliRunner().invoke(cli, ['correlate', a, b, '--db', str(incompatible_db)])
+    assert result.exit_code != 0
+    assert 'dossiers' not in result.output
+
+
+def test_empty_db_file_self_initializes_its_schema(tmp_path):
+    """An empty file is a valid, schema-less SQLite database -- CREATE TABLE IF
+    NOT EXISTS must initialize it cleanly rather than erroring."""
+    empty_db = tmp_path / 'empty.db'
+    empty_db.write_bytes(b'')
+
+    a, b = _shared_key_pair(tmp_path)
+    result = CliRunner().invoke(cli, ['correlate', a, b, '--db', str(empty_db)])
+    assert result.exit_code == 0, result.output

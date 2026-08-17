@@ -245,6 +245,20 @@ ARTIFACT_MAP = {
     "usernames":                 ("USERNAME", "USES_USERNAME"),
 }
 
+# CERTIFICATE and NAMESERVER are declared in ENTITY_TYPES/RELATIONSHIP_TYPES
+# and candidate_infra() already scores them (correlate.py), but nothing routes
+# either one here: domain_module.py's crt.sh/whois/dns_records sources are
+# never pivoted into from a darkweb crawl (see darkweb_module._pivot_targets —
+# clearnet hosts stay MENTIONS-only references, on purpose), and target_type
+# 'domain' is not in _ENRICHERS below, so no captured JSON in the labeled
+# corpus carries this data at all. Wiring it would be unverifiable blind code:
+# corpus/labels.toml names no pair by a shared certificate or nameserver (the
+# one place "certificate" appears is OnionMail's federated servers, each
+# explicitly labeled as serving its OWN distinct cert — evidence AGAINST
+# sharing, not for it). Leave blocked until a target_type='domain' ingest path
+# and a real shared-cert/nameserver case justify it — see runs/README.md.
+
+
 
 # Server banners so common they identify nothing. A fingerprint made only of
 # these must not become an entity: it would put every nginx market on one shared

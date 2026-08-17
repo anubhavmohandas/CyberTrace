@@ -218,10 +218,11 @@ class DarkwebModule(BaseModule):
 
         result = ModuleResult(
             target=target,
-            # Hardcoded like domain_module does with 'domain' — CLI never
-            # threads a target_type option through to modules, so relying on
-            # options.get() here always fell back to 'unknown' regardless of
-            # what the detector actually identified.
+            # Hardcoded like domain_module does with 'domain': this module is
+            # single-purpose, so its own result should always say 'darkweb'
+            # rather than echo whatever fine-grained string shape the CLI's
+            # detector assigned (e.g. 'onion') via the target_type it now
+            # threads through options for multi-shape modules like breach/social.
             target_type='darkweb',
             module=self.name,
         )
