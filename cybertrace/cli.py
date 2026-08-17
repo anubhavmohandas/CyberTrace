@@ -246,22 +246,57 @@ def _correlate_store(result_files, output_format: str, db_path: str,
                      dossier_path: Optional[str] = None) -> None:
     """Ingest saved results into the evidence store, then run the M5 engine."""
     import json
+    from . import memory
     from .correlate import render_dossier_html, render_html, render_markdown, run_correlation
     from .evidence import EvidenceStore, ingest
 
     with EvidenceStore(db_path) as store:
+        target_urls = []
         for path in result_files:
             try:
                 with open(path) as fh:
-                    ingest(json.load(fh), store)
+                    payload = json.load(fh)
+                ingest(payload, store)
             except (json.JSONDecodeError, OSError) as e:
                 click.echo(f"[!] Skipping {path}: {e}", err=True)
+                continue
+            if payload.get('target'):
+                target_urls.append(payload['target'])
+        target_urls = list(dict.fromkeys(target_urls))  # de-dup, keep first-seen order
+
+        # Case history is snapshotted BEFORE this call's own run_correlation()
+        # writes new rows to `candidates` below -- otherwise every candidate
+        # this very pass finds would immediately cite itself as "prior" case
+        # history, which is not history.
+        case_history = {url: memory.case_history(store, url) for url in target_urls}
 
         results = run_correlation(store)
+
+        # Historical memory: a retrieval pass over the same store, never a
+        # second correlation engine. See memory.py's module docstring for the
+        # EXACT/CONTEXTUAL/PRIOR_REFERENCE/PRIOR_CASE/RELATED boundary and why
+        # none of it can assert SAME_OPERATOR on its own.
+        memory_hits = {}
+        for url in target_urls:
+            matches = memory.historical_matches(store, url)
+            references = memory.prior_references(store, url)
+            related = memory.relationship_context(store, url)
+            patterns = memory.pattern_overlap(store, url)
+            cases = case_history[url]
+            if any((matches, references, cases, related, patterns)):
+                memory_hits[url] = {'matches': matches, 'references': references,
+                                    'cases': cases, 'related': related, 'patterns': patterns}
+
         if output_format == 'json':
-            click.echo(json.dumps(results, indent=2, default=str))
+            payload_out = dict(results)
+            payload_out['memory'] = memory_hits
+            click.echo(json.dumps(payload_out, indent=2, default=str))
         else:
             click.echo(render_markdown(results['dossiers'], results))
+            for url, hit in memory_hits.items():
+                click.echo("\n".join(memory.render_markdown(
+                    url, hit['matches'], hit['references'],
+                    cases=hit['cases'], related=hit['related'], patterns=hit['patterns'])))
 
         if html_path:
             render_html(store, html_path, results)
@@ -327,6 +362,46 @@ def watch(db_path: str, targets, discover: bool, output_format: str,
             from .correlate import render_dossier_html, run_correlation
             render_dossier_html(run_correlation(store), dossier_path)
             click.echo(f"\n[+] Case file rewritten: {dossier_path}", err=True)
+
+
+@cli.command()
+@click.argument('candidate_id')
+@click.option('--db', 'db_path', required=True, type=click.Path(exists=True, dir_okay=False),
+              help='Evidence store the candidate was written to')
+@click.option('--outcome', required=True,
+              type=click.Choice(['CONFIRMED', 'REJECTED', 'BENIGN', 'MALICIOUS', 'UNKNOWN'],
+                                case_sensitive=False),
+              help='What actually happened, after review')
+@click.option('--note', default=None, help='Free-text rationale')
+@click.option('--analyst', default=None, help='Who is recording this')
+def feedback(candidate_id: str, db_path: str, outcome: str, note: Optional[str],
+            analyst: Optional[str]):
+    """
+    Record an analyst's verdict on a candidate from a previous `correlate` run.
+
+    candidate_id is the OP-/IN-/IP- id printed in a dossier or the correlate
+    --dossier HTML. The verdict is stored against the candidate's underlying
+    entity and is read back into future `correlate` runs against this store —
+    a REJECTED/BENIGN call damps that entity's contribution next time,
+    CONFIRMED/MALICIOUS reinforces it slightly. It never deletes or overrides
+    what the engine found; it is a second, independent fact about the same
+    entity.
+
+    \b
+      cybertrace feedback OP-a1b2c3d4 --db case.db --outcome confirmed
+      cybertrace feedback IN-9f8e7d6c --db case.db --outcome rejected \\
+          --note "shared CDN, not operator infra" --analyst jdoe
+    """
+    from .evidence import EvidenceStore
+
+    with EvidenceStore(db_path) as store:
+        try:
+            fid = store.record_feedback(candidate_id, outcome.upper(), note=note,
+                                        analyst=analyst)
+        except ValueError as e:
+            click.echo(f"[!] {e}", err=True)
+            sys.exit(1)
+        click.echo(f"[+] Recorded {outcome.upper()} for {candidate_id} ({fid})", err=True)
 
 
 @cli.command('config')

@@ -1014,5 +1014,83 @@ def test_the_real_domain_producers_shape_still_stays_unwired(tmp_path):
                        for etype, _ in store.rejected)
 
 
+# --- analyst feedback ---------------------------------------------------------
+
+def test_feedback_requires_a_real_candidate(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        with pytest.raises(ValueError, match="no such candidate"):
+            store.record_feedback("OP-doesnotexist", "CONFIRMED")
+
+
+def test_feedback_rejects_an_unknown_outcome(tmp_path):
+    from cybertrace.correlate import run_correlation
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=[{'armored': KEY_A}]), store)
+        ingest(_result(ONION_B, pgp_keys=[{'armored': KEY_A}]), store)
+        results = run_correlation(store)
+        cid = results["dossiers"][0]["candidate_id"]
+
+        with pytest.raises(ValueError, match="unknown feedback outcome"):
+            store.record_feedback(cid, "MAYBE")
+
+
+def test_feedback_round_trips_by_candidate_and_by_entity(tmp_path):
+    from cybertrace.correlate import run_correlation
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=[{'armored': KEY_A}]), store)
+        ingest(_result(ONION_B, pgp_keys=[{'armored': KEY_A}]), store)
+        results = run_correlation(store)
+        dossier = results["dossiers"][0]
+        cid, entity_id = dossier["candidate_id"], dossier["entity"]["entity_id"]
+
+        fid = store.record_feedback(cid, "confirmed".upper(), note="real key reuse",
+                                    analyst="jdoe")
+        assert fid.startswith("fb_")
+
+        by_candidate = store.feedback_for(cid)
+        assert len(by_candidate) == 1
+        assert by_candidate[0]["outcome"] == "CONFIRMED"
+        assert by_candidate[0]["analyst"] == "jdoe"
+
+        by_entity = store.feedback_for_entity(entity_id)
+        assert len(by_entity) == 1
+        assert by_entity[0]["feedback_id"] == fid
+
+
+def test_feedback_keeps_every_revision_not_just_the_latest(tmp_path):
+    from cybertrace.correlate import run_correlation
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=[{'armored': KEY_A}]), store)
+        ingest(_result(ONION_B, pgp_keys=[{'armored': KEY_A}]), store)
+        cid = run_correlation(store)["dossiers"][0]["candidate_id"]
+
+        store.record_feedback(cid, "REJECTED", note="looked wrong at first")
+        store.record_feedback(cid, "CONFIRMED", note="verified against a signed commit")
+
+        history = store.feedback_for(cid)
+        assert [h["outcome"] for h in history] == ["REJECTED", "CONFIRMED"]
+
+
+def test_feedback_candidate_id_survives_a_re_correlate(tmp_path):
+    """candidate_id is derived from the entity's own deterministic id, so
+    feedback recorded after one `correlate` run must still resolve after a
+    second pass re-ingests the same evidence and rewrites `candidates`."""
+    from cybertrace.correlate import run_correlation
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=[{'armored': KEY_A}]), store)
+        ingest(_result(ONION_B, pgp_keys=[{'armored': KEY_A}]), store)
+        cid = run_correlation(store)["dossiers"][0]["candidate_id"]
+        store.record_feedback(cid, "CONFIRMED")
+
+        run_correlation(store)  # re-correlate: rewrites `candidates` in place
+
+        assert cid in {d["candidate_id"] for d in run_correlation(store)["dossiers"]}
+        assert len(store.feedback_for(cid)) == 1
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

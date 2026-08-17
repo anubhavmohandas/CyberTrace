@@ -126,6 +126,19 @@ CREATE TABLE IF NOT EXISTS candidates (
   updated_at        TEXT
 );
 
+-- A human verdict on one candidate, kept apart from `candidates` itself so a
+-- re-correlate (which rewrites every row in that table) can never overwrite
+-- what an analyst decided. Multiple rows per candidate are expected — a
+-- verdict can be revised — and every one is kept; nothing here is an UPSERT.
+CREATE TABLE IF NOT EXISTS analyst_feedback (
+  feedback_id  TEXT PRIMARY KEY,
+  candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),
+  outcome      TEXT NOT NULL,              -- CONFIRMED | REJECTED | BENIGN | MALICIOUS | UNKNOWN
+  note         TEXT,
+  analyst      TEXT,
+  recorded_at  TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_snap_target ON snapshots(target_id);
 CREATE INDEX IF NOT EXISTS idx_ent_type    ON entities(etype);
 CREATE INDEX IF NOT EXISTS idx_obs_snap    ON observations(snapshot_id);
@@ -133,6 +146,7 @@ CREATE INDEX IF NOT EXISTS idx_obs_entity  ON observations(entity_id);
 CREATE INDEX IF NOT EXISTS idx_rel_source  ON relationships(source_entity_id);
 CREATE INDEX IF NOT EXISTS idx_rel_target  ON relationships(target_entity_id);
 CREATE INDEX IF NOT EXISTS idx_rel_type    ON relationships(rtype);
+CREATE INDEX IF NOT EXISTS idx_feedback_candidate ON analyst_feedback(candidate_id);
 """
 
 ENTITY_TYPES = {
@@ -185,6 +199,12 @@ RELATIONSHIP_TYPES = {
 
 IP_CLASSES = {"INFRA_IP", "PERSONAL_IP", "VPN_IP", "TOR_RELAY", "EXCHANGE_IP",
               "UNKNOWN"}
+
+# An analyst's word on one candidate. CONFIRMED/MALICIOUS say the engine's
+# read was right; REJECTED/BENIGN say the shared evidence was misleading;
+# UNKNOWN records that someone looked and could not tell either way, which is
+# still worth keeping — it is a used lead, not a fresh one.
+FEEDBACK_OUTCOMES = {"CONFIRMED", "REJECTED", "BENIGN", "MALICIOUS", "UNKNOWN"}
 
 # Netblock owners that are anonymity egress rather than origin hosting. The
 # distinction changes the next investigative step, not the score: for a tunnel
@@ -717,6 +737,47 @@ class EvidenceStore:
         )
         self.conn.commit()
         return fid
+
+    # --- analyst feedback ------------------------------------------------------
+
+    def record_feedback(self, candidate_id: str, outcome: str, note: Optional[str] = None,
+                        analyst: Optional[str] = None) -> str:
+        """A human's verdict on one candidate: did the correlation engine get
+        this one right? `candidate_id` is stable across re-correlation (it is
+        derived from the entity's own deterministic id — see
+        correlate.build_dossier), so feedback survives a re-run of `correlate`
+        the way an entity's first_seen does.
+
+        Raises on an unknown outcome or a candidate_id never written by
+        correlate.save_candidates — feedback on a candidate that does not
+        exist is a typo, not a new fact, and failing loudly here is cheaper
+        than a silent foreign-key-shaped no-op would be.
+        """
+        if outcome not in FEEDBACK_OUTCOMES:
+            raise ValueError(f"unknown feedback outcome: {outcome}")
+        if not self._one("SELECT 1 FROM candidates WHERE candidate_id=?", (candidate_id,)):
+            raise ValueError(f"no such candidate: {candidate_id}")
+        fid = self._id("fb")
+        self.conn.execute(
+            "INSERT INTO analyst_feedback (feedback_id, candidate_id, outcome, note, "
+            "analyst, recorded_at) VALUES (?,?,?,?,?,?)",
+            (fid, candidate_id, outcome, note, analyst, utcnow()))
+        self.conn.commit()
+        return fid
+
+    def feedback_for(self, candidate_id: str) -> List[sqlite3.Row]:
+        return self._all("SELECT * FROM analyst_feedback WHERE candidate_id=? "
+                         "ORDER BY recorded_at", (candidate_id,))
+
+    def feedback_for_entity(self, entity_id: str) -> List[sqlite3.Row]:
+        """Every verdict recorded against any candidate this entity has ever
+        been part of — an OPERATOR candidate today may have been an INFRA
+        candidate in an earlier run, and both share the entity, not the
+        candidate_id."""
+        return self._all(
+            "SELECT af.* FROM analyst_feedback af "
+            "JOIN candidates c ON c.candidate_id = af.candidate_id "
+            "WHERE c.entity_id=? ORDER BY af.recorded_at DESC", (entity_id,))
 
     def findings(self, ftype: Optional[str] = None) -> List[sqlite3.Row]:
         if ftype:

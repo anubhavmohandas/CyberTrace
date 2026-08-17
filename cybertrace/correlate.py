@@ -266,6 +266,39 @@ def entity_discrimination(store: EvidenceStore) -> Dict[str, float]:
     return disc
 
 
+# A recorded verdict is a measured correction, not a prior, so it multiplies
+# discrimination the same way commonness does rather than adding a second
+# weight everywhere entity_funnel_profile is called. Biased toward damping:
+# a REJECTED/BENIGN verdict cuts harder than a CONFIRMED one lifts, so a
+# wrong analyst call can only ever pull a false positive down, never manufacture
+# a new one by over-trusting a single confirmation.
+FEEDBACK_WEIGHT = {"CONFIRMED": 1.15, "MALICIOUS": 1.15,
+                   "BENIGN": 0.4, "REJECTED": 0.25, "UNKNOWN": 1.0}
+
+
+def feedback_discrimination(store: EvidenceStore) -> Dict[str, float]:
+    """entity_id -> multiplier from the most recent analyst_feedback outcome
+    recorded against any candidate this entity has been part of.
+
+    Empty (no key for any entity) on every store with zero recorded feedback
+    -- which is every corpus run to date -- so folding this into
+    run_correlation changes no existing score. See FEEDBACK_WEIGHT.
+
+    occam: most-recent-outcome-wins is the whole rule (rows are read oldest
+    first, so a later row overwrites an earlier one in the dict). Upgrade to
+    a recency-weighted blend of every verdict if a corpus of reversed calls
+    on the same entity ever shows losing the earlier one matters.
+    """
+    rows = store._all(
+        "SELECT c.entity_id, af.outcome FROM analyst_feedback af "
+        "JOIN candidates c ON c.candidate_id = af.candidate_id "
+        "ORDER BY af.recorded_at")
+    out: Dict[str, float] = {}
+    for row in rows:
+        out[row["entity_id"]] = FEEDBACK_WEIGHT.get(row["outcome"], 1.0)
+    return out
+
+
 def username_aliases(store: EvidenceStore, min_sim: float = 0.82) -> List[dict]:
     """Near-duplicate handles across markets (casing, leet, typo-squats).
 
@@ -1631,6 +1664,14 @@ def run_correlation(store: EvidenceStore, min_conf: float = 0.35,
     # second computation mid-pass could see different observation counts and
     # rank two candidates on two different corpora.
     discrimination = entity_discrimination(store)
+    # Folded into the same slot as commonness rather than a second parameter
+    # everywhere entity_funnel_profile is called. The `if feedback` guard means
+    # a store with none recorded (every corpus run before this existed) skips
+    # rebuilding the dict entirely -- not just a no-op multiply, no touch at all.
+    feedback = feedback_discrimination(store)
+    if feedback:
+        discrimination = {eid: discrimination.get(eid, 1.0) * feedback.get(eid, 1.0)
+                          for eid in set(discrimination) | set(feedback)}
     windows = market_windows(store)
     aliases = username_aliases(store)
 

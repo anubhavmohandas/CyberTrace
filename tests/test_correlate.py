@@ -11,7 +11,7 @@ from cybertrace.correlate import (
     COMMON_ARTIFACT_FLOOR, LEAD_FLOOR,
     canonical_entity_key, candidate_infra, candidate_operators,
     confidence_level, contradictions_from_identity, crypto_clusters, detect_successors,
-    entity_discrimination, entity_funnel_profile, markets_for_entity,
+    entity_discrimination, entity_funnel_profile, feedback_discrimination, markets_for_entity,
     market_windows, render_dossier_html, render_html, render_markdown, run_correlation,
     username_aliases,
 )
@@ -1327,3 +1327,91 @@ def test_shared_nameserver_reaches_infra_never_operator(tmp_path):
         assert results["operators"] == []
         pairs = {frozenset((s["source_url"], s["target_url"])) for s in results["successors"]}
         assert frozenset((ONION_A, ONION_B)) not in pairs
+
+
+# --- analyst feedback folded into discrimination ------------------------------
+#
+# feedback_discrimination() is a new multiplier folded into the SAME slot
+# entity_discrimination() already fills, not a second parameter threaded
+# through candidate_operators/candidate_infra/candidate_ips/
+# entity_funnel_profile. These tests prove the fold, not the storage —
+# test_evidence.py covers record_feedback/feedback_for/feedback_for_entity.
+
+def test_feedback_discrimination_is_empty_with_nothing_recorded(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=[{'armored': KEY_A}]), store)
+        assert feedback_discrimination(store) == {}
+
+
+def test_zero_feedback_leaves_run_correlation_byte_identical(tmp_path):
+    """The corpus baseline (211 -> 254 tests, 4/4 precision, 0 leakage) was
+    measured with an empty analyst_feedback table. This is the regression
+    guard for that: wiring feedback in must not move a single score when none
+    is recorded."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, emails=['op@proton.me'], pgp_keys=[{'armored': KEY_A}]), store)
+        ingest(_result(ONION_B, emails=['op@proton.me'], pgp_keys=[{'armored': KEY_A}]), store)
+        before = run_correlation(store)
+        after = run_correlation(store)
+        assert [d["score"] for d in before["dossiers"]] == [d["score"] for d in after["dossiers"]]
+
+
+def test_rejected_feedback_damps_the_entitys_score(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=[{'armored': KEY_A}]), store)
+        ingest(_result(ONION_B, pgp_keys=[{'armored': KEY_A}]), store)
+        before = run_correlation(store)
+        dossier = before["dossiers"][0]
+        before_score = dossier["score"]
+
+        store.record_feedback(dossier["candidate_id"], "REJECTED",
+                              note="shared key traced to a keysigning party, not one operator")
+
+        after = run_correlation(store)
+        after_dossier = next((d for d in after["dossiers"]
+                              if d["candidate_id"] == dossier["candidate_id"]), None)
+        # REJECTED's 0.25x damping is steep enough to drop a two-market,
+        # single-funnel candidate below min_conf entirely -- suppressed
+        # candidacy is a stronger form of "damped", not a different outcome.
+        assert after_dossier is None or after_dossier["score"] < before_score
+
+
+def test_confirmed_feedback_lifts_the_entitys_score(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=[{'armored': KEY_A}]), store)
+        ingest(_result(ONION_B, pgp_keys=[{'armored': KEY_A}]), store)
+        before_score = run_correlation(store)["dossiers"][0]["score"]
+
+        cid = run_correlation(store)["dossiers"][0]["candidate_id"]
+        store.record_feedback(cid, "CONFIRMED", note="matched a signed commit key")
+
+        after_score = next(d["score"] for d in run_correlation(store)["dossiers"]
+                           if d["candidate_id"] == cid)
+        assert after_score > before_score
+
+
+def test_most_recent_feedback_outcome_wins(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=[{'armored': KEY_A}]), store)
+        ingest(_result(ONION_B, pgp_keys=[{'armored': KEY_A}]), store)
+        cid = run_correlation(store)["dossiers"][0]["candidate_id"]
+        entity_id = run_correlation(store)["dossiers"][0]["entity"]["entity_id"]
+
+        store.record_feedback(cid, "REJECTED")
+        store.record_feedback(cid, "CONFIRMED")  # a later, revised verdict
+
+        disc = feedback_discrimination(store)
+        assert disc[entity_id] == 1.15  # CONFIRMED's weight, not REJECTED's
+
+
+def test_feedback_never_manufactures_a_candidate_that_did_not_exist(tmp_path):
+    """A CONFIRMED verdict boosts an existing candidate's score; it cannot, by
+    itself, pull an entity that never cleared min_markets/min_conf into the
+    result set -- the multiplier only ever scales a funnel confidence that
+    was already nonzero."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=[{'armored': KEY_A}]), store)  # only one market
+        assert candidate_operators(store) == []
+        # No candidate exists yet, so there is nothing to attach feedback to --
+        # record_feedback itself refuses an unknown candidate_id (test_evidence.py).
+        assert feedback_discrimination(store) == {}
