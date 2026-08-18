@@ -179,6 +179,7 @@ cybertrace search TARGET [OPTIONS]
 # Attribution
 cybertrace correlate FILES... [--db case.db] [--html graph.html] [--dossier case.html]
 cybertrace watch --db case.db [--target ONION] [--discover] [--dossier case.html]
+cybertrace feedback CANDIDATE_ID --db case.db --outcome confirmed|rejected|benign|malicious|unknown [--note TEXT] [--analyst NAME]
 
 # Shortcut commands
 cybertrace email EMAIL
