@@ -360,6 +360,20 @@ _INDEX_SOURCES = {"ahmia", "torch", "dargle", "intelx", "onion_directories",
 # deliberately says otherwise, which is the safe direction to forget in.
 _SITE_COLLECTORS = {"target_onion", "operator_pivot", "watch"}
 
+# The subset of _SITE_COLLECTORS whose snapshot payload is actually a page
+# capture — 'pages', 'pgp_keys', the whole ARTIFACT_MAP bag — and therefore
+# comparable by page_similarity. Deliberately NOT _SITE_COLLECTORS itself:
+# operator_pivot is in that set (it did fetch something, so its artifacts earn
+# OK status) but its OWN snapshot payload is a manifest of pivoted sub-targets
+# — {"pivoted": N, "results": [{"type": "ip"/"email"/"bitcoin", "summary": ...}]}
+# — never the market's own page, and on the real tor.taxi corpus it is also
+# the LATEST snapshot for the target (the pivot phase runs after the crawl).
+# Picking it for clone similarity compares two unrelated enrichment payloads
+# instead of the two sites. 'watch' reuses _fetch_target_onion directly (see
+# monitor._visit), so its payload is byte-for-byte the same shape as
+# target_onion's and belongs here.
+_SITE_CAPTURE_COLLECTORS = frozenset({"target_onion", "watch"})
+
 # Snapshot status vocabulary. The column already separated a capture from an
 # outage; DISCOVERY is the third thing a row can be, and leaving it fused with
 # OK is what let a target that was never fetched still report intelligence.
@@ -550,20 +564,33 @@ class EvidenceStore:
     PAGE_COLLECTOR = ":page:"
 
     def latest_snapshot(self, target_id: str, include_pages: bool = False,
-                        status: Optional[str] = "OK") -> Optional[sqlite3.Row]:
+                        status: Optional[str] = "OK",
+                        collectors: Optional[frozenset] = None) -> Optional[sqlite3.Row]:
         """Most recent capture of a target.
 
         Successful captures only by default. A DOWN record's payload is an error
         string, so handing it to anything that reads artifacts — the clone
         guard's similarity, for one — silently compares a site against its own
         outage and concludes the two markets look nothing alike.
+
+        `collectors`, when given, restricts to snapshots written by one of those
+        collector names exactly (no `:page:`/`:pivot` suffix match) — see
+        _SITE_CAPTURE_COLLECTORS for the caller that needs this: without it,
+        "most recent" is happy to return an unrelated enrichment payload that
+        merely happens to have been ingested after the real capture.
         """
-        return self._one(
-            "SELECT * FROM snapshots WHERE target_id=? "
-            + ("" if include_pages else "AND collector NOT LIKE '%:page:%' ")
-            + ("AND status=? " if status else "")
-            + "ORDER BY observed_at DESC, rowid DESC LIMIT 1",
-            (target_id, status) if status else (target_id,))
+        params: list = [target_id]
+        sql = "SELECT * FROM snapshots WHERE target_id=? "
+        if not include_pages:
+            sql += "AND collector NOT LIKE '%:page:%' "
+        if status:
+            sql += "AND status=? "
+            params.append(status)
+        if collectors:
+            sql += f"AND collector IN ({','.join('?' for _ in collectors)}) "
+            params.extend(sorted(collectors))
+        sql += "ORDER BY observed_at DESC, rowid DESC LIMIT 1"
+        return self._one(sql, tuple(params))
 
     def record_down(self, target_id: str, collector: str, note: str = "",
                     observed_at: Optional[str] = None) -> str:
@@ -984,6 +1011,7 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
                            section=f"pgp_keys:{key.get('section') or role}",
                            confidence=0.3 if borrowed else
                            0.85 if role == "signing" else 0.7,
+                           context=key.get("context"),
                            observed_at=observed_at)
             if key_id:
                 meta = {"role": role}
@@ -1470,7 +1498,8 @@ def _similarity_between(store: EvidenceStore, market_a: str, market_b: str) -> f
     payloads = []
     for url in (market_a, market_b):
         row = store._one("SELECT target_id FROM targets WHERE url=?", (url,))
-        snap = store.latest_snapshot(row["target_id"]) if row else None
+        snap = store.latest_snapshot(row["target_id"], collectors=_SITE_CAPTURE_COLLECTORS) \
+            if row else None
         payloads.append(store.snapshot_payload(snap["snapshot_id"]) if snap else {})
     return page_similarity(*payloads)
 

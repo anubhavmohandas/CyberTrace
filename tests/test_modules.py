@@ -734,6 +734,55 @@ class TestDarkwebOperatorIntel:
         assert keys[0]['key_id'] == f"PGP:{expected}"
         assert keys[0]['fingerprint'] == expected
 
+    def test_extract_pgp_keys_preserves_the_armored_block(self):
+        """The extractor must retain the full armored block, not just the
+        fingerprint. evidence.ingest reads key_created_at/key_expires_at
+        straight from the packet bytes (normalize.pgp_key_times) and has
+        nothing to parse without the block surviving extraction."""
+        from .test_evidence import _armor, _pubkey_packet
+        key_block = _armor(_pubkey_packet((1 << 2047) | 0x9999))
+        html = f"<div class='contact'>Our PGP key:<br>{key_block}<br>End of key</div>"
+        keys = DarkwebModule._extract_pgp_keys(html)
+        assert len(keys) == 1
+        assert keys[0]['armored'] == key_block
+        assert keys[0]['fingerprint']
+
+    def test_extract_pgp_keys_context_is_a_page_snippet_not_the_block(self):
+        """context must show WHERE the key sat on the page, like every other
+        artifact's evidence map — not dump the (large) armored bytes into the
+        observation, which would defeat the point of a human-checkable snippet."""
+        from .test_evidence import _armor, _pubkey_packet
+        key_block = _armor(_pubkey_packet((1 << 2047) | 0x8888))
+        html = f"<div class='contact'>Reach us securely:<br>{key_block}<br>Thanks!</div>"
+        keys = DarkwebModule._extract_pgp_keys(html)
+        ctx = keys[0]['context']
+        assert 'Reach us securely' in ctx
+        assert 'Thanks!' in ctx
+        assert key_block not in ctx
+        assert len(ctx) <= 200
+
+    def test_extract_pgp_keys_oversized_block_fails_closed(self):
+        """A block far past any real single-key export must not be stored
+        truncated — a truncated block would still 'parse' (the packet reader
+        stops cleanly rather than raising) and could misreport the key it
+        claims to be. The record keeps its identity (fingerprint); only the
+        raw armor is withheld.
+
+        Built as many repeats of one valid packet (not spliced-in noise) so
+        the whole thing stays valid base64 end to end — a keyring export with
+        one real key repeated is exactly the kind of oversized-but-genuinely-
+        parseable input the bound has to refuse anyway.
+        """
+        from .test_evidence import _armor, _pubkey_packet
+        packet = _pubkey_packet((1 << 2047) | 0x7777)
+        bulky = _armor(packet * 2000)  # far past the 128 KiB bound
+        assert len(bulky) > DarkwebModule._MAX_PGP_ARMOR_BYTES
+        html = f"<div class='pgp'>{bulky}</div>"
+        keys = DarkwebModule._extract_pgp_keys(html)
+        assert len(keys) == 1
+        assert 'armored' not in keys[0]
+        assert keys[0].get('fingerprint')
+
     def test_favicon_hash_matches_shodan_scheme(self):
         import base64, mmh3
         # Shodan's http.favicon.hash = mmh3.hash(base64.encodebytes(icon_bytes)).

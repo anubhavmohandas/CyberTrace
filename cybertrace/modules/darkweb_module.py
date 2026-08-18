@@ -411,6 +411,15 @@ class DarkwebModule(BaseModule):
             values.append(raw)
         return sorted(values), evidence
 
+    # A page embedding an implausibly large "PGP block" is corrupted input or
+    # scraping bait, not a real one-key export — a real export with dozens of
+    # UIDs and certifications still fits well under this. Over the bound, the
+    # raw armor is left off the record (fail closed) rather than storing a
+    # byte-truncated block that would misrepresent the key it claims to be:
+    # the packet reader (normalize._packets) stops cleanly on truncated input
+    # instead of raising, so a silently truncated block would still "parse".
+    _MAX_PGP_ARMOR_BYTES = 131072  # 128 KiB
+
     @staticmethod
     def _extract_pgp_keys(html: str) -> List[Dict[str, Any]]:
         """Capture armored PGP public keys on the page, each with its role.
@@ -430,6 +439,13 @@ class DarkwebModule(BaseModule):
         merely displayed). evidence.ingest turns SIGNING into a different edge
         type, and the clone guard reads it before calling shared use shared
         control.
+
+        The record also carries the armored block itself (below the size bound)
+        and a context snippet of where it sat on the page — see 'armored' and
+        'context' below — so evidence.ingest can read the key's own
+        creation/expiration packets (normalize.pgp_key_times) and a human can
+        check where the sighting came from, the same as every other artifact
+        class already gets via _validated's evidence map.
         """
         # occam: keys the parser can't read (v3, truncated armor) fall back to a
         # payload hash — still stable for identical exports, just not re-export
@@ -444,13 +460,25 @@ class DarkwebModule(BaseModule):
                 continue
             block = m.group(0)
             fpr = norm_pgp(block)
-            around = f"{html[max(0, m.start() - 160):m.start()]} {html[m.end():m.end() + 160]}"
+            before = html[max(0, m.start() - 160):m.start()]
+            after = html[m.end():m.end() + 160]
+            around = f"{before} {after}"
             section = next((n for n, rx in _SECTION_RULES if rx.search(around)), 'body')
             if fpr:
                 bare = fpr.removeprefix('PGP:')
                 record: Dict[str, Any] = {'key_id': fpr, 'fingerprint': bare,
                                           'certifiers': pgp_certifiers(block)}
                 signed = bool(issuers & {bare, bare[-16:]})
+                # Only for a key the parser could actually read: evidence.ingest
+                # prefers 'armored' over 'fingerprint'/'key_id' (see its own
+                # comment there), and an unparseable block would fail that same
+                # parse a second time in norm_pgp and drop the whole artifact —
+                # losing even the weaker payload-hash identity the fallback
+                # below exists to keep. pgp_key_times has nothing to read from
+                # an unparseable block either way, so there is no times-recovery
+                # benefit to offset that cost.
+                if len(block) <= DarkwebModule._MAX_PGP_ARMOR_BYTES:
+                    record['armored'] = block
             else:
                 record = {'key_id': hashlib.sha256(payload.encode()).hexdigest()[:16]}
                 signed = False
@@ -458,6 +486,15 @@ class DarkwebModule(BaseModule):
                               {'wallet': 'payment', 'contact': 'contact',
                                'pgp': 'displayed'}.get(section, 'displayed'))
             record['section'] = section
+            # Human-checkable snippet of where the block sits, not the block's
+            # own bytes: those are already in 'armored' when kept, and dumping
+            # base64 into 'context' would defeat the point of a snippet a human
+            # can read at a glance. Same tag-strip/whitespace-collapse/200-char
+            # shape as _validated's context, so it reads the same way in a
+            # dossier as a BTC or email observation does.
+            record['context'] = re.sub(
+                r'\s+', ' ', re.sub(r'<[^>]+>', ' ', f"{before}[PGP KEY BLOCK]{after}")
+            ).strip()[:200]
             seen.setdefault(record['key_id'], record)
         return list(seen.values())
 

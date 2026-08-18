@@ -15,6 +15,7 @@ from cybertrace.evidence import (
     structural_similarity,
 )
 from cybertrace.modules.base import ModuleResult, SourceResult
+from cybertrace.modules.darkweb_module import DarkwebModule
 from cybertrace.modules.domain_module import DomainModule
 from cybertrace.modules.email_module import EmailModule
 from cybertrace.normalize import (
@@ -666,6 +667,42 @@ def test_simultaneous_sighting_yields_no_precedence_claim(tmp_path):
         assert detect_clones(store) == []
 
 
+def test_clone_similarity_ignores_later_enrichment_snapshots(tmp_path):
+    """Item 3/E: an operator_pivot enrichment sweep run AFTER the site crawl
+    must not become the 'latest snapshot' clone similarity reads. Its payload
+    is a pivot manifest ({'pivoted': N, 'results': [...]}), never the site's
+    own pages/artifact bag — and on the real tor.taxi corpus operator_pivot is
+    genuinely the latest-timestamped source, so without a collector filter
+    'most recent snapshot' silently picks it over the real crawl."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        shared = dict(title='DarkShop', emails=['op@proton.me'],
+                      bitcoin_addresses=[BTC_VALID], pgp_keys=[{'armored': KEY_A}])
+        ingest(_result(ONION_A, seen=datetime(2026, 1, 10, tzinfo=timezone.utc), **shared), store)
+        ingest(_result(ONION_B, seen=datetime(2026, 8, 2, tzinfo=timezone.utc), **shared), store)
+
+        # Enrichment sweep for each market, after its own site crawl — the
+        # shape and ordering measured on the real tortaxi-prd/tortaxi-2dev
+        # captures (operator_pivot timestamped ~1 minute after target_onion).
+        ingest(_pivot_result(ONION_A, [
+            {'target': 'op@proton.me', 'type': 'email', 'summary': {}}],
+            seen=datetime(2026, 1, 11, tzinfo=timezone.utc)), store)
+        ingest(_pivot_result(ONION_B, [
+            {'target': BTC_VALID, 'type': 'bitcoin', 'summary': {}}],
+            seen=datetime(2026, 8, 3, tzinfo=timezone.utc)), store)
+
+        target_a = store._one(
+            "SELECT target_id FROM targets WHERE url=?", (ONION_A,))["target_id"]
+        # Precondition: without a collector filter, "latest" really is the
+        # enrichment snapshot — otherwise this test would not be exercising
+        # the bug the fix addresses.
+        assert store.latest_snapshot(target_a)["collector"] != "target_onion"
+
+        found = detect_clones(store)
+        assert len(found) == 1
+        assert found[0]["ftype"] == "CLONE_SUSPECT"
+        assert found[0]["confidence"] >= 0.85
+
+
 def test_page_similarity_bounds():
     a = {'title': 'Shop', 'emails': ['x@y.com'], 'bitcoin_addresses': [BTC_VALID]}
     assert page_similarity(a, a) == 1.0
@@ -869,6 +906,131 @@ def test_evidence_leaves_creation_time_unavailable_without_an_armored_block(tmp_
     with EvidenceStore(str(tmp_path / "e.db")) as store:
         ingest(_result(ONION_A, pgp_keys=[{"fingerprint": fpr, "role": "displayed"}]), store)
         key = store.find_entity("PGP_KEY", fpr)
+        assert "key_created_at" not in store.metadata(key)
+        assert "key_expires_at" not in store.metadata(key)
+
+
+# --- PGP provenance gaps: extraction -> storage path --------------------------
+#
+# The tests above inject 'armored' directly into a hand-built payload, which
+# proves the STORAGE side reads packet times correctly but never exercised
+# whether the real crawl-time extractor (DarkwebModule._extract_pgp_keys)
+# actually hands storage anything to read. It did not: the extractor computed
+# a key's fingerprint from the armored block and then discarded the block
+# itself. These run the real extractor over HTML and feed its own output into
+# ingest(), the exact path a live site crawl takes.
+
+def test_site_extracted_pgp_key_populates_key_created_at(tmp_path):
+    """Item A/B: DarkwebModule._extract_pgp_keys() output, fed unmodified into
+    ingest(), must populate key_created_at when the key carries a real
+    creation-time packet — not just a hand-built {'armored': ...} payload."""
+    created = int(datetime(2022, 3, 4, tzinfo=timezone.utc).timestamp())
+    key_block = _armor(_pubkey_packet((1 << 2047) | 0xC0FFEE, created=created))
+    html = f"<div class='contact'>Send us encrypted mail:<br>{key_block}</div>"
+    extracted = DarkwebModule._extract_pgp_keys(html)
+    assert extracted and extracted[0].get('armored') == key_block
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=extracted), store)
+        key = store.find_entity("PGP_KEY", key_block)
+        assert store.metadata(key)["key_created_at"] == datetime.fromtimestamp(
+            created, tz=timezone.utc).isoformat()
+
+
+def test_site_extracted_pgp_key_expiration_comes_from_self_signature_only(tmp_path):
+    """Item C: key_expires_at must resolve from the key's own self-signature's
+    Key Expiration subpacket — never confused with key_created_at — and this
+    must hold through the real extractor, not only through pgp_key_times
+    called directly."""
+    created = int(datetime(2022, 1, 1, tzinfo=timezone.utc).timestamp())
+    pubkey = _pubkey_packet((1 << 2047) | 0xFACE, created=created)
+    fpr = pgp_fingerprint(_armor(pubkey))
+    expires_seconds = 365 * 86400
+    self_sig = _signature_packet(sig_type=0x13, issuer=bytes.fromhex(fpr[-16:]),
+                                 sig_created=created, key_expiration_seconds=expires_seconds)
+    key_block = _armor(pubkey + self_sig)
+    html = f"<div class='pgp'>{key_block}</div>"
+    extracted = DarkwebModule._extract_pgp_keys(html)
+    assert extracted and extracted[0].get('armored') == key_block
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=extracted), store)
+        key = store.find_entity("PGP_KEY", key_block)
+        meta = store.metadata(key)
+        assert meta["key_created_at"] == datetime.fromtimestamp(
+            created, tz=timezone.utc).isoformat()
+        assert meta["key_expires_at"] == datetime.fromtimestamp(
+            created + expires_seconds, tz=timezone.utc).isoformat()
+        assert meta["key_created_at"] != meta["key_expires_at"]
+
+
+def test_pgp_observation_provenance_chain(tmp_path):
+    """Item D/2: the observation behind a USES_PGP edge must resolve to every
+    field an investigator needs — target URL, capture timestamp, page/snapshot
+    sha256, the fingerprint, a human-checkable snippet of where it was found,
+    its own observation id, and a section — not just the fingerprint repeated
+    into context, which is what happened before context flowed through."""
+    key_block = _armor(_pubkey_packet((1 << 2047) | 0xD00D))
+    html = f"<div class='contact'>Write to us securely:<br>{key_block}<br>We reply fast.</div>"
+    extracted = DarkwebModule._extract_pgp_keys(html)
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=extracted), store)
+        key = store.find_entity("PGP_KEY", key_block)
+        market = store.find_entity("MARKET", ONION_A)
+        rel = store._one(
+            "SELECT rel_id FROM relationships WHERE source_entity_id=? "
+            "AND target_entity_id=? AND rtype='USES_PGP'", (market, key))
+        prov = store.provenance(rel["rel_id"])
+        assert len(prov) == 1
+        entry = prov[0]
+
+        assert entry["url"] == ONION_A                          # target URL
+        assert entry["observed_at"]                             # capture timestamp
+        assert entry["sha256"]                                  # page/snapshot sha256
+        assert entry["observation_id"]                          # observation ID
+        assert entry["section"].startswith("pgp_keys:")         # section
+        norm_value = store._one(
+            "SELECT normalized_value FROM entities WHERE entity_id=?", (key,))["normalized_value"]
+        assert extracted[0]["fingerprint"].lower() in norm_value  # PGP fingerprint
+
+        # useful context/snippet — a page location, not the fingerprint or the
+        # raw armored bytes repeated back
+        assert 'Write to us securely' in entry["context"]
+        assert 'We reply fast' in entry["context"]
+        assert entry["context"] != extracted[0]["fingerprint"]
+        assert key_block not in entry["context"]
+
+
+def test_extracted_malformed_pgp_never_fabricates_timestamps(tmp_path):
+    """Item G: a truncated/malformed PGP block scraped from real HTML must
+    stay fail-closed end to end — extraction, then ingest — never inventing a
+    creation or expiration time.
+
+    No 'armored' field for this one is itself part of fail-closed: the block
+    is not a parseable OpenPGP packet (fingerprint extraction already fails on
+    it), so attaching the raw armor would only let evidence.ingest prefer it
+    over the payload-hash fallback below and fail to normalize it a second
+    time — dropping the artifact entirely instead of keeping its weaker but
+    real KEYID identity. See _extract_pgp_keys: 'armored' is only ever set
+    alongside a real fingerprint.
+    """
+    block = ("-----BEGIN PGP PUBLIC KEY BLOCK-----\n"
+            "Version: GnuPG v2\n\n"
+            + "mQENBFabcd" * 20 + "\n=Ab12\n"
+            "-----END PGP PUBLIC KEY BLOCK-----")
+    html = f"<div class='pgp'>Key:<br>{block}</div>"
+    extracted = DarkwebModule._extract_pgp_keys(html)
+    assert len(extracted) == 1
+    assert 'fingerprint' not in extracted[0]     # not a parseable OpenPGP packet
+    assert 'armored' not in extracted[0]         # fail-closed: nothing safe to preserve
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=extracted), store)
+        # The artifact itself must still survive ingest under its weaker
+        # payload-hash identity — malformed input must not vanish silently.
+        key = store.find_entity("PGP_KEY", extracted[0]['key_id'])
+        assert key is not None
         assert "key_created_at" not in store.metadata(key)
         assert "key_expires_at" not in store.metadata(key)
 
