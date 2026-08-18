@@ -4,13 +4,15 @@ Offline throughout — every scenario is seeded through `ingest()`, so what is
 under test is the same path a real crawl takes.
 """
 
+import base64
 from datetime import datetime, timezone
 
 from cybertrace.correlate import (
     FUNNELS,
     COMMON_ARTIFACT_FLOOR, LEAD_FLOOR,
     canonical_entity_key, candidate_infra, candidate_operators,
-    confidence_level, contradictions_from_identity, crypto_clusters, detect_successors,
+    confidence_level, contradictions_from_identity, contradictions_from_key_temporal,
+    crypto_clusters, detect_successors,
     entity_discrimination, entity_funnel_profile, feedback_discrimination, markets_for_entity,
     market_windows, render_dossier_html, render_html, render_markdown, run_correlation,
     username_aliases,
@@ -19,8 +21,12 @@ from cybertrace.evidence import EvidenceStore, enrich_bitcoin, enrich_email, ing
 from cybertrace.modules.base import ModuleResult, SourceResult
 from cybertrace.modules.darkweb_module import DarkwebModule
 from cybertrace.monitor import candidate_deltas
+from cybertrace.normalize import pgp_fingerprint
 
-from .test_evidence import BTC_VALID, KEY_A, KEY_B, ONION_A, ONION_B, _result, onion
+from .test_evidence import (
+    BTC_VALID, KEY_A, KEY_B, ONION_A, ONION_B, _armor, _pubkey_packet,
+    _result, _signature_packet, onion,
+)
 
 JAN = datetime(2026, 1, 10, tzinfo=timezone.utc)
 AUG = datetime(2026, 8, 2, tzinfo=timezone.utc)
@@ -268,6 +274,181 @@ def test_clone_verdict_suppresses_the_successor_edge(tmp_path):
         # stays distinguishable from the other three objections.
         assert "shared_artifacts_explained_by_cloning" in render_markdown(
             results["dossiers"], results)
+
+
+# --- PGP key temporal validation ----------------------------------------------
+#
+# A shared key only evidences succession if the key could actually have been
+# on the predecessor's page while it was live. These pin the two synthetic
+# cases from the investigation this feature came out of: created 2023-11-14
+# (well before a Jan-Jun 2026 predecessor) scores the same 0.995 it always
+# has; created 2026-07-01 (after the predecessor went dark 2026-06-01, before
+# the Aug 2026 successor appeared) must not reach that conclusion.
+
+PREDECESSOR_DOWN = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+
+def _predecessor_successor(store, key_block):
+    """Predecessor live Jan-Jun 2026, successor appears Aug 2026, both showing
+    one PGP key — the shape `_two_markets` uses, reduced to just the key so a
+    temporal read-out is not entangled with the other shared-artifact signals."""
+    ingest(_result(ONION_A, seen=JAN, title="OldShop",
+                   pgp_keys=[{"armored": key_block}]), store)
+    store.record_down(
+        store._one("SELECT target_id FROM targets WHERE url=?", (ONION_A,))["target_id"],
+        collector="target_onion", note="Onion unreachable via Tor",
+        observed_at=PREDECESSOR_DOWN.isoformat())
+    ingest(_result(ONION_B, seen=AUG, title="NewPlace",
+                   pgp_keys=[{"armored": key_block}]), store)
+
+
+def test_key_created_before_predecessor_window_scores_normally(tmp_path):
+    """Case A / the investigation's 'valid' synthetic case: created 2023-11-14,
+    predecessor Jan-Jun 2026, successor Aug 2026. The key could genuinely have
+    carried over, so the successor edge must score exactly as it always has."""
+    created = int(datetime(2023, 11, 14, tzinfo=timezone.utc).timestamp())
+    key = _armor(_pubkey_packet((1 << 2047) | 0x1357, created=created))
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        _predecessor_successor(store, key)
+        pair = detect_successors(store, min_score=0.5)[0]
+        assert pair["score"] == 0.995
+        assert pair["suppressed"] is None
+        assert pair["relation"] == "SUCCESSOR_OF"
+        assert "pgp_key_temporal_contradiction" not in pair["signals"]
+        assert store._all("SELECT 1 FROM relationships WHERE rtype='SUCCESSOR_OF'")
+
+
+def test_key_created_after_predecessor_window_suppresses_succession(tmp_path):
+    """Case B / the investigation's 'invalid' synthetic case: created
+    2026-07-01, one month AFTER the predecessor was observed dark. The key
+    cannot have been reused from a market that closed before it existed, so
+    this must not reach the old 0.995 SUCCESSOR_OF conclusion — but nothing
+    about the underlying evidence is deleted."""
+    created = int(datetime(2026, 7, 1, tzinfo=timezone.utc).timestamp())
+    key = _armor(_pubkey_packet((1 << 2047) | 0x2468, created=created))
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        _predecessor_successor(store, key)
+        pair = detect_successors(store, min_score=0.5)[0]
+
+        assert pair["score"] != 0.995
+        assert pair["score"] < 0.9
+        assert pair["relation"] is None
+        assert pair["suppressed"] is not None
+        assert "pgp_key_temporal_contradiction" in pair["signals"]
+        # Downgraded, not deleted: no SUCCESSOR_OF edge, but the key itself and
+        # its USES_PGP observations on both markets are still fully in the store.
+        assert store._all("SELECT 1 FROM relationships WHERE rtype='SUCCESSOR_OF'") == []
+        key_entity = store.find_entity("PGP_KEY", key)
+        assert len(store._all("SELECT 1 FROM observations WHERE entity_id=?",
+                              (key_entity,))) == 2
+        assert store.metadata(key_entity)["key_created_at"].startswith("2026-07-01")
+
+        # The contradiction is visible, not silent: a Finding backs it and the
+        # dossier-level contradiction rule reports it explicitly.
+        flags = contradictions_from_key_temporal(store, [pair])
+        assert flags and flags[0]["rule"] == "key_created_after_predecessor_window"
+        assert {ONION_A, ONION_B} <= set(flags[0]["markets"])
+        assert store.findings("PGP_KEY_TEMPORAL_CONTRADICTION")
+
+
+def test_no_creation_timestamp_leaves_correlation_unchanged(tmp_path):
+    """Case C: a key the parser has no packet for (bare fingerprint, as a
+    keyserver hit or an unparseable export would supply) must correlate
+    exactly as before this feature existed — no chronology invented from
+    when the tool happened to observe it."""
+    fpr = "AA" * 20
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, seen=JAN, title="OldShop",
+                       pgp_keys=[{"fingerprint": fpr}]), store)
+        store.record_down(
+            store._one("SELECT target_id FROM targets WHERE url=?", (ONION_A,))["target_id"],
+            collector="target_onion", note="Onion unreachable via Tor",
+            observed_at=PREDECESSOR_DOWN.isoformat())
+        ingest(_result(ONION_B, seen=AUG, title="NewPlace",
+                       pgp_keys=[{"fingerprint": fpr}]), store)
+
+        key = store.find_entity("PGP_KEY", fpr)
+        assert "key_created_at" not in store.metadata(key)
+
+        pair = detect_successors(store, min_score=0.5)[0]
+        assert pair["score"] == 0.995
+        assert pair["relation"] == "SUCCESSOR_OF"
+        assert "pgp_key_temporal_contradiction" not in pair["signals"]
+
+
+def test_malformed_creation_timestamp_is_untrusted_not_fabricated(tmp_path):
+    """Case D: a key packet too short to hold a real creation time must behave
+    exactly like 'no timestamp' — safely unavailable, never a guess."""
+    truncated_block = ("-----BEGIN PGP PUBLIC KEY BLOCK-----\n\n"
+                       + base64.b64encode(bytes([0x99, 0x00, 0x02, 4, 0x17])).decode()
+                       + "\n-----END PGP PUBLIC KEY BLOCK-----")
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, seen=JAN, title="OldShop",
+                       pgp_keys=[{"armored": truncated_block}]),
+               store)
+        store.record_down(
+            store._one("SELECT target_id FROM targets WHERE url=?", (ONION_A,))["target_id"],
+            collector="target_onion", note="Onion unreachable via Tor",
+            observed_at=PREDECESSOR_DOWN.isoformat())
+        ingest(_result(ONION_B, seen=AUG, title="NewPlace",
+                       pgp_keys=[{"armored": truncated_block}]),
+               store)
+
+        key = store.find_entity("PGP_KEY", truncated_block)
+        assert "key_created_at" not in store.metadata(key)
+        pair = detect_successors(store, min_score=0.5)[0]
+        assert "pgp_key_temporal_contradiction" not in pair["signals"]
+
+
+def test_multiple_observations_of_one_key_keep_their_own_timestamps(tmp_path):
+    """Case E: the same key captured twice must not collapse into one
+    observation — each capture keeps its own observed_at, while the key's own
+    created_at (an entity-level fact) is unaffected by how many times or when
+    it was seen."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, seen=JAN, title="Shop",
+                       pgp_keys=[{"armored": KEY_A}]), store)
+        ingest(_result(ONION_A, seen=datetime(2026, 3, 1, tzinfo=timezone.utc),
+                       title="Shop", pgp_keys=[{"armored": KEY_A}]), store)
+
+        key = store.find_entity("PGP_KEY", KEY_A)
+        stamps = {r["observed_at"] for r in
+                 store._all("SELECT observed_at FROM observations WHERE entity_id=?",
+                            (key,))}
+        assert len(stamps) == 2
+        assert store.metadata(key)["key_created_at"] == datetime.fromtimestamp(
+            1_700_000_000, tz=timezone.utc).isoformat()
+
+
+def test_expired_key_is_not_read_as_newly_created(tmp_path):
+    """Case F: an OLD, already-expired key that only gets observed again long
+    after it expired must still be read as old. Expiration must never stand in
+    for creation just because the key resurfaces later."""
+    created = int(datetime(2023, 11, 14, tzinfo=timezone.utc).timestamp())
+    expires_seconds = 45 * 86400                       # expired mid-December 2023
+    pubkey = _pubkey_packet((1 << 2047) | 0x9999, created=created)
+    fpr = pgp_fingerprint(_armor(pubkey))
+    self_sig = _signature_packet(sig_type=0x13, issuer=bytes.fromhex(fpr[-16:]),
+                                 sig_created=created,
+                                 key_expiration_seconds=expires_seconds)
+    key_block = _armor(pubkey + self_sig)
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        _predecessor_successor(store, key_block)
+
+        key = store.find_entity("PGP_KEY", key_block)
+        meta = store.metadata(key)
+        assert meta["key_created_at"] == datetime.fromtimestamp(
+            created, tz=timezone.utc).isoformat()
+        assert meta["key_expires_at"] == datetime.fromtimestamp(
+            created + expires_seconds, tz=timezone.utc).isoformat()
+
+        # Old and expired, but still created well before the predecessor's
+        # window — normal correlation, no contradiction, expiry never
+        # substituted for creation.
+        pair = detect_successors(store, min_score=0.5)[0]
+        assert pair["score"] == 0.995
+        assert "pgp_key_temporal_contradiction" not in pair["signals"]
 
 
 # --- dossiers ----------------------------------------------------------------

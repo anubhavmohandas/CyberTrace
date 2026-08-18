@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .normalize import (NON_ATTRIBUTIVE_SECTIONS, norm_onion, normalize,
-                        simhash_similarity)
+                        pgp_certifier_details, pgp_key_times, simhash_similarity)
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -986,11 +986,31 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
                            0.85 if role == "signing" else 0.7,
                            observed_at=observed_at)
             if key_id:
-                store.set_metadata(key_id, role=role)
+                meta = {"role": role}
+                # Straight from the key's own packet bytes, never from when we
+                # happened to crawl it — correlate.py's temporal check depends
+                # on this being the key's real creation time. Only set when the
+                # block actually parses; a bare fingerprint/key_id carries no
+                # packet to read one from, and that stays 'unavailable' rather
+                # than defaulting to anything.
+                if key.get("armored"):
+                    times = pgp_key_times(key["armored"])
+                    if times.get("created_at"):
+                        meta["key_created_at"] = times["created_at"]
+                    if times.get("expires_at"):
+                        meta["key_expires_at"] = times["expires_at"]
+                store.set_metadata(key_id, **meta)
             # occam: 20 certifiers per key. A keyring-signed key can carry
             # hundreds, and past the first few they are web-of-trust background
             # rather than evidence about this operator. Raise it if a real case
             # turns on a certifier deep in the list.
+            #
+            # Each certifying signature's own creation time — when available —
+            # rides on the relationship's evidence note rather than the key's
+            # metadata: it describes this ONE certification event, and a second
+            # certifier signing on a different date must not overwrite it.
+            sig_times = {d["issuer"]: d.get("sig_created_at")
+                        for d in pgp_certifier_details(key["armored"])} if key.get("armored") else {}
             for certifier in (key.get("certifiers") or [])[:20]:
                 cert_id = store.upsert_entity("PGP_KEY", str(certifier),
                                               observed_at=observed_at)
@@ -1001,8 +1021,12 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
                     context=f"certified {value}", confidence=0.9, observed_at=observed_at)
                 rel = store.upsert_relationship(cert_id, key_id, "SIGNED_BY",
                                                 source_label=name, observed_at=observed_at)
+                sig_created_at = (sig_times.get(str(certifier).upper())
+                                  or sig_times.get(str(certifier).upper()[-16:]))
                 store.add_evidence(
-                    rel, [obs], note="third-party certification inside the published key")
+                    rel, [obs],
+                    note="third-party certification inside the published key; "
+                         f"signature created {sig_created_at or 'unavailable'}")
 
         # The icon the site served, as an entity of its own. Collected on 34 of
         # the 79 live captures in the corpus and, until now, used for nothing but

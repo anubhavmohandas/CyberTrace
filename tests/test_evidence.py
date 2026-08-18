@@ -19,8 +19,9 @@ from cybertrace.modules.domain_module import DomainModule
 from cybertrace.modules.email_module import EmailModule
 from cybertrace.normalize import (
     dom_simhash, norm_asn, norm_btc, norm_domain, norm_email, norm_eth, norm_ip,
-    norm_onion, norm_pgp, norm_username, norm_xmr, pgp_certifiers,
-    pgp_signature_issuers, simhash_similarity,
+    norm_onion, norm_pgp, norm_username, norm_xmr, pgp_certifier_details,
+    pgp_certifiers, pgp_fingerprint, pgp_key_times, pgp_signature_issuers,
+    simhash_similarity,
 )
 
 # A real mainnet address (block 170 coinbase) and the BIP-173 P2WPKH vector.
@@ -746,14 +747,130 @@ def test_real_key_block_yields_its_certifiers():
     assert pgp_certifiers(_armor(_pubkey_packet((1 << 2047) | 0xABCDEF) + self_sig)) == []
 
 
-def _signature_packet(sig_type: int, issuer: bytes) -> bytes:
-    """v4 signature packet carrying an issuer key-id subpacket (RFC 4880 5.2.3)."""
+def _signature_packet(sig_type: int, issuer: bytes, sig_created: int = None,
+                      key_expiration_seconds: int = None) -> bytes:
+    """v4 signature packet carrying an issuer key-id subpacket (RFC 4880 5.2.3),
+    and optionally a Signature Creation Time (type 2) / Key Expiration Time
+    (type 9) subpacket in the hashed area — the RFC-required placement for
+    either to be binding. Both default to absent, so existing callers that pass
+    neither get the exact same bytes as before this was added."""
+    hashed = b""
+    if sig_created is not None:
+        hashed += bytes([5, 2]) + struct.pack(">I", sig_created)      # type 2
+    if key_expiration_seconds is not None:
+        hashed += bytes([5, 9]) + struct.pack(">I", key_expiration_seconds)  # type 9
     subpacket = bytes([len(issuer) + 1, 16]) + issuer          # len, type 16, key id
     body = (struct.pack(">BBBB", 4, sig_type, 1, 8)            # version, type, RSA, SHA-256
-            + struct.pack(">H", 0)                             # no hashed subpackets
+            + struct.pack(">H", len(hashed)) + hashed
             + struct.pack(">H", len(subpacket)) + subpacket
             + b"\x00\x00" + b"\x00\x10" + b"\x00" * 2)         # hash prefix + tiny MPI
     return bytes([0x88]) + bytes([len(body)]) + body           # old-format tag 2
+
+
+# --- PGP temporal metadata: creation, expiration, signature timestamps -------
+
+def test_key_creation_time_read_from_packet_bytes():
+    """Straight from the packet's own creation-time field, not from armor text
+    or from when the block happened to be captured."""
+    created = int(datetime(2023, 11, 14, tzinfo=timezone.utc).timestamp())
+    block = _armor(_pubkey_packet((1 << 2047) | 0x1357, created=created))
+    assert pgp_key_times(block) == {
+        "created_at": datetime.fromtimestamp(created, tz=timezone.utc).isoformat(),
+        "expires_at": None,
+    }
+
+
+def test_key_expiration_from_self_signature():
+    """Expiration has no field of its own on a v4/v6 key packet; it comes from
+    a Key Expiration Time subpacket on the key's OWN self-signature."""
+    created = int(datetime(2023, 11, 14, tzinfo=timezone.utc).timestamp())
+    pubkey = _pubkey_packet((1 << 2047) | 0x2468, created=created)
+    fpr = pgp_fingerprint(_armor(pubkey))
+    expires_seconds = 45 * 86400
+    self_sig = _signature_packet(sig_type=0x13, issuer=bytes.fromhex(fpr[-16:]),
+                                 sig_created=created,
+                                 key_expiration_seconds=expires_seconds)
+    block = _armor(pubkey + self_sig)
+    times = pgp_key_times(block)
+    assert times["created_at"] == datetime.fromtimestamp(created, tz=timezone.utc).isoformat()
+    assert times["expires_at"] == datetime.fromtimestamp(
+        created + expires_seconds, tz=timezone.utc).isoformat()
+
+
+def test_key_expiration_zero_means_never_expires():
+    """RFC 4880 5.2.3.6: a Key Expiration Time of 0 explicitly means 'does not
+    expire' — that must not read as 'expired the instant it was created'."""
+    created = int(datetime(2023, 11, 14, tzinfo=timezone.utc).timestamp())
+    pubkey = _pubkey_packet((1 << 2047) | 0x3690, created=created)
+    fpr = pgp_fingerprint(_armor(pubkey))
+    self_sig = _signature_packet(sig_type=0x13, issuer=bytes.fromhex(fpr[-16:]),
+                                 sig_created=created, key_expiration_seconds=0)
+    assert pgp_key_times(_armor(pubkey + self_sig))["expires_at"] is None
+
+
+def test_a_third_partys_expiration_claim_is_not_evidence_about_the_key():
+    """Only the key's OWN self-signature can set its expiration. A signature
+    from an unrelated issuer carrying a Key Expiration Time subpacket says
+    nothing trustworthy about when this key expires."""
+    created = int(datetime(2023, 11, 14, tzinfo=timezone.utc).timestamp())
+    pubkey = _pubkey_packet((1 << 2047) | 0x1122, created=created)
+    stranger_sig = _signature_packet(sig_type=0x13, issuer=bytes.fromhex("AA" * 8),
+                                     sig_created=created, key_expiration_seconds=86400)
+    assert pgp_key_times(_armor(pubkey + stranger_sig))["expires_at"] is None
+
+
+def test_pgp_key_times_stays_unavailable_on_malformed_input():
+    """Neither field is ever fabricated: unparseable armor and a truncated key
+    packet both come back as 'unavailable', not as an invented date."""
+    assert pgp_key_times("this is not an armored block") == {
+        "created_at": None, "expires_at": None}
+
+    # A tag-6 packet whose body is too short to hold the 4-octet creation time.
+    truncated = bytes([0x99, 0x00, 0x02, 4, 0x17])
+    block = ("-----BEGIN PGP PUBLIC KEY BLOCK-----\n\n"
+            + base64.b64encode(truncated).decode()
+            + "\n-----END PGP PUBLIC KEY BLOCK-----")
+    assert pgp_key_times(block) == {"created_at": None, "expires_at": None}
+
+
+def test_certifier_signature_creation_time_is_extracted():
+    """A third-party certifier's own Signature Creation Time subpacket, kept
+    apart from pgp_certifiers' plain issuer list — see pgp_certifier_details."""
+    created = int(datetime(2024, 5, 1, tzinfo=timezone.utc).timestamp())
+    pubkey = _pubkey_packet((1 << 2047) | 0x7777)
+    cert_sig = _signature_packet(sig_type=0x13, issuer=bytes.fromhex("1122334455667788"),
+                                 sig_created=created)
+    block = _armor(pubkey + cert_sig)
+    details = pgp_certifier_details(block)
+    assert details == [{
+        "issuer": "1122334455667788",
+        "sig_created_at": datetime.fromtimestamp(created, tz=timezone.utc).isoformat(),
+    }]
+    # pgp_certifiers keeps its existing plain-list shape.
+    assert pgp_certifiers(block) == ["1122334455667788"]
+
+
+def test_evidence_stores_key_created_at_as_pgp_key_metadata(tmp_path):
+    """Item 4: key_created_at lands on the PGP_KEY entity via the existing
+    metadata mechanism — no schema change, same store.set_metadata every other
+    enrichment already uses."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=[{"armored": KEY_A}]), store)
+        key = store.find_entity("PGP_KEY", KEY_A)
+        assert store.metadata(key)["key_created_at"] == datetime.fromtimestamp(
+            1_700_000_000, tz=timezone.utc).isoformat()
+
+
+def test_evidence_leaves_creation_time_unavailable_without_an_armored_block(tmp_path):
+    """A bare fingerprint (a keyserver hit, or a key the parser could not read)
+    carries no packet to read a creation time from. Item 3/9C: that must stay
+    absent, never fabricated from first_seen or the capture date."""
+    fpr = "AA" * 20
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=[{"fingerprint": fpr, "role": "displayed"}]), store)
+        key = store.find_entity("PGP_KEY", fpr)
+        assert "key_created_at" not in store.metadata(key)
+        assert "key_expires_at" not in store.metadata(key)
 
 
 # --- page lineage and discovery provenance -----------------------------------

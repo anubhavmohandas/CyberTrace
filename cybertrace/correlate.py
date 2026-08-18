@@ -173,6 +173,18 @@ def _parse_ts(value: Optional[str]) -> Optional[datetime]:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+def _key_created_at(store: EvidenceStore, entity_id: str) -> Optional[datetime]:
+    """A PGP_KEY entity's own creation time, from the metadata evidence.ingest
+    wrote off the packet bytes (see normalize.pgp_key_times) — never from
+    first_seen/last_seen, which record when WE observed it, not when the key
+    was made. None when unavailable, same as any other missing timestamp."""
+    row = _entity(store, entity_id)
+    if not row:
+        return None
+    meta = json.loads(row["metadata"] or "{}")
+    return _parse_ts(meta.get("key_created_at"))
+
+
 # --- resolution --------------------------------------------------------------
 
 def canonical_entity_key(store: EvidenceStore, entity_id: str) -> str:
@@ -694,6 +706,17 @@ def _pair_signals(store: EvidenceStore, artifacts: dict, windows: dict,
 
     market_a, market_b = _market_entity(store, a_id), _market_entity(store, b_id)
 
+    # The predecessor's observation window, computed once so the shared-PGP-key
+    # check below and the temporal_handoff signal further down read the same
+    # notion of "when did the earlier market stop being relevant". None when
+    # either market has no capture window at all — no ordering, no check, same
+    # as temporal_handoff's own gate.
+    wa, wb = windows.get(a_id) or {}, windows.get(b_id) or {}
+    predecessor_end = None
+    if wa.get("first") and wb.get("first"):
+        pred_window = wa if wa["first"] <= wb["first"] else wb
+        predecessor_end = _parse_ts(pred_window.get("down_since")) or pred_window.get("last")
+
     # A key on A signing a key on B is the strongest directional evidence there
     # is: it is the outgoing operator vouching for the incoming one.
     #
@@ -743,11 +766,26 @@ def _pair_signals(store: EvidenceStore, artifacts: dict, windows: dict,
                 context = min(1.0, context * (2.0 if len(entities) > 2 else 1.5))
             if context <= 0:
                 continue
+            # A key created AFTER the predecessor's window closed could not
+            # have been on the predecessor's page while it was live: whatever
+            # this pair's shared use of it means, it is not the ordinary
+            # "operator carried the key from A to B" reading, and it must not
+            # earn the weight that reading gets. key_created_at comes straight
+            # from the key's own packet bytes (see evidence.ingest), never from
+            # when either market happened to be crawled — an unavailable
+            # timestamp (no armored block, unparseable packet) leaves this
+            # False and the signal scores exactly as it always has.
+            key_created = None
+            temporal_contradiction = False
+            if etype == "PGP_KEY" and predecessor_end is not None:
+                key_created = _key_created_at(store, entity_id)
+                temporal_contradiction = bool(key_created and key_created > predecessor_end)
             label = row["normalized_value"][:48] + (
                 f" (+{len(entities) - 1} more under the same domain)"
                 if len(entities) > 1 else "")
+            weight = 0.0 if temporal_contradiction else SUCCESSOR_SIGNALS[name] * rarity * context
             signals.append({
-                "signal": name, "weight": SUCCESSOR_SIGNALS[name] * rarity * context,
+                "signal": name, "weight": weight,
                 "direction": None, "discrimination": round(rarity, 3),
                 "context": round(context, 3),
                 # Whether this signal may support an EDGE, as opposed to a rank.
@@ -755,14 +793,33 @@ def _pair_signals(store: EvidenceStore, artifacts: dict, windows: dict,
                 # control; below full control weight the pair merely referenced
                 # the thing, and a pile of references is the one shape that
                 # reaches the assertion threshold on arithmetic no single signal
-                # supports. See detect_successors.
-                "attributive": context >= DEFAULT_CONTEXT,
+                # supports. See detect_successors. A temporal contradiction is
+                # never attributive either, whatever context says: the shared
+                # artifact cannot evidence control carried across this pair.
+                "attributive": context >= DEFAULT_CONTEXT and not temporal_contradiction,
                 "evidence": [o for e in entities
                              for o in (_observations_of(store, a_id, e)
                                        + _observations_of(store, b_id, e))],
                 "detail": f"{etype} {label} on both"
                           + ("" if rarity >= COMMON_ARTIFACT_FLOOR
                              else f" (common across the corpus, weight x{rarity:.2f})")})
+            if temporal_contradiction:
+                # Recorded as its own zero-weight, contradicting signal — same
+                # pattern as temporal_overlap below — so the objection is
+                # visible in the pair's signal list and reaches a Finding via
+                # contradictions_from_key_temporal, rather than only silently
+                # zeroing the shared_pgp_key weight above. Nothing here deletes
+                # the underlying USES_PGP/SIGNS_WITH relationship or its
+                # observations; this only withholds successor-strength scoring
+                # for THIS pair.
+                signals.append({
+                    "signal": "pgp_key_temporal_contradiction", "weight": 0.0,
+                    "direction": None, "evidence": [], "contradicts": True,
+                    "attributive": False,
+                    "detail": (f"{label} was created {key_created.date()} — after "
+                               f"the predecessor market's observation window closed "
+                               f"({predecessor_end.date()}) — shared use of this key "
+                               f"cannot evidence temporal reuse between these markets")})
 
     # Different addresses, one wallet: co-spend proves the same party signed for
     # both, which is a financial link between the markets even though neither
@@ -784,7 +841,7 @@ def _pair_signals(store: EvidenceStore, artifacts: dict, windows: dict,
     # older has to be decided here. Reading the gap in the arbitrary pair order
     # turns a clean handoff into an "overlap", which argues against succession
     # rather than for it, and costs the pair its directional hint.
-    wa, wb = windows.get(a_id) or {}, windows.get(b_id) or {}
+    # (wa/wb computed once, above, alongside predecessor_end.)
     if wa.get("first") and wb.get("first") and wa.get("last") and wb.get("last"):
         older, newer, direction = ((wa, wb, "a_to_b") if wa["first"] <= wb["first"]
                                    else (wb, wa, "b_to_a"))
@@ -1140,7 +1197,36 @@ def contradictions_from_temporal(store: EvidenceStore, pairs: List[dict]) -> Lis
     return flags
 
 
-# The four rules are called separately by run_correlation rather than through a
+def contradictions_from_key_temporal(store: EvidenceStore, pairs: List[dict]) -> List[dict]:
+    """Pairs where a shared PGP key was created after the predecessor market's
+    observation window closed — see the temporal_contradiction check in
+    _pair_signals. The key cannot have been reused from the predecessor if it
+    did not exist yet while the predecessor was live, so whatever the pair's
+    shared use of it means, it is not the ordinary succession story, and that
+    objection is recorded here rather than left implicit in a lowered score.
+    """
+    flags = []
+    for pair in pairs:
+        if "pgp_key_temporal_contradiction" not in (pair.get("signals") or []):
+            continue
+        urls = [pair.get("source_url"), pair.get("target_url")]
+        detail = next((s["detail"] for s in pair.get("signals_detail") or []
+                      if s["signal"] == "pgp_key_temporal_contradiction"), "")
+        fid = store.add_finding(
+            "PGP_KEY_TEMPORAL_CONTRADICTION",
+            f"{urls[0]} and {urls[1]} share a PGP key created after the "
+            "predecessor's observation window closed",
+            severity="MEDIUM", confidence=0.5)
+        flags.append({
+            "rule": "key_created_after_predecessor_window", "severity": "MEDIUM",
+            "markets": [u for u in urls if u], "finding_id": fid,
+            "detail": detail or ("a shared PGP key was created after the "
+                                 "predecessor market's observation window closed — "
+                                 "it cannot evidence reuse across this pair")})
+    return flags
+
+
+# The five rules are called separately by run_correlation rather than through a
 # wrapper: the clone rule has to run BEFORE successors (its verdicts suppress
 # them) and the commonness and temporal rules can only run after, since they
 # object to pairs succession actually proposed.
@@ -1681,7 +1767,8 @@ def run_correlation(store: EvidenceStore, min_conf: float = 0.35,
     flags = (clone_flags
              + contradictions_from_identity(store)
              + contradictions_from_commonness(store, discrimination)
-             + contradictions_from_temporal(store, successors))
+             + contradictions_from_temporal(store, successors)
+             + contradictions_from_key_temporal(store, successors))
 
     results = {
         "operators": candidate_operators(store, min_conf=min_conf,

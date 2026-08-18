@@ -24,7 +24,8 @@ import binascii
 import hashlib
 import ipaddress
 import re
-from typing import Iterator, Optional
+from datetime import datetime, timezone
+from typing import Dict, Iterator, List, Optional
 
 # --- base58 ------------------------------------------------------------------
 
@@ -170,6 +171,82 @@ def pgp_fingerprint(block: str) -> Optional[str]:
     return None
 
 
+def _key_creation_time(body: bytes) -> Optional[int]:
+    """Creation time of one key packet body, Unix epoch seconds, or None.
+
+    RFC 4880 5.5.2 (v4) / RFC 9580 5.5.2 (v6): byte 0 is the key version, bytes
+    1-4 the 4-octet creation time — same offset for both, so one read covers
+    either. v3 and truncated bodies are unsupported, same as _key_fingerprint.
+    """
+    if not body or body[0] not in (4, 6) or len(body) < 5:
+        return None
+    return int.from_bytes(body[1:5], "big")
+
+
+def _epoch_to_iso(ts: Optional[int]) -> Optional[str]:
+    """Unix timestamp -> UTC ISO 8601, or None if it cannot be a real date.
+
+    Packet bytes are scraped from hostile pages; a value that overflows a
+    calendar date must come back as 'unavailable', never as a fabricated one.
+    """
+    if ts is None:
+        return None
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def pgp_key_times(block: str) -> Dict[str, Optional[str]]:
+    """Creation and expiration time of the primary public key, straight from
+    the packet bytes — never inferred from when a page happened to be crawled.
+
+    created_at is the key packet's own creation-time field. expires_at has no
+    field of its own on a v4/v6 key (that was v3-only); instead it comes from
+    the Key Expiration Time subpacket (type 9, seconds after creation) on the
+    key's own most recent self-signature — the same resolution rule a real
+    OpenPGP implementation uses once a key has been re-certified. A signature
+    only counts toward this if its issuer actually resolves to this key's own
+    fingerprint; an un-attributed or third-party signature's expiration claim
+    is not evidence about when THIS key expires.
+
+    Either field is None ('unavailable') when the block does not parse or
+    carries no such subpacket. A Key Expiration Time of 0 explicitly means
+    'does not expire' (RFC 4880 5.2.3.6) and also yields expires_at=None —
+    that is a real value, not a missing one, but this call site has no use for
+    the distinction.
+    """
+    raw = _armor_payload(block)
+    if not raw:
+        return {"created_at": None, "expires_at": None}
+    packets = list(_packets(raw))
+    created, own = None, set()
+    for tag, body in packets:
+        if tag == 6 and created is None:              # primary key: first one wins
+            created = _key_creation_time(body)
+        if tag in (6, 14):                            # public key, public subkey
+            fpr = _key_fingerprint(body)
+            if fpr:
+                own |= {fpr, fpr[-16:]}
+    best_seconds, best_created = None, -1
+    for tag, body in packets:
+        if tag != 2:                                  # 2 = signature
+            continue
+        info = _parse_signature(body)
+        if not info or info["key_expiration_seconds"] is None:
+            continue
+        issuer = info["issuer"]
+        is_self = issuer is not None and (issuer in own or issuer[-16:] in own)
+        if not is_self:
+            continue
+        marker = info["sig_created_at"] or 0
+        if marker >= best_created:                    # most recent self-cert wins
+            best_created, best_seconds = marker, info["key_expiration_seconds"]
+    expires_at = (_epoch_to_iso(created + best_seconds)
+                  if created is not None and best_seconds else None)
+    return {"created_at": _epoch_to_iso(created), "expires_at": expires_at}
+
+
 # --- OpenPGP signatures ------------------------------------------------------
 #
 # A displayed key is the one thing a clone can copy perfectly, so "this market
@@ -184,6 +261,8 @@ def pgp_fingerprint(block: str) -> Optional[str]:
 # it says nothing about a second party.
 _CERT_SIG_TYPES = frozenset({0x10, 0x11, 0x12, 0x13, 0x1F})
 
+_SUBPKT_SIG_CREATION_TIME = 2
+_SUBPKT_KEY_EXPIRATION = 9
 _SUBPKT_ISSUER_KEYID = 16
 _SUBPKT_ISSUER_FPR = 33
 
@@ -210,8 +289,11 @@ def _subpackets(data: bytes) -> Iterator[tuple]:
         i += length
 
 
-def _sig_issuer(body: bytes) -> Optional[tuple]:
-    """(sig_type, issuer) for one signature packet body.
+def _parse_signature(body: bytes) -> Optional[dict]:
+    """sig_type, issuer and the two time-bearing subpackets for one signature
+    packet body: Signature Creation Time (type 2, every real signature carries
+    one) and Key Expiration Time (type 9, seconds after the signed key's own
+    creation — only present on a self-signature that sets an expiry).
 
     Issuer is the 40/64-hex fingerprint when the signature carries one, else the
     16-hex long key id. Preferring the fingerprint matters downstream: norm_pgp
@@ -230,6 +312,8 @@ def _sig_issuer(body: bytes) -> Optional[tuple]:
                                                       # and v3 keys are long dead
     i = 4
     issuer = None
+    sig_created_at = None
+    key_expiration_seconds = None
     for _ in range(2):                                # hashed, then unhashed area
         if i + count_width > len(body):
             break
@@ -241,7 +325,19 @@ def _sig_issuer(body: bytes) -> Optional[tuple]:
                 issuer = sub_body[1:].hex().upper()    # leading byte is key version
             elif sub_type == _SUBPKT_ISSUER_KEYID and len(sub_body) == 8 and not issuer:
                 issuer = sub_body.hex().upper()
-    return (sig_type, issuer) if issuer else None
+            elif sub_type == _SUBPKT_SIG_CREATION_TIME and len(sub_body) == 4:
+                sig_created_at = int.from_bytes(sub_body, "big")
+            elif sub_type == _SUBPKT_KEY_EXPIRATION and len(sub_body) == 4:
+                key_expiration_seconds = int.from_bytes(sub_body, "big")
+    return {"sig_type": sig_type, "issuer": issuer, "sig_created_at": sig_created_at,
+            "key_expiration_seconds": key_expiration_seconds}
+
+
+def _sig_issuer(body: bytes) -> Optional[tuple]:
+    """(sig_type, issuer) for one signature packet body. Thin view over
+    _parse_signature for the two callers that only need identity."""
+    info = _parse_signature(body)
+    return (info["sig_type"], info["issuer"]) if info and info["issuer"] else None
 
 
 def _armor_blocks(text: str, kind: str) -> Iterator[str]:
@@ -250,13 +346,15 @@ def _armor_blocks(text: str, kind: str) -> Iterator[str]:
         rf"-----BEGIN PGP {kind}-----.*?-----END PGP {kind}-----", text, re.DOTALL))
 
 
-def pgp_certifiers(block: str) -> list:
-    """Keys that certified this public key, excluding its own self-signatures.
+def pgp_certifier_details(block: str) -> List[dict]:
+    """Third-party certifications on this public key, each with the issuer and
+    that signature's own Signature Creation Time where the packet carries one.
 
-    A third-party certification is the strongest successor signal the graph has:
-    the holder of the certifying key's secret half vouched for this one. Cloning
-    a displayed key copies these packets too, so the certification is evidence
-    about the *key*, never on its own about the site displaying it.
+    Same self-signature exclusion as pgp_certifiers, kept as a separate
+    function rather than changing that one's return shape: evidence.ingest and
+    the corpus payload format both depend on 'certifiers' staying a plain list
+    of issuer strings, and this is the richer view for callers that want the
+    per-signature timestamp instead.
     """
     raw = _armor_payload(block)
     if not raw:
@@ -272,13 +370,25 @@ def pgp_certifiers(block: str) -> list:
     for tag, body in packets:
         if tag != 2:                                  # 2 = signature
             continue
-        parsed = _sig_issuer(body)
-        if not parsed:
+        info = _parse_signature(body)
+        if not info or not info["issuer"]:
             continue
-        sig_type, issuer = parsed
-        if sig_type in _CERT_SIG_TYPES and issuer not in own and issuer[-16:] not in own:
-            out.append(issuer)
-    return sorted(set(out))
+        issuer = info["issuer"]
+        if info["sig_type"] in _CERT_SIG_TYPES and issuer not in own and issuer[-16:] not in own:
+            out.append({"issuer": issuer,
+                        "sig_created_at": _epoch_to_iso(info["sig_created_at"])})
+    return out
+
+
+def pgp_certifiers(block: str) -> list:
+    """Keys that certified this public key, excluding its own self-signatures.
+
+    A third-party certification is the strongest successor signal the graph has:
+    the holder of the certifying key's secret half vouched for this one. Cloning
+    a displayed key copies these packets too, so the certification is evidence
+    about the *key*, never on its own about the site displaying it.
+    """
+    return sorted({d["issuer"] for d in pgp_certifier_details(block)})
 
 
 def pgp_signature_issuers(text: str) -> list:
