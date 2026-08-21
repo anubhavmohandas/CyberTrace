@@ -21,12 +21,14 @@ from __future__ import annotations
 
 import csv
 import json
+import sqlite3
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "external_data" / "ellipticpp"
 ORIGINAL_DIR = DATA_DIR / "original"
 MANIFEST_PATH = DATA_DIR / "manifest.json"
+INDEX_PATH = DATA_DIR / "index.sqlite"
 
 # Elliptic/Elliptic++ convention, both datasets: 1=illicit, 2=licit, 3=unknown.
 CLASS_NAMES = {"1": "illicit", "2": "licit", "3": "unknown"}
@@ -111,10 +113,174 @@ def wallet_label_counts() -> Dict[str, int]:
     return counts
 
 
-def lookup_wallet(address: str) -> Optional[Dict[str, Any]]:
-    """First matching row for one address, or None. O(n) scan -- fine for an
-    occasional offline lookup, not for repeated calls over many addresses."""
+def index_available() -> bool:
+    """Whether the local lookup index has been built (see build_index)."""
+    return INDEX_PATH.exists()
+
+
+def _dedupe_wallets(columns: List[str]) -> Iterator[tuple]:
+    """One row per address for the index, not one per (address, time step).
+
+    wallets_features_classes_combined.csv carries a genuine time series (an
+    address's behavioral features at each time step it was observed), but
+    lookup_wallet only ever needs the latest snapshot -- the most complete
+    lifetime-aggregate view -- plus which time steps were observed at all.
+    Storing every intermediate snapshot's 55-feature blob in the index (1.27M
+    rows) for data no query reads back would triple the index for nothing;
+    this collapses it to one row per address (~823K) up front, in memory,
+    before anything is written to disk.
+
+    features is stored as a JSON array in `columns` order rather than a JSON
+    object: the object form repeats all 55 (verbose) column names on every one
+    of 823K rows, which measured out to being the index's single largest
+    component -- larger than deduping the time series saved. The array form
+    plus the one `columns` row in `meta` carries the same information.
+    """
+    latest: Dict[str, tuple] = {}   # address -> (time_step_int, label, features)
+    steps: Dict[str, list] = {}     # address -> [time_step, ...] in file order
     for row in iter_wallets():
-        if row["address"] == address:
-            return row
-    return None
+        addr = row["address"]
+        ts_raw = row.get("time_step")
+        try:
+            ts = int(float(ts_raw))
+        except (TypeError, ValueError):
+            ts = -1
+        steps.setdefault(addr, []).append(ts_raw)
+        cur = latest.get(addr)
+        if cur is None or ts >= cur[0]:
+            latest[addr] = (ts, row["dataset_label"], row["features"])
+    for addr, (_, label, features) in latest.items():
+        ordered = [features.get(c) for c in columns]
+        yield (addr, label, json.dumps(ordered, separators=(",", ":")),
+               ",".join(steps[addr]))
+
+
+def build_index(force: bool = False) -> Path:
+    """Build a local read-only SQLite index over the wallet and address-graph
+    CSVs, so a single-address lookup is an indexed query instead of a full
+    scan of a 600MB+ file.
+
+    A one-time, minutes-long offline step (823K addresses after dedup, 2.87M
+    address edges) -- not run implicitly by lookup_wallet/wallet_neighbors,
+    which raise a clear error instead if the index is missing. That keeps a
+    live enrichment call from stalling for minutes the first time it runs; see
+    bitcoin_module.BitcoinModule._check_ellipticpp.
+
+    The index itself stays local context (external_data/ellipticpp/, already
+    gitignored, and *.sqlite is gitignored globally) -- it is a cache over the
+    dataset, not a copy of it into CyberTrace's own evidence.db.
+    """
+    if INDEX_PATH.exists() and not force:
+        return INDEX_PATH
+    with open(ORIGINAL_DIR / "wallets_features_classes_combined.csv",
+              newline="", encoding="utf-8") as f:
+        header = next(csv.reader(f))
+    columns = [c for c in header if c not in ("address", "Time step", "class")]
+
+    tmp_path = INDEX_PATH.with_suffix(".sqlite.building")
+    tmp_path.unlink(missing_ok=True)
+    conn = sqlite3.connect(tmp_path)
+    try:
+        conn.executescript("""
+            PRAGMA journal_mode=OFF;
+            PRAGMA synchronous=OFF;
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE wallets (
+                address TEXT NOT NULL, dataset_label TEXT,
+                features TEXT, time_steps TEXT
+            );
+            CREATE TABLE addr_edges (
+                input_address TEXT NOT NULL, output_address TEXT NOT NULL
+            );
+        """)
+        conn.execute("INSERT INTO meta (key, value) VALUES ('feature_columns', ?)",
+                     (json.dumps(columns),))
+        conn.executemany(
+            "INSERT INTO wallets (address, dataset_label, features, time_steps) "
+            "VALUES (?,?,?,?)", _dedupe_wallets(columns))
+        conn.executemany(
+            "INSERT INTO addr_edges (input_address, output_address) VALUES (?,?)",
+            ((e["source_address"], e["target_address"]) for e in iter_addr_addr_edges()))
+        conn.executescript("""
+            CREATE INDEX idx_wallets_address ON wallets(address);
+            CREATE INDEX idx_edges_input ON addr_edges(input_address);
+            CREATE INDEX idx_edges_output ON addr_edges(output_address);
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+    tmp_path.replace(INDEX_PATH)
+    return INDEX_PATH
+
+
+def lookup_wallet(address: str) -> Optional[Dict[str, Any]]:
+    """Compact external-context result for one address, or None if it never
+    appears in the dataset. Indexed -- O(log n), not a file scan.
+
+    class is address-level in the source data (one label per address, see
+    wallets_classes.csv). time_steps says which points in the dataset's
+    timeline observed this address; features is the LATEST time step's row,
+    whose lifetime-aggregate columns are the most complete (see build_index /
+    _dedupe_wallets, which collapses the source's per-time-step rows to this
+    one before the index is ever written).
+
+    Raises RuntimeError if build_index() has not been run yet -- silently
+    falling back to the O(n) scan would make the "efficient lookup" this index
+    exists for invisible until someone profiles a slow investigation.
+    """
+    if not index_available():
+        raise RuntimeError(
+            "Elliptic++ lookup index not built yet -- call "
+            "cybertrace.integrations.ellipticpp.build_index() once first "
+            "(offline, one-time, several minutes).")
+    conn = sqlite3.connect(f"file:{INDEX_PATH}?mode=ro", uri=True)
+    try:
+        columns = json.loads(conn.execute(
+            "SELECT value FROM meta WHERE key='feature_columns'").fetchone()[0])
+        row = conn.execute(
+            "SELECT dataset_label, features, time_steps FROM wallets "
+            "WHERE address=?", (address,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    label, features_json, time_steps_csv = row
+    time_steps = time_steps_csv.split(",") if time_steps_csv else []
+    return {
+        "source": "ellipticpp",
+        "provenance": "OFFLINE_DATASET",
+        "entity_type": "BTC_ADDRESS",
+        "address": address,
+        "dataset_label": label,
+        "dataset_label_name": CLASS_NAMES.get(label, "unknown"),
+        "time_steps": time_steps,
+        "record_count": len(time_steps),
+        "features": dict(zip(columns, json.loads(features_json))),
+    }
+
+
+def wallet_neighbors(address: str, limit: int = 50) -> List[str]:
+    """Addresses connected to this one in the AddrAddr co-transaction graph
+    (both directions, deduped) -- offline research/evaluation only. Never fed
+    into CyberTrace's own PART_OF_CLUSTER edges: those come from live co-spend
+    evidence (a stronger evidentiary class -- common-input-ownership over a
+    real transaction, see evidence.enrich_bitcoin), and this dataset's edges
+    must not be conflated with them.
+
+    Raises RuntimeError if build_index() has not been run yet (see
+    lookup_wallet).
+    """
+    if not index_available():
+        raise RuntimeError(
+            "Elliptic++ lookup index not built yet -- call "
+            "cybertrace.integrations.ellipticpp.build_index() once first "
+            "(offline, one-time, several minutes).")
+    conn = sqlite3.connect(f"file:{INDEX_PATH}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT output_address FROM addr_edges WHERE input_address=? "
+            "UNION SELECT input_address FROM addr_edges WHERE output_address=? "
+            "LIMIT ?", (address, address, limit)).fetchall()
+    finally:
+        conn.close()
+    return [r[0] for r in rows if r[0] != address]

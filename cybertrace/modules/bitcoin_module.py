@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 import aiohttp
 
+from ..integrations import ellipticpp
 from .base import BaseModule, ModuleResult, SourceResult
 
 
@@ -40,6 +41,7 @@ class BitcoinModule(BaseModule):
                 ('blockstream', self._check_blockstream(target)),
                 ('bitcoinabuse', self._check_bitcoin_abuse(target)),
                 ('chainabuse', self._check_chainabuse(target, 'BTC')),
+                ('ellipticpp', self._check_ellipticpp(target)),
             ]
         elif result.target_type == 'ethereum':
             sources = [
@@ -321,6 +323,54 @@ class BitcoinModule(BaseModule):
             },
         )
 
+    async def _check_ellipticpp(self, address: str) -> SourceResult:
+        """Offline lookup against the local Elliptic++ dataset index (KDD'23
+        Bitcoin transaction/wallet graph) -- no network call, just a local
+        SQLite read, so it runs beside the live blockchain-explorer sources
+        above rather than instead of them.
+
+        A dataset_label here is the *dataset authors'* classification of this
+        address in isolation, built for a fraud-detection paper -- it is
+        external dataset context, never CyberTrace evidence of who controls
+        the address. evidence.enrich_bitcoin writes it as address metadata
+        only; see that function's docstring for why no relationship is ever
+        created from it. See cybertrace/integrations/ellipticpp.py and
+        external_data/ellipticpp/manifest.json for the full safety boundary.
+
+        Degrades the same way chainabuse does without a key: dataset not
+        downloaded, or downloaded but not indexed yet (build_index() is a
+        deliberate offline step -- see that function's docstring), both
+        report success=False with an explanatory error rather than raising.
+        """
+        if not ellipticpp.available():
+            return SourceResult(
+                source='ellipticpp', success=False,
+                error='Elliptic++ dataset not downloaded locally',
+            )
+        if not ellipticpp.index_available():
+            return SourceResult(
+                source='ellipticpp', success=False,
+                error='Elliptic++ dataset downloaded but not indexed '
+                      '(run ellipticpp.build_index() once, offline)',
+            )
+        row = ellipticpp.lookup_wallet(address)
+        if row is None:
+            return SourceResult(
+                source='ellipticpp', success=True,
+                data={'seen_in_dataset': False},
+            )
+        return SourceResult(
+            source='ellipticpp', success=True,
+            data={
+                'seen_in_dataset': True,
+                'dataset_label': row['dataset_label'],
+                'dataset_label_name': row['dataset_label_name'],
+                'time_steps': row['time_steps'],
+                'record_count': row['record_count'],
+                'feature_count': len(row['features']),
+            },
+        )
+
     async def _check_ethplorer(self, address: str) -> SourceResult:
         """Query Ethplorer API (no auth for basic)."""
         url = f"https://api.ethplorer.io/getAddressInfo/{address}?apiKey=freekey"
@@ -405,7 +455,18 @@ class BitcoinModule(BaseModule):
             if data.get('reported'):
                 summary['reported_scam'] = True
                 summary['scam_report_count'] = data.get('report_count', 0)
-            
+
+            # Elliptic++ dataset context -- distilled, non-attributive; see
+            # _check_ellipticpp and evidence.enrich_bitcoin. Only set when the
+            # source actually ran (source == 'ellipticpp'): 'seen_in_dataset'
+            # alone is not enough to key off, since a live source could in
+            # principle emit an unrelated field by that name.
+            if source == 'ellipticpp' and data.get('seen_in_dataset'):
+                summary['ellipticpp_dataset_label'] = data.get('dataset_label')
+                summary['ellipticpp_dataset_label_name'] = data.get('dataset_label_name')
+                summary['ellipticpp_time_steps'] = data.get('time_steps')
+                summary['ellipticpp_record_count'] = data.get('record_count')
+
             # Connected addresses
             if 'connected_addresses' in data:
                 summary['connected_addresses'] = data['connected_addresses']

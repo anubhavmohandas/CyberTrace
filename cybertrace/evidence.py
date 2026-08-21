@@ -1341,6 +1341,19 @@ def enrich_bitcoin(store: EvidenceStore, snapshot_id: str, addr_id: str, summary
     occam: no exchange tagging or change-address heuristics — both need a
     labelled dataset this tool does not ship. The cluster therefore claims "one
     wallet", never "not an exchange"; correlate carries that caveat.
+
+    ellipticpp_* fields are the same non-attributive shape as reported_scam,
+    for the same reason and with a sharper failure mode if it were not: an
+    Elliptic++ "illicit" label is the DATASET AUTHORS' classification of this
+    address in isolation (a KDD'23 fraud-detection paper), not evidence about
+    who controls it. Two markets whose wallets are both dataset-labeled
+    illicit share nothing but a third party's fraud score, and scoring that as
+    SAME_OPERATOR would be the exact ecosystem-leakage failure this corpus
+    exists to catch (see corpus/labels.toml) — turned up to the case where the
+    shared thing is a risk label instead of a platform. Metadata only, no
+    relationship, ever — see
+    test_ellipticpp_illicit_label_never_links_two_unrelated_markets in
+    tests/test_correlate.py.
     """
     store.set_metadata(
         addr_id,
@@ -1348,7 +1361,15 @@ def enrich_bitcoin(store: EvidenceStore, snapshot_id: str, addr_id: str, summary
                              ("tx_count", summary.get("tx_count")),
                              ("first_tx", summary.get("first_seen")),
                              ("last_tx", summary.get("last_seen")),
-                             ("reported_scam", summary.get("reported_scam"))) if v})
+                             ("reported_scam", summary.get("reported_scam")),
+                             ("ellipticpp_dataset_label",
+                              summary.get("ellipticpp_dataset_label")),
+                             ("ellipticpp_dataset_label_name",
+                              summary.get("ellipticpp_dataset_label_name")),
+                             ("ellipticpp_time_steps",
+                              summary.get("ellipticpp_time_steps")),
+                             ("ellipticpp_record_count",
+                              summary.get("ellipticpp_record_count"))) if v})
 
     row = store._one("SELECT etype FROM entities WHERE entity_id=?", (addr_id,))
     etype = row["etype"] if row else "BTC_ADDRESS"

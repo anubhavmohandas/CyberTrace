@@ -123,6 +123,64 @@ class TestBitcoinModuleChainabuse:
             module.config.api_keys.chainabuse = None
 
 
+class TestBitcoinModuleEllipticpp:
+    """Local-index lookup, no network -- degrades the same way chainabuse does
+    without a key, but on dataset/index availability instead of a config key.
+    """
+
+    def test_degrades_gracefully_when_dataset_not_downloaded(self, monkeypatch):
+        import asyncio
+        from cybertrace.integrations import ellipticpp
+        monkeypatch.setattr(ellipticpp, "available", lambda: False)
+        module = BitcoinModule()
+        result = asyncio.run(module._check_ellipticpp('1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa'))
+        assert result.success is False
+        assert 'not downloaded' in result.error
+
+    def test_degrades_gracefully_when_index_not_built(self, monkeypatch):
+        import asyncio
+        from cybertrace.integrations import ellipticpp
+        monkeypatch.setattr(ellipticpp, "available", lambda: True)
+        monkeypatch.setattr(ellipticpp, "index_available", lambda: False)
+        module = BitcoinModule()
+        result = asyncio.run(module._check_ellipticpp('1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa'))
+        assert result.success is False
+        assert 'build_index' in result.error
+
+    def test_address_not_in_dataset_is_a_successful_negative(self, monkeypatch):
+        import asyncio
+        from cybertrace.integrations import ellipticpp
+        monkeypatch.setattr(ellipticpp, "available", lambda: True)
+        monkeypatch.setattr(ellipticpp, "index_available", lambda: True)
+        monkeypatch.setattr(ellipticpp, "lookup_wallet", lambda addr: None)
+        module = BitcoinModule()
+        result = asyncio.run(module._check_ellipticpp('1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa'))
+        assert result.success is True
+        assert result.data == {'seen_in_dataset': False}
+
+    def test_a_dataset_hit_carries_the_label_into_the_summary(self, monkeypatch):
+        """_build_summary only reads ellipticpp fields off the source actually
+        named 'ellipticpp' -- this pins that the label makes it all the way
+        from the source result into the module's summary dict, which is what
+        evidence.enrich_bitcoin's ellipticpp_* metadata is built from."""
+        import asyncio
+        from cybertrace.integrations import ellipticpp
+        monkeypatch.setattr(ellipticpp, "available", lambda: True)
+        monkeypatch.setattr(ellipticpp, "index_available", lambda: True)
+        monkeypatch.setattr(ellipticpp, "lookup_wallet", lambda addr: {
+            "address": addr, "dataset_label": "1", "dataset_label_name": "illicit",
+            "time_steps": ["25"], "record_count": 1, "features": {},
+        })
+        module = BitcoinModule()
+        result = ModuleResult(target='1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa',
+                              target_type='bitcoin', module='bitcoin')
+        result.sources['ellipticpp'] = asyncio.run(
+            module._check_ellipticpp('1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa'))
+        summary = module._build_summary(result)
+        assert summary['ellipticpp_dataset_label_name'] == 'illicit'
+        assert summary['ellipticpp_record_count'] == 1
+
+
 class TestUsernameModule:
     """Test Username module."""
 

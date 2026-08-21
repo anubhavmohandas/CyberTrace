@@ -1024,6 +1024,50 @@ def test_chainabuse_reports_never_link_two_unrelated_markets(tmp_path):
         assert run_correlation(store)["operators"] == []
 
 
+def test_ellipticpp_illicit_label_never_links_two_unrelated_markets(tmp_path):
+    """Adversarial false-attribution check for the Elliptic++ offline dataset
+    context: two markets whose wallets both carry the dataset's "illicit"
+    label share nothing but a third party's fraud-classification paper. That
+    is the ecosystem-leakage failure shape (corpus/labels.toml) recast with a
+    risk label standing in for a shared platform, and it must fail the same
+    way — same discipline as reported_scam
+    (test_chainabuse_reports_never_link_two_unrelated_markets), see
+    evidence.enrich_bitcoin's ellipticpp_* docstring section.
+    """
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, bitcoin_addresses=[BTC_VALID]), store)
+        ingest(_result(ONION_B, bitcoin_addresses=[BTC_OTHER]), store)
+
+        for addr in (BTC_VALID, BTC_OTHER):
+            entity = store.find_entity("BTC_ADDRESS", addr)
+            target = store.upsert_target("btc:" + addr)
+            sid = store.insert_snapshot(target, {}, "bitcoin")
+            enrich_bitcoin(store, sid, entity, {
+                "address": addr,
+                "ellipticpp_dataset_label": "1",
+                "ellipticpp_dataset_label_name": "illicit",
+                "ellipticpp_time_steps": ["25", "26"],
+                "ellipticpp_record_count": 2,
+            }, "bitcoin")
+
+        addr_a = store.find_entity("BTC_ADDRESS", BTC_VALID)
+        addr_b = store.find_entity("BTC_ADDRESS", BTC_OTHER)
+        assert store.metadata(addr_a)["ellipticpp_dataset_label_name"] == "illicit"
+        assert store.metadata(addr_b)["ellipticpp_dataset_label_name"] == "illicit"
+
+        # No edge between the two addresses, in either direction: the dataset
+        # label carries no relationship, so there is nothing to create one.
+        assert not store._all(
+            "SELECT 1 FROM relationships WHERE source_entity_id=? AND target_entity_id=?",
+            (addr_a, addr_b))
+        assert not store._all(
+            "SELECT 1 FROM relationships WHERE source_entity_id=? AND target_entity_id=?",
+            (addr_b, addr_a))
+        clusters = crypto_clusters(store)
+        assert addr_a not in clusters and addr_b not in clusters
+        assert run_correlation(store)["operators"] == []
+
+
 # --- broadened contradictions ------------------------------------------------
 
 def test_two_uncertified_keys_for_one_identity_contradict_each_other(tmp_path):

@@ -31,9 +31,12 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, List, Optional
+
+from ..normalize import pgp_fingerprint
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "external_data" / "evolution"
 ZIP_PATH = DATA_DIR / "original" / "data-and-readme.zip"
@@ -78,6 +81,101 @@ def iter_vendors() -> Iterator[Dict[str, Any]]:
     for row in _rows("market/vendors.tsv"):
         yield {"source": "evolution", "provenance": "OFFLINE_DATASET",
                "entity_type": "FORUM_ACCOUNT", **row}
+
+
+# The TSV export strips every literal newline out of pgp_key -- confirmed by
+# reading the real field, not assumed: a properly wrapped armored block would
+# split into dozens of csv.reader lines, and every row here is exactly one.
+# That collapses "-----BEGIN...-----", "Version: ...", the base64 body and
+# "-----END...-----" onto a single line, and normalize._armor_payload reads
+# armor line by line -- its first line-startswith("-----BEGIN PGP") check
+# swallows the *entire* flattened string in one `continue`, so every one of
+# these keys silently failed to parse (measured: 0/2000 fingerprints before
+# this fix). _reflow_armor reconstructs a real multi-line block so the
+# existing parser -- unmodified -- can read it, the same way it reads a
+# normally-wrapped key from a live page.
+_ARMOR_BLOCK = re.compile(r"-----BEGIN (PGP [A-Z ]+?)-----(.*)-----END \1-----", re.DOTALL)
+_BASE64_RUN = re.compile(r"[A-Za-z0-9+/]{20,}")
+
+
+def _reflow_armor(block: str) -> Optional[str]:
+    """Rewrap a newline-stripped armored block into one `_armor_payload` can
+    read: BEGIN/END on their own lines, base64 body wrapped at 64 columns.
+
+    The base64 body is found as the single longest run of base64-alphabet
+    characters inside the BEGIN/END markers -- reliable because armor header
+    lines ("Version: GnuPG v2.0.14 (GNU/Linux)") are short and broken up by
+    spaces/colons/parens, while the key body is one uninterrupted run of
+    thousands of characters. Padding is recomputed from the body's own length
+    rather than trusted from the source text: the flattened export glues the
+    body's `=` padding directly against the CRC24 checksum's leading `=`
+    (`...c==/UZx-----END...`), and splitting that boundary by pattern-matching
+    is less reliable than simply deriving the correct padding from `len(body)
+    % 4`, which is always right and makes the checksum irrelevant --
+    _armor_payload discards checksum lines unconditionally anyway.
+    """
+    m = _ARMOR_BLOCK.search(block)
+    if not m:
+        return None
+    kind, inner = m.group(1), m.group(2)
+    runs = _BASE64_RUN.findall(inner)
+    if not runs:
+        return None
+    body = max(runs, key=len)
+    body += "=" * ((-len(body)) % 4)
+    wrapped = "\n".join(body[i:i + 64] for i in range(0, len(body), 64))
+    return f"-----BEGIN {kind}-----\n\n{wrapped}\n-----END {kind}-----"
+
+
+def vendor_pgp_fingerprint(pgp_key: str) -> Optional[str]:
+    """True OpenPGP fingerprint of a vendors.tsv pgp_key field, or None.
+
+    None both for a field that carries no key and for one this cannot parse
+    -- a PGP PRIVATE KEY BLOCK (246 in this dataset: a vendor pasted the wrong
+    key into a public listing field) parses to no tag-6 packet by design,
+    same as normalize.pgp_fingerprint on any secret-key block; some public
+    blocks are genuinely truncated in the source scrape and stay unparseable
+    no matter how they're rewrapped. Measured on the real dataset: 32,304 of
+    54,294 PGP PUBLIC KEY BLOCK rows resolve to a fingerprint (2,429 distinct
+    keys -- the same vendor's key repeats across scrape snapshots).
+    """
+    if not pgp_key or "BEGIN PGP" not in pgp_key or "PRIVATE KEY" in pgp_key:
+        return None
+    reflowed = _reflow_armor(pgp_key)
+    return pgp_fingerprint(reflowed) if reflowed else None
+
+
+def iter_vendor_pgp_fingerprints() -> Iterator[Dict[str, Any]]:
+    """One record per vendor row with a parseable public key: vid, username,
+    the true fingerprint and the dataset's own original armored text
+    (preserved verbatim, per the brief's Section 9/11 provenance
+    requirements) -- rows whose key does not parse are skipped, not yielded
+    as a null fingerprint, so a caller never has to filter None back out."""
+    for row in iter_vendors():
+        fpr = vendor_pgp_fingerprint(row.get("pgp_key") or "")
+        if not fpr:
+            continue
+        yield {"source": "evolution", "provenance": "OFFLINE_DATASET",
+               "entity_type": "PGP_KEY", "fingerprint": fpr,
+               "vid": row.get("vid"), "username": row.get("username"),
+               "armored_original": row.get("pgp_key")}
+
+
+def match_pgp_fingerprint(fingerprint: str) -> List[dict]:
+    """Vendor records in Evolution whose key resolves to this fingerprint, or
+    [] if none do -- the offline half of the Section 9 experiment ("does
+    CyberTrace's own normalized PGP identity show up in this historical
+    corpus"). The caller classifies a hit as EXTERNAL_DATASET_MATCH, never as
+    stronger evidence than that: a vendor holding a key in 2014-2015 says
+    nothing about who holds it now.
+
+    occam: O(n) scan over ~54K rows (a few seconds), same ceiling
+    lookup_wallet's plain scan documented before ellipticpp.build_index()
+    existed. Build a fingerprint->rows index if this becomes a repeated,
+    hot-path lookup rather than an occasional offline check.
+    """
+    fingerprint = fingerprint.upper()
+    return [r for r in iter_vendor_pgp_fingerprints() if r["fingerprint"] == fingerprint]
 
 
 def iter_listings() -> Iterator[Dict[str, Any]]:
