@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from cybertrace.correlate import (
     FUNNELS,
     COMMON_ARTIFACT_FLOOR, LEAD_FLOOR,
-    canonical_entity_key, candidate_infra, candidate_operators,
+    canonical_entity_key, candidate_infra, candidate_ips, candidate_operators,
     confidence_level, contradictions_from_identity, contradictions_from_key_temporal,
     crypto_clusters, detect_successors,
     entity_discrimination, entity_funnel_profile, feedback_discrimination, markets_for_entity,
@@ -808,6 +808,39 @@ def test_a_favicon_hit_keeps_the_hop_it_was_found_through(tmp_path):
         assert run_correlation(store)["operators"] == []
 
 
+def test_a_direct_ip_leak_is_not_also_filed_as_a_weaker_candidate(tmp_path):
+    """One observation must not become two signals.
+
+    darkweb_module unions every IP-shaped hit — header/body leaks, misconfig
+    leaks AND Shodan favicon matches — into `candidate_operator_ips`, because
+    that one list is what the enrichment pivot sweeps. A header leak already
+    earns its own HOSTED_ON edge at the model's top confidence; refiling the
+    same address as CANDIDATE_IP ("a lead, not a fact" — correlate.py's own
+    words for that weight) would claim a second, weaker signal out of a single
+    fact. A genuinely pivot-only address — never seen on the page, matched by
+    icon hash alone — is the case CANDIDATE_IP exists for, and must still get
+    it.
+    """
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(
+            ONION_A, seen=JAN,
+            leaked_public_ipv4=['198.51.100.9'],
+            candidate_operator_ips=['198.51.100.9', '203.0.113.7'],
+            favicon={'favicon_mmh3': 12345, 'shodan_total': 1,
+                     'shodan_matches': [{'ip': '203.0.113.7', 'org': 'Example Hosting'}]},
+        ), store)
+        market = store.find_entity("MARKET", ONION_A)
+        leaked = store.find_entity("IP", '198.51.100.9')
+        pivoted = store.find_entity("IP", '203.0.113.7')
+
+        rtypes = {(r["target_entity_id"], r["rtype"]) for r in store._all(
+            "SELECT target_entity_id, rtype FROM relationships WHERE source_entity_id=?",
+            (market,))}
+        assert (leaked, "HOSTED_ON") in rtypes
+        assert (leaked, "CANDIDATE_IP") not in rtypes  # no redundant weaker edge
+        assert (pivoted, "CANDIDATE_IP") in rtypes      # pivot-only IP still lands
+
+
 def test_a_shared_certifier_is_not_a_shared_operator(tmp_path):
     """The worst false-attribution path the engine had.
 
@@ -912,6 +945,83 @@ def test_counterparty_addresses_never_join_the_cluster(tmp_path):
         clusters = crypto_clusters(store)
         assert store.find_entity("BTC_ADDRESS", counterparty_peer) is None  # never upserted
         assert clusters[addr] == clusters[store.find_entity("BTC_ADDRESS", cospend_peer)]
+
+
+def test_two_strangers_on_one_shared_host_are_not_linked(tmp_path):
+    """Shared hosting is not a shared operator — measured live, not assumed.
+
+    Before this fix, two markets that merely leaked the same literal IP (a
+    cheap/shared VPS, a CDN edge, a hosting provider's whole /24 — nothing in
+    a bare HOSTED_ON observation distinguishes those from one dedicated box)
+    scored 0.9 on `shared_ip` alone and reached an ASSERTED `LINKED_TO` edge:
+    `suppressed` was None, not REFERENCES_ONLY. `shared_ip` carried none of
+    the corpus-measured discipline `shared_favicon` has (0 IP candidates in
+    97 captures — runs/README.md — so there was no rarity/precision figure to
+    bound it), and nothing in NON_ATTRIBUTIVE_SIGNALS caught it, unlike
+    shared_domain and shared_favicon. Two markets on one host is still a real
+    lead — candidate_ips() ranks it — it must never be the claim on its own.
+    """
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        for onion in (ONION_A, ONION_B):
+            ingest(_result(onion, seen=JAN, leaked_public_ipv4=['203.0.113.55']), store)
+
+        pairs = detect_successors(store, min_score=0.0)
+        assert pairs and "shared_ip" in pairs[0]["signals"]
+        assert pairs[0]["score"] >= 0.5, "refused on the gate, not a low score"
+        assert pairs[0]["suppressed"] == "REFERENCES_ONLY"
+        assert pairs[0]["relation"] is None
+        assert run_correlation(store)["operators"] == []
+        assert not store._all(
+            "SELECT 1 FROM relationships WHERE rtype IN ('SUCCESSOR_OF','LINKED_TO')")
+
+        # Still visible to the analyst as exactly what it is: a shared host.
+        ips = candidate_ips(store)
+        assert ips and ips[0]["value"] == '203.0.113.55' and ips[0]["n_markets"] == 2
+
+
+def test_chainabuse_reports_never_link_two_unrelated_markets(tmp_path):
+    """Two markets, two different wallets, each independently reported to
+    Chainabuse under the same scam category — the same failure shape as
+    `shared_platform_not_shared_control`, on a third-party report instead of a
+    co-visited banner. `reported_scam`/`scam_categories` land as metadata via
+    `evidence.enrich_bitcoin` (bitcoin_module.py's own docstring: "never an
+    operator-funnel signal") with no relationship created at all, so nothing
+    here can wire the two addresses together, however many reports either
+    carries or however identical the category. Locks that guarantee in so a
+    future change to enrich_bitcoin cannot quietly turn a report into an edge.
+    """
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, bitcoin_addresses=[BTC_VALID]), store)
+        ingest(_result(ONION_B, bitcoin_addresses=[BTC_OTHER]), store)
+
+        for addr in (BTC_VALID, BTC_OTHER):
+            entity = store.find_entity("BTC_ADDRESS", addr)
+            target = store.upsert_target("btc:" + addr)
+            sid = store.insert_snapshot(target, {}, "bitcoin")
+            enrich_bitcoin(store, sid, entity, {
+                "address": addr,
+                "reported_scam": True,
+                "scam_categories": ["RUG_PULL"],
+                "trusted_report_count": 3,
+            }, "bitcoin")
+
+        addr_a = store.find_entity("BTC_ADDRESS", BTC_VALID)
+        addr_b = store.find_entity("BTC_ADDRESS", BTC_OTHER)
+        assert store.metadata(addr_a)["reported_scam"] is True
+        assert store.metadata(addr_b)["reported_scam"] is True
+
+        # The market still USES_BTC its own wallet — that edge is expected.
+        # What must not exist is any edge BETWEEN the two addresses: the
+        # report carries no relationship, so there is nothing to create one.
+        assert not store._all(
+            "SELECT 1 FROM relationships WHERE source_entity_id=? AND target_entity_id=?",
+            (addr_a, addr_b))
+        assert not store._all(
+            "SELECT 1 FROM relationships WHERE source_entity_id=? AND target_entity_id=?",
+            (addr_b, addr_a))
+        clusters = crypto_clusters(store)
+        assert addr_a not in clusters and addr_b not in clusters
+        assert run_correlation(store)["operators"] == []
 
 
 # --- broadened contradictions ------------------------------------------------
@@ -1312,6 +1422,10 @@ def test_an_index_payload_seeds_no_enrichment_pivot():
 #   fingerprint  Collected because a hand-written banner is a real tell, but in
 #                no funnel: a shared banner is shared software, not a shared
 #                operator. Same reasoning as DISCOVERED_VIA — see FUNNELS.
+#   tls_cert     Same rung as fingerprint, same reason: HAS_FINGERPRINT, not
+#                USES_CERT (which IS in f5_clearnet), because no pair in
+#                corpus/labels.toml is yet known to share a TLS cert — see the
+#                comment above evidence.ingest's tls_cert block.
 #   breach /     The modules fetch these and nothing consumes them. Wiring them
 #   social       is a scoring decision, not a plumbing one, and is unmade.
 #   certificate/ Declared in ENTITY_TYPES and already scored by candidate_infra
@@ -1336,6 +1450,7 @@ WIRING_MAP = {
     'favicon':     (dict(favicon={'favicon_mmh3': 12345}),             'pair'),
     'fingerprint': (dict(server_fingerprint={
                         'X-Powered-By': 'the almighty n0tr1v'}),       'stored'),
+    'tls_cert':    (dict(tls_cert={'cert_sha256': 'a' * 64}),          'stored'),
     'breach':      (dict(breaches=[{'name': 'X', 'email': 'op@proton.me'}]), 'dropped'),
     'social':      (dict(social_accounts=[{'site': 'x', 'handle': 'op'}]),   'dropped'),
     'certificate': (dict(certificates=[{'common_name': 'shop.example',

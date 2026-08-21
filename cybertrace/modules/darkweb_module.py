@@ -878,9 +878,15 @@ class DarkwebModule(BaseModule):
              for ip, where in ev_header_ip.items() if ip not in artifact_evidence})
         leaked_ips = sorted(set(agg['leaked_public_ipv4']) | set(header_ips))
 
-        # Misconfig probes + favicon/Shodan pivot (each best-effort).
-        misconfigs = await self._probe_misconfigs(base)
-        favicon = await self._favicon_pivot(base, html)
+        # Misconfig probes + favicon/Shodan pivot + TLS cert: independent,
+        # each already best-effort/exception-safe, so run concurrently rather
+        # than paying three sequential Tor round-trips (TLS alone can cost up
+        # to request_timeout on an onion that never answers on :443).
+        misconfigs, favicon, tls_cert = await asyncio.gather(
+            self._probe_misconfigs(base),
+            self._favicon_pivot(base, html),
+            self._probe_tls_cert(served_host),
+        )
 
         candidate_ips = sorted(
             set(leaked_ips)
@@ -914,6 +920,7 @@ class DarkwebModule(BaseModule):
                 'leaked_public_ipv4': leaked_ips,
                 'misconfigurations': misconfigs,
                 'favicon': favicon,
+                'tls_cert': tls_cert,
                 'candidate_operator_ips': candidate_ips,
                 'onion_links_found': len(onion_links),
                 'onion_addresses_found': onion_links[:10],
@@ -1115,6 +1122,59 @@ class DarkwebModule(BaseModule):
             for h in sd.get('matches', [])[:10]
         ]
         return out
+
+    async def _probe_tls_cert(self, onion_host: str) -> Dict[str, Any]:
+        """
+        Attempt a raw TLS handshake to the onion on :443 over the Tor SOCKS
+        proxy and fingerprint whatever certificate it presents.
+
+        Most hidden services only speak plain HTTP — Tor already encrypts the
+        circuit, so operators have no protocol reason to layer TLS on top —
+        which makes an onion that DOES present a cert an operator choice worth
+        noting: SHARED_INFRASTRUCTURE (two onions, one cert), never an
+        operator claim on its own. See the ingest()-side comment for why this
+        stays a HAS_FINGERPRINT capture and is not yet a scoring signal.
+
+        occam: fingerprint only (SHA-256 of the DER bytes) — no subject/
+        issuer/validity decode, which needs the `cryptography` package and
+        nothing downstream reads those fields yet. Add it if a real pivot
+        needs them.
+        """
+        try:
+            der = await asyncio.get_event_loop().run_in_executor(
+                None, self._fetch_tls_cert_der, onion_host)
+        except Exception as e:
+            return {'note': f'TLS probe failed: {e}'}
+        if der is None:
+            return {'note': 'no TLS cert (plain HTTP only, or connection refused)'}
+        return {'cert_sha256': hashlib.sha256(der).hexdigest(), 'cert_bytes': len(der)}
+
+    def _fetch_tls_cert_der(self, onion_host: str) -> Optional[bytes]:
+        """Blocking half of _probe_tls_cert — run off the event loop via
+        run_in_executor. PySocks (`socks`) and `ssl` are stdlib/already a
+        hard dependency (requirements.txt); imported locally since nothing
+        else in this module needs a raw socket."""
+        import socks
+        import ssl
+
+        sock = socks.socksocket()
+        sock.set_proxy(socks.SOCKS5, self.config.tor.socks_host,
+                       self.config.tor.socks_port, rdns=True)
+        sock.settimeout(self.config.request_timeout)
+        try:
+            sock.connect((onion_host, 443))
+            # verify_mode=CERT_NONE is correct here, not a corner cut: onion
+            # certs are self-signed by construction (there is no CA to check
+            # against), so validating would reject every one of them.
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with ctx.wrap_socket(sock, server_hostname=onion_host) as tls:
+                return tls.getpeercert(binary_form=True)
+        except (OSError, ssl.SSLError):
+            return None
+        finally:
+            sock.close()
 
     async def _fetch_onion_directories(self) -> SourceResult:
         """

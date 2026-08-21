@@ -1,0 +1,47 @@
+{
+  "dataset": "Elliptic++",
+  "description": "Bitcoin transaction and wallet-address graph with illicit/licit/unknown classes (Elmougy & Liu, KDD'23).",
+  "source_url": "https://github.com/git-disl/EllipticPlusPlus",
+  "paper_doi": "10.1145/3580305.3599803",
+  "paper_arxiv": "https://arxiv.org/pdf/2306.06108.pdf",
+  "citation": "Youssef Elmougy and Ling Liu. 2023. Demystifying Fraudulent Transactions and Illicit Nodes in the Bitcoin Network for Financial Forensics. In Proceedings of the 29th ACM SIGKDD Conference on Knowledge Discovery and Data Mining (KDD '23). ACM.",
+  "license_status": "UNKNOWN",
+  "license_note": "No LICENSE file exists in the GitHub repo or either distribution channel. Citation to the KDD'23 paper is requested by the authors' README. Treat as non-redistributable: kept local under external_data/ (gitignored), never committed, never republished.",
+  "dataset_version": "as published to GitHub main / Google Drive, retrieved 2026-08-21",
+  "distribution_channels": [
+    {
+      "channel": "github_repo_zip",
+      "note": "GitHub zip download of the repo. Notebooks/README/images are real; the 9 dataset CSVs inside are Git LFS pointer stubs (132-134 bytes each), NOT the actual data.",
+      "archive_file": "original/EllipticPlusPlus-main.zip",
+      "archive_sha256": "8f08a73a861d6a46dfd473df16999d454c628326a9717cd0ddbd6f88319d94e8",
+      "archive_size_bytes": 8629112,
+      "user_supplied": true
+    },
+    {
+      "channel": "google_drive_folder",
+      "note": "The README's actual 'DATASET CAN BE FOUND HERE' link. This is where the 9 real CSVs were fetched from (via gdown, a dev-time-only tool -- not added to requirements.txt).",
+      "url": "https://drive.google.com/drive/folders/1MRPXz79Lu_JGLlJ21MDfML44dKN9R08l",
+      "retrieved_at": "2026-08-21T08:16:00Z"
+    }
+  ],
+  "integrity_cross_check": "Every downloaded CSV's SHA-256 matches the 'oid sha256:...' declared inside the corresponding Git LFS pointer stub found in the GitHub zip (verified for AddrAddr_edgelist.csv, txs_features.csv, wallets_features_classes_combined.csv) -- the Drive copy and the LFS-tracked copy are byte-identical.",
+  "files": [
+    {"name": "Actors Dataset/AddrAddr_edgelist.csv",   "local": "original/AddrAddr_edgelist.csv",              "rows": 2868964,  "sha256": "ffba894458e262a691e5e4d006f5dc1d0e069fabfe828f443fd157bf7f8393f2"},
+    {"name": "Actors Dataset/AddrTx_edgelist.csv",     "local": "original/AddrTx_edgelist.csv",                "rows": 477117,   "sha256": "f5f903f752387f66a1bccaeff54e293b2e8470fcddf5eb56b88aa06fd23a8f3b"},
+    {"name": "Actors Dataset/TxAddr_edgelist.csv",     "local": "original/TxAddr_edgelist.csv",                "rows": 837124,   "sha256": "9f5afbdde7bc3d91fb7a4655be55799d6504cd0063ae55a0753a5a41189932b8"},
+    {"name": "Actors Dataset/wallets_classes.csv",     "local": "original/wallets_classes.csv",                "rows": 822942,   "sha256": "4e5132c99f941666bf1fefd4100a1428d339c9252ec6987909e1adf8eac902f9"},
+    {"name": "Actors Dataset/wallets_features.csv",    "local": "original/wallets_features.csv",               "rows": 1268260,  "sha256": "317daca2810c355ddfdb8c0dab34cf11d1aa90567fe975090c7e5a901386eb77"},
+    {"name": "Actors Dataset/wallets_features_classes_combined.csv", "local": "original/wallets_features_classes_combined.csv", "rows": 1268260, "sha256": "99bf27f7b76d6578ad59e0a61ec225ecd656fef6ae6958f29435ab286be2cc7d"},
+    {"name": "Transactions Dataset/txs_classes.csv",   "local": "original/txs_classes.csv",                    "rows": 203769,   "sha256": "013a11742969071a906878ded0319571df0657f9b7133e5c6cdb36217bf0d240"},
+    {"name": "Transactions Dataset/txs_edgelist.csv",  "local": "original/txs_edgelist.csv",                   "rows": 234355,   "sha256": "a35053ba68a98e4382cae2ba65b9d9e36b23b6439e02dff084971b1b72a5156e"},
+    {"name": "Transactions Dataset/txs_features.csv",  "local": "original/txs_features.csv",                   "rows": 203769,   "sha256": "2db326ec8ddb68f1d810c1834e1ff62e0a8300378f0984a1e3b2ca82a439821b"}
+  ],
+  "schema_notes": {
+    "transactions": "txs_features.csv: txId + Time step (1-49) + 183 anonymized numeric features (Local_feature_1..N). txs_classes.csv: txId -> class (1=illicit, 2=licit, 3=unknown). txs_edgelist.csv: txId1 -> txId2, a Bitcoin money-flow edge (tx-tx graph).",
+    "wallets": "wallets_features.csv: address + Time step + 55 named behavioral features (num_txs_as_sender, btc_transacted_*, fees_*, ...). wallets_classes.csv: address -> class (1=illicit, 2=licit, 3=unknown). AddrAddr_edgelist.csv: input_address -> output_address (address-address graph, one hop per shared transaction). AddrTx_edgelist.csv / TxAddr_edgelist.csv: bipartite address<->transaction edges.",
+    "class_semantics": "Classes are DATASET-PROVIDED annotations from the authors' labeling process (per the KDD'23 paper), not independently-verified ground truth about real-world operators. class=3 (unknown) is the overwhelming majority in both datasets.",
+    "identifiers": "txId is the dataset's own integer id, NOT a real Bitcoin txid/hash. address IS a real base58/bech32 Bitcoin address string and can be matched directly against CyberTrace BTC_ADDRESS entities.",
+    "ground_truth": "Dataset-provided labels only (OFFLINE_DATASET / dataset_label in the adapter's terms) -- never treated as GROUND_TRUTH about a specific investigation's target."
+  },
+  "safety_boundary": "A wallets_classes.csv class=1 (illicit) label describes the dataset authors' classification of that address in isolation. It must NEVER be written as SAME_OPERATOR, OWNER, or OPERATOR_CONFIRMED for any CyberTrace target -- see cybertrace/integrations/ellipticpp.py docstring and tests/test_integrations.py."
+}

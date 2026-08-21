@@ -884,6 +884,51 @@ class TestDarkwebOperatorIntel:
         assert mmh3.hash(base64.encodebytes(icon)) == mmh3.hash(base64.encodebytes(icon))
 
 
+class TestDarkwebTLSCertProbe:
+    """Onion TLS cert capture (_fetch_tls_cert_der): must degrade to None on
+    any connection/handshake failure — most onions never offer TLS at all —
+    and must fingerprint whatever cert a Tor SOCKS5 connection does receive.
+    Tests the blocking half directly rather than through the async wrapper,
+    since the thing worth pinning is the socket/ssl error handling, not the
+    executor plumbing."""
+
+    def test_connection_refused_degrades_to_none(self, monkeypatch):
+        module = DarkwebModule()
+
+        class FakeSocket:
+            def set_proxy(self, *a, **k): pass
+            def settimeout(self, *a, **k): pass
+            def connect(self, *a, **k): raise OSError('connection refused')
+            def close(self): pass
+
+        monkeypatch.setattr('socks.socksocket', FakeSocket)
+        assert module._fetch_tls_cert_der('x' * 56 + '.onion') is None
+
+    def test_presented_cert_is_returned_for_fingerprinting(self, monkeypatch):
+        module = DarkwebModule()
+        der_bytes = b'\x30\x82fake-der-cert-bytes'
+
+        class FakeTLSSocket:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def getpeercert(self, binary_form=False): return der_bytes
+
+        class FakeContext:
+            def __init__(self, *a, **k): pass
+            def wrap_socket(self, sock, server_hostname=None): return FakeTLSSocket()
+
+        class FakeSocket:
+            def set_proxy(self, *a, **k): pass
+            def settimeout(self, *a, **k): pass
+            def connect(self, *a, **k): pass
+            def close(self): pass
+
+        monkeypatch.setattr('socks.socksocket', FakeSocket)
+        monkeypatch.setattr('ssl.SSLContext', FakeContext)
+        der = module._fetch_tls_cert_der('x' * 56 + '.onion')
+        assert der == der_bytes
+
+
 class TestDarkwebCrawl:
     """Bounded same-onion crawl: only "/" made a login wall look artifact-free."""
 

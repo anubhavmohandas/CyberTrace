@@ -57,7 +57,9 @@ CREATE TABLE IF NOT EXISTS snapshots (
   raw_path             TEXT,                -- optional: retained HTML/headers on disk
   previous_snapshot_id TEXT,
   diff_summary         TEXT,
-  status               TEXT DEFAULT 'OK'
+  status               TEXT DEFAULT 'OK',
+  run_id               TEXT                 -- the ModuleResult invocation this came from;
+                                             -- NULL for pre-run_id saved captures
 );
 
 -- Canonical dedup point for the whole system.
@@ -507,7 +509,8 @@ class EvidenceStore:
     def insert_snapshot(self, target_id: str, payload: Any, collector: str,
                         observed_at: Optional[str] = None,
                         raw_path: Optional[str] = None,
-                        status: str = "OK") -> str:
+                        status: str = "OK",
+                        run_id: Optional[str] = None) -> str:
         """Hash and store one capture, chained to the previous capture by the
         same collector of the same target. The chain is what makes a leak that
         appeared for one crawl and vanished on the next provable rather than
@@ -541,10 +544,10 @@ class EvidenceStore:
         sid = self._id("snap")
         self.conn.execute(
             "INSERT INTO snapshots (snapshot_id, target_id, observed_at, collector, "
-            "sha256, payload, raw_path, previous_snapshot_id, diff_summary, status) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "sha256, payload, raw_path, previous_snapshot_id, diff_summary, status, run_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (sid, target_id, observed_at or utcnow(), collector, sha, blob, raw_path,
-             prev["snapshot_id"] if prev else None, diff, status),
+             prev["snapshot_id"] if prev else None, diff, status, run_id),
         )
         # A site that answers is live again. record_down clears this flag, and
         # without the reverse a target that flapped stays marked dead forever
@@ -593,7 +596,8 @@ class EvidenceStore:
         return self._one(sql, tuple(params))
 
     def record_down(self, target_id: str, collector: str, note: str = "",
-                    observed_at: Optional[str] = None) -> str:
+                    observed_at: Optional[str] = None,
+                    run_id: Optional[str] = None) -> str:
         """Record that the site did not answer, and mark the target inactive.
 
         Stored as a snapshot like any other capture, so 'this market was dark on
@@ -602,7 +606,7 @@ class EvidenceStore:
         """
         sid = self.insert_snapshot(target_id, {"online": False, "error": note},
                                    collector=collector, observed_at=observed_at,
-                                   status="DOWN")
+                                   status="DOWN", run_id=run_id)
         self.conn.execute("UPDATE targets SET active=0 WHERE target_id=?", (target_id,))
         self.conn.commit()
         return sid
@@ -879,6 +883,11 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
     if not target_url:
         return []
 
+    # Which ModuleResult invocation this came from. Absent on captures saved
+    # before this field existed (runs/raw/v5..v9) — NULL there, same as any
+    # other provenance field a pre-existing capture never recorded.
+    run_id = data.get("run_id")
+
     # A module run against an IP or an email is enrichment about that thing, not
     # the discovery of a marketplace. Routing it through the market path below
     # would mint a MARKET entity for an address and put a fake storefront in
@@ -888,7 +897,7 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
         tid = store.upsert_target(target_url)
         sid = _ingest_enrichment(store, target_url, ttype, data.get("summary") or {},
                                  data.get("module") or ttype,
-                                 _result_time(data) or utcnow(), tid)
+                                 _result_time(data) or utcnow(), tid, run_id=run_id)
         return [sid] if sid else []
 
     target_id = store.upsert_target(target_url)
@@ -905,7 +914,7 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
             if name in _SITE_COLLECTORS and _site_was_down(src.get("error")):
                 snapshot_ids.append(store.record_down(
                     target_id, collector=name, note=str(src.get("error") or "")[:300],
-                    observed_at=src.get("timestamp")))
+                    observed_at=src.get("timestamp"), run_id=run_id))
             continue
         payload = src.get("data") or {}
         observed_at = src.get("timestamp") or utcnow()
@@ -922,7 +931,8 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
         discovery = name not in _SITE_COLLECTORS
         sid = store.insert_snapshot(target_id, payload, collector=name,
                                     observed_at=observed_at,
-                                    status="DISCOVERY" if discovery else "OK")
+                                    status="DISCOVERY" if discovery else "OK",
+                                    run_id=run_id)
         snapshot_ids.append(sid)
 
         if onion and market_id:
@@ -933,13 +943,27 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
         # Where on the page each artifact was seen, when the collector recorded
         # it: a contact-block address is better evidence than one in a comment.
         seen_at = payload.get("artifact_evidence") or {}
+        # candidate_operator_ips is every IP-shaped signal unioned together —
+        # header/body leaks, misconfig leaks AND Shodan/FOFA favicon matches —
+        # because darkweb_module._pivot_targets needs one list to sweep for
+        # enrichment. But a directly-leaked IP already earns its own HOSTED_ON
+        # edge (leaked_public_ipv4 below, and at 0.9 via the misconfig handler
+        # further down), so filing it again here as CANDIDATE_IP would claim a
+        # second, weaker signal out of the one observation. Skip what the
+        # direct paths already cover; a real pivot-only IP (matched by icon
+        # hash alone, never seen on the page) still lands as the "lead, not
+        # fact" edge that name promises.
+        _direct_ips = set(payload.get("leaked_public_ipv4") or []) | {
+            ip for mc in (payload.get("misconfigurations") or [])
+            for ip in mc.get("leaked_ips") or []}
         # One snapshot per crawled page, so an observation resolves to the hash
         # of the page it was actually read off rather than to the whole visit.
         # The parent's status rides along: a page record inside an index payload
         # would otherwise be written OK, and every artifact pinned to it would
         # read as observed ON the target by the queries that filter on status.
         page_snaps = _ingest_pages(store, target_id, payload, name, observed_at,
-                                   status="DISCOVERY" if discovery else "OK")
+                                   status="DISCOVERY" if discovery else "OK",
+                                   run_id=run_id)
 
         for key, (etype, rtype) in ARTIFACT_MAP.items():
             # An index returns what ranked beside the target, not what the target
@@ -954,6 +978,8 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
                 # a link would make every market cite itself as an associate.
                 if etype == "ONION_ADDRESS" and \
                         normalize(etype, str(raw)) == normalize(etype, target_url):
+                    continue
+                if key == "candidate_operator_ips" and raw in _direct_ips:
                     continue
                 where = seen_at.get(raw) or {}
                 # Content the page reproduces rather than authors — a forwarded
@@ -1103,6 +1129,25 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
                     store.upsert_relationship(ip_id, org, "OWNED_BY", source_label=name,
                                               observed_at=observed_at)
 
+        # The onion's own TLS certificate, if it presents one on :443. Most
+        # hidden services don't — Tor already encrypts the circuit, so there is
+        # no protocol reason to layer TLS on top — which is exactly why an
+        # onion that does is an operator choice worth recording.
+        #
+        # Written as HAS_FINGERPRINT, not USES_CERT, and that is deliberate:
+        # USES_CERT sits in f5_clearnet (correlate.FUNNELS), and unlike favicon
+        # — measured at 9 same-operator vs 10 same-platform pairs before it was
+        # allowed into SUCCESSOR_SIGNALS — no pair in corpus/labels.toml is yet
+        # known to share a TLS cert. Wiring straight into a funnel would be the
+        # same unverified-blind-code mistake the CERTIFICATE/USES_CERT entry
+        # above already declines to make for crt.sh certs. Capture and expose
+        # it in the graph now; promote it only once a real corpus case does.
+        tls_cert = payload.get("tls_cert") or {}
+        if tls_cert.get("cert_sha256"):
+            _link(store, sid, market_id, "CERTIFICATE", "HAS_FINGERPRINT",
+                  f"sha256:{tls_cert['cert_sha256']}", name, section="tls_cert",
+                  confidence=0.7, observed_at=observed_at)
+
         for mc in payload.get("misconfigurations") or []:
             for ip in mc.get("leaked_ips") or []:
                 _link(store, sid, market_id, "IP", "HOSTED_ON", str(ip), name,
@@ -1191,7 +1236,8 @@ def _record_external_observation(store: EvidenceStore, snapshot_id: str, record:
 
 
 def _ingest_pages(store: EvidenceStore, target_id: str, payload: dict, collector: str,
-                  observed_at: str, status: str = "OK") -> Dict[str, str]:
+                  observed_at: str, status: str = "OK",
+                  run_id: Optional[str] = None) -> Dict[str, str]:
     """One snapshot per crawled page. Returns {path: snapshot_id}.
 
     Page-level lineage is what makes a claim reproducible at the granularity it
@@ -1207,7 +1253,7 @@ def _ingest_pages(store: EvidenceStore, target_id: str, payload: dict, collector
             continue
         out[path] = store.insert_snapshot(
             target_id, page, collector=f"{collector}{EvidenceStore.PAGE_COLLECTOR}{path}",
-            observed_at=observed_at, status=status)
+            observed_at=observed_at, status=status, run_id=run_id)
     return out
 
 
@@ -1346,7 +1392,8 @@ _ENRICHERS = {
 
 
 def _ingest_enrichment(store: EvidenceStore, target: str, ttype: str, summary: dict,
-                       collector: str, observed_at: str, target_id: str) -> Optional[str]:
+                       collector: str, observed_at: str, target_id: str,
+                       run_id: Optional[str] = None) -> Optional[str]:
     """Route one enrichment summary onto its subject entity. Returns snapshot id.
 
     The subject is upserted rather than required to exist: enrichment may arrive
@@ -1361,7 +1408,7 @@ def _ingest_enrichment(store: EvidenceStore, target: str, ttype: str, summary: d
     if subject is None:
         return None
     sid = store.insert_snapshot(target_id, summary, collector=collector,
-                                observed_at=observed_at)
+                                observed_at=observed_at, run_id=run_id)
     store.insert_observation(sid, subject, method=f"{collector}:enrichment",
                              section="enrichment", context=target,
                              confidence=0.9, observed_at=observed_at)

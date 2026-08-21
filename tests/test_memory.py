@@ -133,10 +133,11 @@ def test_shared_certificate_is_contextual(tmp_path):
 
 
 def test_shared_vpn_ip_is_contextual_not_exact(tmp_path):
-    """A bare IP is EXACT (correlate.SHARED_ARTIFACTS scores 'shared_ip' as
-    attribution-eligible), but one flagged VPN_IP by evidence.classify_ip is
-    shared egress, not a shared host — the same caveat
-    correlate.recommended_actions() already raises for a VPN-classed IP."""
+    """A VPN_IP/TOR_RELAY-classed address is shared egress, not a shared host
+    — the same caveat correlate.recommended_actions() already raises for a
+    VPN-classed IP, and CONTEXTUAL either way now (see the next test): this
+    pins the ip_class-specific path stays CONTEXTUAL too, not just the
+    general bare-IP one."""
     with EvidenceStore(str(tmp_path / "e.db")) as store:
         for target in (ONION_A, ONION_B):
             ingest(_result(target), store)
@@ -149,7 +150,15 @@ def test_shared_vpn_ip_is_contextual_not_exact(tmp_path):
         assert hits and hits[0]['classification'] == 'CONTEXTUAL'
 
 
-def test_bare_ip_without_vpn_class_is_exact(tmp_path):
+def test_bare_ip_without_vpn_class_is_also_contextual(tmp_path):
+    """A hosting provider assigns an address; an operator does not choose it
+    — the same reasoning correlate.NON_ATTRIBUTIVE_SIGNALS already applies to
+    a shared domain or favicon applies to a shared IP, VPN-egress or not
+    (correlate.py's shared_ip comment: two unrelated Tor operators on one
+    cheap/shared host is the ordinary case, and nothing in this store
+    distinguishes that from a dedicated one). memory.CONTEXTUAL_TYPES reads
+    this straight off correlate.NON_ATTRIBUTIVE_SIGNALS, so the fix lives
+    there — this only pins that memory's classification followed it."""
     with EvidenceStore(str(tmp_path / "e.db")) as store:
         for target in (ONION_A, ONION_B):
             ingest(_result(target), store)
@@ -158,7 +167,7 @@ def test_bare_ip_without_vpn_class_is_exact(tmp_path):
             _attach(store, target, ip, "CANDIDATE_IP")
 
         hits = [h for h in memory.historical_matches(store, ONION_B) if h['etype'] == 'IP']
-        assert hits and hits[0]['classification'] == 'EXACT'
+        assert hits and hits[0]['classification'] == 'CONTEXTUAL'
 
 
 # --- gate-rejected artifacts leave no trace for memory to find ---------------

@@ -1,0 +1,48 @@
+{
+  "dataset": "Evolution dark web cryptomarket (2014-2015)",
+  "description": "Structured forum + marketplace dataset of the Evolution dark web cryptomarket (carding forum + drug market, active Jan 2014-Mar 2015), plus a longitudinal weighted forum co-posting network. Boekhout, Blokland & Takes (Leiden University).",
+  "source_url": "https://zenodo.org/records/10171217",
+  "doi": "10.5281/zenodo.10171217",
+  "doi_all_versions": "10.5281/zenodo.10156521",
+  "version": "v2",
+  "version_v1_doi": "10.5281/zenodo.10156522",
+  "publication_date": "2023-11-21",
+  "citation": "Boekhout, Hanjo; Blokland, Arjan; Takes, Frank. A large-scale longitudinal structured dataset of the dark web cryptomarket Evolution (2014-2015). Zenodo. https://doi.org/10.5281/zenodo.10171217",
+  "license_status": "CC-BY-4.0",
+  "license_note": "Confirmed via the Zenodo API record (access_right=open, license=cc-by-4.0). Redistributable with attribution -- still kept local under external_data/ (gitignored) rather than committed, consistent with keeping third-party datasets out of git history regardless of license.",
+  "related_identifiers": ["https://gwern.net/dnm-archive (isNewVersionOf)"],
+  "retrieved_at": "2026-08-21T08:12:00Z",
+  "files": [
+    {
+      "name": "data-and-readme.zip",
+      "local": "original/data-and-readme.zip",
+      "size_bytes": 332606424,
+      "md5_zenodo": "e144a1a0bdb9a8bc6bf831a84e0b501e",
+      "sha256_local": "5c8a321d51ca2f2dd10afbdc80a44c0c44498954f7c1ca604932b6667a8673bb",
+      "md5_verified": true
+    },
+    {
+      "name": "dataset-generation-code.zip",
+      "local": "original/dataset-generation-code.zip",
+      "size_bytes": 48698,
+      "md5_zenodo": "2eab598141df9eab7deb1c84e7d90cba",
+      "sha256_local": "6143e525b0aa3b50415aff47dbde9b48ffbf793b23f75d0b021e7be9cac94792",
+      "md5_verified": true
+    }
+  ],
+  "schema_notes": {
+    "note": "Read directly from inside data-and-readme.zip by the adapter (zipfile + csv, tab-delimited) -- not extracted to disk, to avoid doubling ~2GB of disk use for files this large (market/listings.tsv alone is 732MB uncompressed).",
+    "forum/forum.tsv":              "fid, category, title, description, topics, posts, ... -- one forum board.",
+    "forum/user.tsv":                "uid, username, reg_year/month/day, title (rank), num_posts, location -- one forum account.",
+    "forum/topic.tsv":               "fid, tid, first_uid (topic starter), title, posts, views -- one forum thread.",
+    "forum/post.tsv":                "tid, pid, uid, year/month/day/time, text (HTML), signature -- one forum post. text is real free-text content: the corpus this dataset offers for stylometry research (see Section 15 of the brief).",
+    "forum-market/user-matching.tsv": "match_id, username, uid, vid -- Evolution's OWN linkage of one forum account (uid) to one marketplace vendor account (vid) sharing a username. This is dataset-internal ground truth about ONE PLATFORM's account linkage, not a real-world operator identity -- see safety_boundary.",
+    "market/vendors.tsv":            "vid, username, rank, sales, approval_rating, pgp_key (often a full armored PGP public key block), return_policy -- one vendor account.",
+    "market/listings.tsv":           "lid, vid, title, price, description, cid (category), ships_from/to, product_class -- one product listing.",
+    "market/listing-feedback.tsv":   "lid, username (partially redacted, e.g. 'h***k'), year/month/day, message -- one buyer feedback/review.",
+    "market/categories.tsv":         "cid, category, parent_cid -- product taxonomy.",
+    "network/nodes.tsv":             "uid, secondary_uid, tertiary_uid, match_id, init_year/month -- forum-account identity nodes (multiple uids can be one match_id, i.e. one matched identity across account changes).",
+    "network/edges-2014-*.tsv, edges-2015-*.tsv": "Source, Target, Weight, timestamp, tid -- the pre-built longitudinal weighted co-posting network: an edge between two forum users who posted in the same topic, one file per month. This is the 'communication network' the paper models -- co-posting, not a proven message exchange between the two people."
+  },
+  "safety_boundary": "user-matching.tsv links a forum uid to a market vid -- that is Evolution's own same-platform-account fact, not a CyberTrace SAME_OPERATOR claim about any investigation target. Co-posting edges model communication proximity, not verified messaging, and never imply control. See cybertrace/integrations/evolution.py docstring and tests/test_integrations.py."
+}

@@ -114,11 +114,26 @@ SHARED_ARTIFACTS = (
 #                   A signal at 0.47 precision must not be able to conclude
 #                   anything on its own, and rarity cannot separate the two
 #                   cases — the SecureDrop icon measures rare here.
+#   shared_ip       both sites resolve to one address. An operator does not
+#                   choose that address any more than it chooses a domain it
+#                   cites — a hosting provider assigns it, and cheap/shared
+#                   VPS and CDN ranges routinely put unrelated Tor operators
+#                   behind the same host. Nothing in the corpus tests this
+#                   (0 IP candidates in 97 captures — see runs/README.md), so
+#                   there is no rarity/discrimination figure to bound it the
+#                   way shared_favicon's 0.47 does; ungated, one HOSTED_ON leak
+#                   on each of two unrelated markets alone scores 0.9 and
+#                   asserts LINKED_TO — verified live, not hypothetical.
+#                   ip_class already exists to flag TOR_RELAY/VPN_IP as
+#                   arguing AGAINST operator hosting; nothing yet flags the
+#                   ordinary case of two strangers sharing a hosting provider,
+#                   so shared_ip is gated the same way domain and favicon are
+#                   until a real cross-market case justifies scoring it.
 #
 # The gate is categorical rather than numeric for the reason the corpus notes
 # record: a threshold that refuses these today is one corpus away from
 # admitting them, while "a reference is not control" holds at any score.
-NON_ATTRIBUTIVE_SIGNALS = frozenset({"shared_domain", "shared_favicon"})
+NON_ATTRIBUTIVE_SIGNALS = frozenset({"shared_domain", "shared_favicon", "shared_ip"})
 
 # Below this, an artifact is judged too common in the corpus to evidence shared
 # control — see entity_discrimination. Calibrated to sit just under an artifact

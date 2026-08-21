@@ -334,6 +334,55 @@ def _result(target, seen=datetime(2026, 1, 10, tzinfo=timezone.utc), **onion_dat
     return r
 
 
+def test_two_runs_of_the_same_target_stay_distinguishable():
+    """Re-investigating a target must not collapse into one undated blob.
+
+    Two separate `search()` invocations against the same onion, observing the
+    same artifact, mint two ModuleResults — and two distinct run_ids. Both
+    reach the store as their own snapshot, tagged with the run that produced
+    it, so an analyst (or a later correlation pass) can tell "seen again on
+    this run" from "the first and only observation".
+    """
+    store = EvidenceStore(":memory:")
+    first = _result(ONION_A, server_fingerprint={'X-Powered-By': 'the almighty n0tr1v'})
+    second = _result(ONION_A, server_fingerprint={'X-Powered-By': 'the almighty n0tr1v'})
+    assert first.run_id != second.run_id  # minted independently, not reused
+
+    ingest(first, store)
+    ingest(second, store)
+
+    rows = store.conn.execute(
+        "SELECT run_id FROM snapshots WHERE collector='target_onion' ORDER BY rowid"
+    ).fetchall()
+    assert len(rows) == 2
+    run_ids = [r["run_id"] for r in rows]
+    assert None not in run_ids
+    assert run_ids[0] != run_ids[1]
+    assert set(run_ids) == {first.run_id, second.run_id}
+
+    # The artifact itself still dedups to one entity — run_id distinguishes
+    # collection events, not identity.
+    fps = store.conn.execute(
+        "SELECT COUNT(*) c FROM entities WHERE etype='HTTP_FINGERPRINT'").fetchone()["c"]
+    assert fps == 1
+    store.close()
+
+
+def test_a_saved_capture_without_run_id_ingests_with_null_run_id():
+    """Pre-existing JSON (runs/raw/v5..v9, saved before this field existed)
+    must keep ingesting cleanly — run_id is additive provenance, not a
+    required key the old corpus needs to be migrated to carry."""
+    store = EvidenceStore(":memory:")
+    legacy = _result(ONION_A).to_dict()
+    assert 'run_id' in legacy  # to_dict() always sets one going forward...
+    del legacy['run_id']       # ...but a file saved before this field existed won't
+    ingest(legacy, store)
+    row = store.conn.execute(
+        "SELECT run_id FROM snapshots WHERE collector='target_onion'").fetchone()
+    assert row["run_id"] is None
+    store.close()
+
+
 def test_fingerprint_only_when_it_distinguishes():
     """A shared web server is not a shared operator.
 

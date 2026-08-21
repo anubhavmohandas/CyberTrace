@@ -98,3 +98,14 @@ config.local.py
 
 # Tor
 *.onion_cache
+
+# External research datasets (Elliptic++, Evolution marketplace, DUTA-10K, ...).
+# Only original/ is excluded, not external_data/ itself — same runs/README.md
+# pattern as the runs/* block above. The payloads are multi-hundred-MB to
+# multi-GB third-party archives with their own licenses, some UNKNOWN/unstated
+# (Elliptic++), and never enter git history; manifest.json beside each
+# original/ dir stays tracked — it's provenance metadata, not the dataset.
+external_data/*/original/
+# The blanket *.json rule above (line 78) would otherwise catch these too —
+# same negation shape as !runs/README.md, needed for the same reason.
+!external_data/*/manifest.json

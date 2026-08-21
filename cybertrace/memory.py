@@ -14,13 +14,18 @@ commonness-discount slot, is a no-op with zero feedback rows, and never
 manufactures a candidate memory.py itself found.
 
     EXACT        identity-bearing artifact (PGP key, email, username, wallet,
-                 IP, analytics id — exactly the types correlate.SHARED_ARTIFACTS
+                 analytics id — exactly the types correlate.SHARED_ARTIFACTS
                  treats as attribution-eligible) reused on a different target.
     CONTEXTUAL   shared infrastructure/ecosystem artifact (domain, favicon,
-                 certificate, nameserver, ASN, hosting/VPN provider, HTTP
+                 IP, certificate, nameserver, ASN, hosting/VPN provider, HTTP
                  fingerprint) reused on a different target — the same set
                  correlate.py already refuses to score as attribution
-                 (NON_ATTRIBUTIVE_SIGNALS) or scores only as INFRA.
+                 (NON_ATTRIBUTIVE_SIGNALS) or scores only as INFRA. IP is
+                 here in full, not only its VPN_IP/TOR_RELAY egress classes:
+                 a hosting provider assigns an address, an operator does not
+                 choose it, so a bare IP is shared infrastructure exactly
+                 like a shared domain or favicon (see correlate.py's
+                 NON_ATTRIBUTIVE_SIGNALS comment for the measured case).
     PRIOR_REFERENCE  this exact target was named by another market's
                  DISCOVERED_VIA edge before — discovery provenance, not
                  evidence anyone controls it.

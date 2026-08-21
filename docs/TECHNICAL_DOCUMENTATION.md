@@ -599,6 +599,16 @@ cybertrace indian "MH12AB1234"
 | Blockstream | `blockstream.info/api/address/{addr}` | None | None | UTXO details, mempool |
 | BitcoinAbuse | `bitcoinabuse.com/api/reports/check` | None | None | Scam reports |
 | Ethplorer | `api.ethplorer.io/getAddressInfo/{addr}` | Free key | None | ETH balance, token holdings |
+| Chainabuse | `api.chainabuse.com/v0/reports` (BTC + ETH) | Free key, HTTP Basic (same key as user+pass) | Documented, not yet hit | Community abuse reports: category, date, confidence |
+
+`connected_addresses` is the union of two distinct signals that stay separate
+internally: `cospend_addresses` (shared transaction inputs — a real
+common-ownership heuristic) and `counterparty_addresses` (payment recipients —
+no ownership claim). Only `cospend_addresses` becomes a `PART_OF_CLUSTER`
+graph edge; merging the two would cluster a market's customers into the
+operator's wallet. A Chainabuse hit lands as `reported_scam`/report metadata
+on the address only — a community report is evidence of a report, never of
+who controls the address, so it never becomes a graph relationship.
 
 #### Output Fields
 
@@ -965,6 +975,22 @@ EMAILREP_API_KEY=xxx HUNTER_API_KEY=xxx cybertrace email "target@domain.com"
 | Ahmia.fi | `ahmia.fi/search/` | None | Clearnet search of indexed .onion sites |
 | DarkSearch | `darksearch.io/api/search` | None | Dark web search API |
 | IntelligenceX | `2.intelx.io/phonebook/search` | API Key | Pastes, leaks, dark web |
+| Onion Lookup (AIL) | `onion.ail-project.org/api/lookup/{onion}` | None | Historical `first_seen`/`last_seen`/titles/tags for a known onion — third-party index, `DISCOVERY`-only, never a relationship |
+
+#### Direct Onion Fingerprinting (`--tor`, live crawl of the target)
+
+Beyond the clearnet-gateway search above, a direct crawl of the target onion
+(`_fetch_target_onion`) extracts operator de-anonymization signals from the
+live page itself: server/framework HTTP header fingerprint, PGP keys, leaked
+public IPv4, clock skew, common misconfigurations (`/server-status`,
+`/.git/config`, open directory listings, Apache `mod_status`), and a
+favicon-hash pivot into Shodan/FOFA. Also probes for a **TLS certificate** on
+`:443` over the same Tor SOCKS connection — most hidden services never offer
+one (Tor already encrypts the circuit), so a presented cert is an operator
+choice worth recording. All of these land as `HAS_FINGERPRINT` — deliberately
+excluded from every correlation funnel (`correlate.FUNNELS`): a shared
+fingerprint is shared infrastructure or shared software, never proof of a
+shared operator on its own.
 
 #### Important Notes
 
@@ -2157,7 +2183,33 @@ echo "URLSCAN_API_KEY=your_key" >> .env
 # 5. EmailRep (100/day)
 # Visit: https://emailrep.io → Sign up
 echo "EMAILREP_API_KEY=your_key" >> .env
+
+# 6. Chainabuse (BTC/ETH abuse reports)
+# Visit: https://chainabuse.readme.io → Sign up
+# Auth is HTTP Basic — the module sends this one key as both user and pass.
+echo "CHAINABUSE_API_KEY=your_key" >> .env
 ```
+
+---
+
+## APPENDIX C: EXTERNAL RESEARCH DATASETS
+
+`external_data/<dataset>/` holds third-party datasets used for **offline**
+research and evaluation only — never wired into the live `EvidenceStore` or
+`ingest()` path. Only `manifest.json` (provenance: source, checksums,
+license, citation) is tracked in git; `original/` (the actual payloads,
+hundreds of MB to multiple GB) is gitignored regardless of license.
+
+| Dataset | License | Adapter | Notes |
+|---|---|---|---|
+| Elliptic++ (Elmougy & Liu, KDD'23) | **UNKNOWN** — no LICENSE file anywhere in either distribution channel | `cybertrace/integrations/ellipticpp.py` | 822K addresses / 203K transactions, illicit/licit/unknown class labels. The GitHub repo's own zip ships Git LFS pointer stubs, not data — the real CSVs come from the README's linked Google Drive folder. |
+| Evolution marketplace (Boekhout, Blokland & Takes) | CC-BY-4.0 (Zenodo `10.5281/zenodo.10171217`) | `cybertrace/integrations/evolution.py` | Forum posts/users, vendor listings (with PGP keys), a longitudinal co-posting network, and Evolution's own forum-account↔vendor-account linkage. Read directly out of the Zenodo zip via `zipfile`, never extracted to disk. |
+
+Every record either adapter yields carries `provenance="OFFLINE_DATASET"` and
+a `dataset_label` — the source authors' own annotation, not CyberTrace
+evidence. `tests/test_integrations.py` pins that neither adapter module can
+import `EvidenceStore` or `ingest`, so a dataset label cannot silently become
+`SAME_OPERATOR`/`OWNER`/`OPERATOR_CONFIRMED` for any investigation target.
 
 ---
 

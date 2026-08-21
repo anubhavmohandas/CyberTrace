@@ -8,6 +8,7 @@ import logging
 import shutil
 import sys
 import time
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -56,6 +57,11 @@ class ModuleResult:
     related: List[str] = field(default_factory=list)  # Related targets to investigate
     start_time: datetime = field(default_factory=datetime.utcnow)
     end_time: Optional[datetime] = None
+    # Identifies this one invocation of search(), distinct from every other —
+    # including a re-run against the same target. evidence.ingest() carries it
+    # onto every snapshot minted from this result, so two investigation runs
+    # that observed the same artifact stay distinguishable in the store.
+    run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     @property
     def success_count(self) -> int:
@@ -76,6 +82,7 @@ class ModuleResult:
             'target': self.target,
             'target_type': self.target_type,
             'module': self.module,
+            'run_id': self.run_id,
             'sources': {k: v.to_dict() for k, v in self.sources.items()},
             'summary': self.summary,
             'related': self.related,
