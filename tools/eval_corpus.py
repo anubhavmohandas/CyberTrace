@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Score the correlation engine against the labeled corpus.
 
-    python tools/eval_corpus.py runs/raw/v2/*.json
-    python tools/eval_corpus.py runs/raw/v2/*.json --labels corpus/labels.toml --pairs
+    python tools/eval_corpus.py runs/raw/v5/*.json runs/raw/v6/*.json runs/raw/v7/*.json runs/raw/v8/*.json
+    python tools/eval_corpus.py runs/raw/v5/*.json runs/raw/v6/*.json runs/raw/v7/*.json runs/raw/v8/*.json --labels corpus/labels.toml --pairs
 
 Ingests the saved runs into one throwaway store, runs the full correlation pass,
 and compares what the engine claimed about each pair of targets against
