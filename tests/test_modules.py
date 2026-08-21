@@ -78,6 +78,51 @@ class TestBitcoinModule:
         assert result == 'ethereum'
 
 
+class TestBitcoinModuleChainabuse:
+    """Chainabuse rides the same graceful-degradation-without-a-key path as
+    Shodan (darkweb_module._favicon_pivot), and the same non-attributive
+    metadata path bitcoinabuse (cryptoscamdb) already uses — a report becomes
+    `reported_scam` metadata on the address, never an operator-funnel signal.
+    """
+
+    def test_no_key_configured_degrades_gracefully(self):
+        import asyncio
+        module = BitcoinModule()
+        module.config.api_keys.chainabuse = None
+        result = asyncio.run(
+            module._check_chainabuse('1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa', 'BTC'))
+        assert result.success is False
+        assert 'CHAINABUSE_API_KEY' in result.error
+
+    def test_a_report_is_parsed_from_the_documented_response_shape(self):
+        import asyncio
+        module = BitcoinModule()
+        module.config.api_keys.chainabuse = 'testkey'
+        try:
+            async def fake_fetch_json(url, **kwargs):
+                assert url == 'https://api.chainabuse.com/v0/reports'
+                assert kwargs['params']['chain'] == 'BTC'
+                return {
+                    'reports': [
+                        {'id': 'r1', 'trusted': True, 'scamCategory': 'RUG_PULL'},
+                        {'id': 'r2', 'trusted': False, 'scamCategory': 'PHISHING'},
+                    ],
+                    'count': 2,
+                }
+            module.fetch_json = fake_fetch_json
+            result = asyncio.run(
+                module._check_chainabuse('1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa', 'BTC'))
+            assert result.success is True
+            assert result.data == {
+                'reported': True,
+                'report_count': 2,
+                'scam_categories': ['PHISHING', 'RUG_PULL'],
+                'trusted_report_count': 1,
+            }
+        finally:
+            module.config.api_keys.chainabuse = None
+
+
 class TestUsernameModule:
     """Test Username module."""
 
@@ -603,6 +648,55 @@ class TestDarkwebOperatorIntel:
         assert 'account' not in DarkwebModule._git_remotes(
             '\turl = https://code.example.net/repo.git\n')[0]
         assert DarkwebModule._git_remotes('nothing here') == []
+
+    def test_an_open_directory_yields_its_listed_entries(self):
+        """OnionScan's "open directories" check: a path the site never links
+        to but that autoindex still serves. Detected off the title, which is
+        the one thing mod_autoindex and nginx's autoindex agree on."""
+        import asyncio
+        module = DarkwebModule()
+
+        async def exposed(url):
+            if url.endswith('/backup/'):
+                return 200, {}, (
+                    '<title>Index of /backup/</title>'
+                    '<a href="../">Parent Directory</a>'
+                    '<a href="site-2026-01.tar.gz">site-2026-01.tar.gz</a>'
+                    '<a href="keys.asc">keys.asc</a>')
+            return 404, {}, 'not found'
+
+        module._fetch_full = exposed
+        found = asyncio.run(module._probe_misconfigs('http://x.onion'))
+        assert len(found) == 1
+        assert found[0]['path'] == '/backup/'
+        assert found[0]['directory_listing'] is True
+        assert found[0]['listed_entries'] == ['keys.asc', 'site-2026-01.tar.gz']
+
+    def test_apache_mod_status_is_labeled_not_parsed_for_vhosts(self):
+        """/server-status was already probed for leaked_ips; this only checks
+        that a real mod_status body gets flagged, and that an ordinary 200 on
+        the same path (no Apache banner) does not."""
+        import asyncio
+        module = DarkwebModule()
+
+        async def exposed(url):
+            if url.endswith('/server-status'):
+                return 200, {}, '<title>Apache Status</title>Apache Server Status for x'
+            return 404, {}, 'not found'
+
+        module._fetch_full = exposed
+        found = asyncio.run(module._probe_misconfigs('http://x.onion'))
+        assert found[0]['apache_mod_status'] is True
+        assert 'vhosts' not in found[0]
+
+        async def unrelated_200(url):
+            if url.endswith('/server-status'):
+                return 200, {}, 'nothing to see here'
+            return 404, {}, 'not found'
+
+        module._fetch_full = unrelated_200
+        found = asyncio.run(module._probe_misconfigs('http://x.onion'))
+        assert 'apache_mod_status' not in found[0]
 
     def test_onion_lookup_survives_a_response_that_is_not_an_object(self):
         """One odd answer must not cost the whole sweep.

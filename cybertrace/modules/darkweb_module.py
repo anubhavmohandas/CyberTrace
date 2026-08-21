@@ -327,6 +327,10 @@ class DarkwebModule(BaseModule):
     _MISCONFIG_PATHS = (
         '/server-status', '/server-info', '/.git/config', '/.env',
         '/phpinfo.php', '/info.php', '/status', '/robots.txt',
+        # OnionScan's "open directories" check: common names an operator
+        # leaves unlinked but not access-controlled. The same soft-404 canary
+        # below still gates every hit here.
+        '/backup/', '/uploads/', '/files/', '/images/',
     )
 
     # Bounded same-onion crawl. Budget is wall-clock for the whole crawl; each
@@ -935,7 +939,7 @@ class DarkwebModule(BaseModule):
         async def probe(path: str) -> Optional[Dict[str, Any]]:
             status, _headers, body = await self._fetch_full(f"{base}{path}")
             if status == 200 and body:
-                return {
+                record = {
                     'path': path,
                     'status': status,
                     'bytes': len(body),
@@ -946,6 +950,18 @@ class DarkwebModule(BaseModule):
                     **({'git_remotes': self._git_remotes(body)}
                        if path == '/.git/config' else {}),
                 }
+                if self._RE_DIR_LISTING.search(body):
+                    record['directory_listing'] = True
+                    # Reuses the same href regex the crawler follows links
+                    # with — an autoindex row IS a link, just one the site
+                    # never advertised.
+                    record['listed_entries'] = sorted(set(
+                        h for h in self._RE_HREF.findall(body)
+                        if h not in ('../', '/', './') and not h.startswith('?')
+                    ))[:50]
+                if path == '/server-status' and self._RE_MODSTATUS.search(body):
+                    record['apache_mod_status'] = True
+                return record
             return None
 
         control = f"/cybertrace-{uuid.uuid4().hex[:12]}"
@@ -956,6 +972,21 @@ class DarkwebModule(BaseModule):
                          base, control)
             return []
         return [r for r in results[1:] if r]
+
+    # Apache's mod_autoindex and nginx's autoindex both title the page
+    # "Index of /<path>" — the one signature stable across servers and
+    # versions, unlike the row markup itself (icons + <pre> vs a bare <table>).
+    _RE_DIR_LISTING = re.compile(r'<title>\s*Index of\s', re.I)
+
+    # Apache prints this exact banner on /server-status regardless of vhost
+    # config — the stable part of a mod_status leak. The VHost/Client table
+    # columns are deliberately NOT parsed here: their position shifts with
+    # ExtendedStatus, and there is no real exposure in the corpus yet to
+    # validate a column-order regex against — the same caution _git_remotes
+    # documents for deployment remotes, applied before any capture exists.
+    # occam: leaked_ips already sweeps whatever IPs the table prints; add
+    # VHost-column parsing once a live capture justifies the regex.
+    _RE_MODSTATUS = re.compile(r'Apache Server Status', re.I)
 
     # `url = <remote>` inside a git config. Only the value is taken; the section
     # header is not required, because a config with a url line has a remote by

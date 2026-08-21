@@ -89,6 +89,10 @@ class APIKeys:
     # https://etherscan.io — Ethereum tx/address/contract data
     # Free tier: 5 calls/sec
 
+    chainabuse: Optional[str] = None
+    # https://docs.chainabuse.com — community-reported scam/abuse address database
+    # Requires an organization API key (no free self-serve tier at signup)
+
     # ── Social Media & Identity ───────────────────────────────────────────────
     github: Optional[str] = None
     # https://github.com/settings/tokens — public repo/user/commit OSINT
@@ -129,6 +133,7 @@ class APIKeys:
             twilio_token=os.getenv('TWILIO_TOKEN'),
             # Crypto
             etherscan=os.getenv('ETHERSCAN_API_KEY'),
+            chainabuse=os.getenv('CHAINABUSE_API_KEY'),
             # Social
             github=os.getenv('GITHUB_TOKEN'),
             telegram_bot=os.getenv('TELEGRAM_BOT_TOKEN'),
@@ -160,7 +165,7 @@ class APIKeys:
             'Email':                  ['emailrep', 'hunter'],
             'Breach Databases':       ['hibp', 'dehashed', 'leakcheck'],
             'Phone':                  ['numverify', 'twilio_sid', 'twilio_token'],
-            'Crypto / Blockchain':    ['etherscan'],
+            'Crypto / Blockchain':    ['etherscan', 'chainabuse'],
             'Social & Identity':      ['github', 'telegram_bot'],
             'Automation':             ['twocaptcha'],
         }

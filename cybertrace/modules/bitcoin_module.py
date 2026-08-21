@@ -4,6 +4,8 @@ import re
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+import aiohttp
+
 from .base import BaseModule, ModuleResult, SourceResult
 
 
@@ -37,11 +39,13 @@ class BitcoinModule(BaseModule):
                 ('blockchair', self._check_blockchair(target, 'bitcoin')),
                 ('blockstream', self._check_blockstream(target)),
                 ('bitcoinabuse', self._check_bitcoin_abuse(target)),
+                ('chainabuse', self._check_chainabuse(target, 'BTC')),
             ]
         elif result.target_type == 'ethereum':
             sources = [
                 ('blockchair_eth', self._check_blockchair(target, 'ethereum')),
                 ('ethplorer', self._check_ethplorer(target)),
+                ('chainabuse', self._check_chainabuse(target, 'ETH')),
             ]
         else:
             sources = []
@@ -263,7 +267,60 @@ class BitcoinModule(BaseModule):
             success=True,
             data=parsed,
         )
-    
+
+    async def _check_chainabuse(self, address: str, chain: str) -> SourceResult:
+        """
+        Check Chainabuse (https://chainabuse.com) for community-submitted
+        abuse reports on this address.
+
+        Requires an organization API key — HTTP Basic auth, the same key in
+        both the username and password fields (Chainabuse's own convention,
+        not this codebase's). CHAINABUSE_API_KEY is unset by default; without
+        it this degrades the same way an unset Shodan key does in
+        darkweb_module._favicon_pivot.
+
+        A report here is exactly that — a REPORT — never proof of control.
+        It rides into `reported_scam`/`scam_report_count` in _build_summary,
+        the same non-attributive metadata slot bitcoinabuse already fills, so
+        it lands on the address as metadata (evidence.enrich_bitcoin) and
+        never becomes an operator-funnel signal.
+        """
+        key = self.config.api_keys.get('chainabuse')
+        if not key:
+            return SourceResult(
+                source='chainabuse',
+                success=False,
+                error='no Chainabuse API key configured (set CHAINABUSE_API_KEY)',
+            )
+
+        data = await self.fetch_json(
+            'https://api.chainabuse.com/v0/reports',
+            params={'address': address, 'chain': chain, 'perPage': 20},
+            headers={'Authorization': aiohttp.encode_basic_auth(key, key)},
+        )
+        if data is None:
+            return SourceResult(
+                source='chainabuse',
+                success=False,
+                error='No response from Chainabuse',
+            )
+
+        reports = data.get('reports') or []
+        categories = sorted({
+            r['scamCategory'] for r in reports if r.get('scamCategory')
+        })
+
+        return SourceResult(
+            source='chainabuse',
+            success=True,
+            data={
+                'reported': bool(reports),
+                'report_count': data.get('count', len(reports)),
+                'scam_categories': categories,
+                'trusted_report_count': sum(1 for r in reports if r.get('trusted')),
+            },
+        )
+
     async def _check_ethplorer(self, address: str) -> SourceResult:
         """Query Ethplorer API (no auth for basic)."""
         url = f"https://api.ethplorer.io/getAddressInfo/{address}?apiKey=freekey"
