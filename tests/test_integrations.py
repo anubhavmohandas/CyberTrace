@@ -144,3 +144,32 @@ class TestEvolutionPgpReflow:
 
     def test_match_pgp_fingerprint_unknown_returns_empty(self):
         assert evolution.match_pgp_fingerprint("0" * 40) == []
+
+
+class TestEvolutionIndex:
+    """The local PGP-fingerprint lookup index (Section 11 of the brief): what
+    makes Evolution matching viable on a live crawl's per-key hot path instead
+    of only an occasional offline check -- mirrors TestEllipticppIndex."""
+
+    @pytest.mark.skipif(not evolution.index_available(),
+                        reason="Evolution PGP index not built (call build_index() once)")
+    def test_lookup_pgp_fingerprint_matches_the_raw_scan(self):
+        rec = next(evolution.iter_vendor_pgp_fingerprints())
+        indexed = evolution.lookup_pgp_fingerprint(rec["fingerprint"])
+        scanned = evolution.match_pgp_fingerprint(rec["fingerprint"])
+        assert indexed and len(indexed) == len(scanned)
+        assert {h["vid"] for h in indexed} == {h["vid"] for h in scanned}
+        assert all(h["provenance"] == "OFFLINE_DATASET" for h in indexed)
+
+    @pytest.mark.skipif(not evolution.index_available(),
+                        reason="Evolution PGP index not built (call build_index() once)")
+    def test_lookup_pgp_fingerprint_absent_returns_empty(self):
+        assert evolution.lookup_pgp_fingerprint("0" * 40) == []
+
+    def test_lookup_pgp_fingerprint_without_an_index_fails_loudly(self, monkeypatch):
+        # Same discipline as ellipticpp.lookup_wallet: a silent fallback to the
+        # O(n) scan would make the "efficient lookup" this index exists for
+        # invisible until a live crawl stalled on it.
+        monkeypatch.setattr(evolution, "index_available", lambda: False)
+        with pytest.raises(RuntimeError, match="build_index"):
+            evolution.lookup_pgp_fingerprint("0" * 40)

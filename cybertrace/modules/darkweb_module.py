@@ -14,6 +14,7 @@ from html import unescape
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote_plus, unquote, urljoin, urlsplit, urlunsplit
 
+from ..integrations import evolution
 from ..normalize import (
     NON_ATTRIBUTIVE_SECTIONS, dom_simhash, norm_btc, norm_domain, norm_email,
     norm_eth, norm_onion, norm_pgp, norm_xmr, pgp_certifiers, pgp_signature_issuers,
@@ -472,6 +473,24 @@ class DarkwebModule(BaseModule):
                 bare = fpr.removeprefix('PGP:')
                 record: Dict[str, Any] = {'key_id': fpr, 'fingerprint': bare,
                                           'certifiers': pgp_certifiers(block)}
+                # Section 11's live pivot: a real fingerprint read off THIS
+                # page, checked against the indexed Evolution corpus (2014-15
+                # marketplace). A hit says this cryptographic identity also
+                # held a vendor account there -- external dataset context, the
+                # same EXTERNAL_DATASET_MATCH class ellipticpp's dataset_label
+                # is, never a relationship (evidence.ingest writes it as
+                # PGP_KEY metadata only; see that function's docstring).
+                # Degrades silently, same as _check_ellipticpp without its
+                # index: no dataset downloaded, or downloaded but not
+                # indexed yet, both just skip the lookup rather than raising
+                # mid-crawl.
+                if evolution.available() and evolution.index_available():
+                    hits = evolution.lookup_pgp_fingerprint(bare)
+                    if hits:
+                        record['evolution_dataset_match'] = True
+                        record['evolution_vendor_count'] = len(hits)
+                        record['evolution_vids'] = sorted({h['vid'] for h in hits
+                                                           if h.get('vid')})[:5]
                 signed = bool(issuers & {bare, bare[-16:]})
                 # Only for a key the parser could actually read: evidence.ingest
                 # prefers 'armored' over 'fingerprint'/'key_id' (see its own

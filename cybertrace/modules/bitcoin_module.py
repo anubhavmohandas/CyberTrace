@@ -311,6 +311,14 @@ class BitcoinModule(BaseModule):
         categories = sorted({
             r['scamCategory'] for r in reports if r.get('scamCategory')
         })
+        # createdAt is when the report was FILED, not when the address did
+        # anything -- external temporal context about a third party's paperwork,
+        # never a sighting of the address itself. See evidence.enrich_bitcoin's
+        # chainabuse_* docstring for why this stays a timestamp to display and
+        # is never read by the successor/temporal engine.
+        report_dates = sorted({
+            r['createdAt'] for r in reports if r.get('createdAt')
+        })
 
         return SourceResult(
             source='chainabuse',
@@ -320,6 +328,7 @@ class BitcoinModule(BaseModule):
                 'report_count': data.get('count', len(reports)),
                 'scam_categories': categories,
                 'trusted_report_count': sum(1 for r in reports if r.get('trusted')),
+                'report_dates': report_dates,
             },
         )
 
@@ -455,6 +464,17 @@ class BitcoinModule(BaseModule):
             if data.get('reported'):
                 summary['reported_scam'] = True
                 summary['scam_report_count'] = data.get('report_count', 0)
+
+            # Chainabuse-specific detail -- category/trusted-count/report_dates
+            # exist only in this source's response, so unlike report_count
+            # above (which bitcoinabuse also sets) these need their own gate.
+            # report_dates is when each report was FILED, external metadata
+            # about the report, not a sighting of the address; see
+            # evidence.enrich_bitcoin's chainabuse_* docstring.
+            if source == 'chainabuse' and data.get('reported'):
+                summary['chainabuse_scam_categories'] = data.get('scam_categories')
+                summary['chainabuse_trusted_report_count'] = data.get('trusted_report_count')
+                summary['chainabuse_report_dates'] = data.get('report_dates')
 
             # Elliptic++ dataset context -- distilled, non-attributive; see
             # _check_ellipticpp and evidence.enrich_bitcoin. Only set when the

@@ -24,7 +24,7 @@ from cybertrace.monitor import candidate_deltas
 from cybertrace.normalize import pgp_fingerprint
 
 from .test_evidence import (
-    BTC_VALID, KEY_A, KEY_B, ONION_A, ONION_B, _armor, _pubkey_packet,
+    BTC_VALID, KEY_A, KEY_B, ONION_A, ONION_B, _armor, _pivot_result, _pubkey_packet,
     _result, _signature_packet, onion,
 )
 
@@ -905,7 +905,14 @@ def test_shared_platform_is_recorded_as_an_objection(tmp_path):
 
 # --- crypto clustering -------------------------------------------------------
 
-BTC_OTHER = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+# A genuinely different address from BTC_VALID (imported from test_evidence) —
+# it was a byte-for-byte copy of BTC_VALID before this fix, so every
+# "two unrelated markets, two addresses" test below (test_chainabuse_reports_
+# never_link_two_unrelated_markets, test_ellipticpp_illicit_label_never_
+# links_two_unrelated_markets) was silently upserting ONE entity under two
+# names and asserting "no relationship" against itself — true either way, but
+# not the claim the test names. Real BTC address (genesis block, public).
+BTC_OTHER = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
 
 
 def test_cospend_addresses_form_one_wallet(tmp_path):
@@ -947,6 +954,61 @@ def test_counterparty_addresses_never_join_the_cluster(tmp_path):
         assert clusters[addr] == clusters[store.find_entity("BTC_ADDRESS", cospend_peer)]
 
 
+def test_exchange_consolidation_cospend_does_not_link_two_unrelated_markets(tmp_path):
+    """crypto_clusters' own occam note admits the risk this reproduces: a
+    service consolidating many customers' deposit addresses into one input set
+    sweeps them all into a single co-spend component, so Market A's address and
+    Market B's address can land in one cluster despite the two markets sharing
+    nothing real -- only an exchange's internal housekeeping. This is the
+    scenario, run through the actual pipeline rather than assumed safe.
+
+    It survives on two mechanisms neither of which lives in bitcoin_module or
+    touches SUCCESSOR_SIGNALS: _candidate_pairs (correlate.py) only compares
+    markets that already share one literal entity_id, and a market's edge to a
+    cluster-mate it never itself published floors at UNJOINED_CONTEXT (0.15,
+    MENTIONS-equivalent -- see _edge_context), never DEFAULT_CONTEXT's 1.0. So
+    the swept-in address scores as a bare reference, not control, and never as
+    the full-weight dedicated shared_cluster signal (that path is skipped once
+    shared_btc already covers the pair -- see _pair_signals).
+    """
+    exchange_hot_wallet = "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, seen=JAN, bitcoin_addresses=[BTC_VALID]), store)
+        ingest(_result(ONION_B, seen=JAN, bitcoin_addresses=[BTC_OTHER]), store)
+
+        # Market A's address happened to be swept alongside Market B's address
+        # and the exchange's own wallet in one large consolidation transaction
+        # -- exactly what bitcoin_module._check_blockchain_com would report as
+        # cospend_addresses for a many-input tx it does not special-case.
+        addr_a = store.find_entity("BTC_ADDRESS", BTC_VALID)
+        target_a = store.upsert_target("btc:" + BTC_VALID)
+        sid = store.insert_snapshot(target_a, {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr_a, {
+            "address": BTC_VALID,
+            "cospend_addresses": [BTC_OTHER, exchange_hot_wallet],
+        }, "bitcoin")
+
+        addr_b = store.find_entity("BTC_ADDRESS", BTC_OTHER)
+        assert crypto_clusters(store)[addr_a] == crypto_clusters(store)[addr_b], \
+            "the two addresses really are one co-spend component -- that part is real"
+
+        # Worth surfacing as a lead (score clears LEAD_FLOOR) -- an analyst may
+        # still want to see "these two swept through one exchange" -- but the
+        # MENTIONS-floor context keeps it a reference, never a claim: no edge,
+        # same REFERENCES_ONLY refusal shared_ip gets in
+        # test_two_strangers_on_one_shared_host_are_not_linked.
+        pairs = detect_successors(store, min_score=0.0)
+        assert pairs, "the pair is still worth ranking as a lead"
+        pair = pairs[0]
+        assert pair["score"] >= LEAD_FLOOR       # visible...
+        assert pair["relation"] is None          # ...but never asserted
+        assert pair["suppressed"] == "REFERENCES_ONLY"
+
+        results = run_correlation(store)
+        assert all(s["relation"] is None for s in results["successors"])
+        assert results["operators"] == []
+
+
 def test_two_strangers_on_one_shared_host_are_not_linked(tmp_path):
     """Shared hosting is not a shared operator — measured live, not assumed.
 
@@ -977,6 +1039,53 @@ def test_two_strangers_on_one_shared_host_are_not_linked(tmp_path):
         # Still visible to the analyst as exactly what it is: a shared host.
         ips = candidate_ips(store)
         assert ips and ips[0]["value"] == '203.0.113.55' and ips[0]["n_markets"] == 2
+
+
+def test_two_onions_behind_one_tor_exit_are_not_linked(tmp_path):
+    """Section 8's adversarial case, run through the real pipeline rather than
+    only classify_ip's unit-level checks (test_a_tor_relay_host_argues_
+    against_the_candidate_that_named_it covers those): a Tor exit node
+    carries traffic for the whole network, so two unrelated onions whose
+    favicon/Shodan pivot both land on the SAME exit IP must fare no better
+    than test_two_strangers_on_one_shared_host_are_not_linked's ordinary
+    shared host — if anything the exit case is the stronger negative control
+    (classify_ip.__doc__: TOR_RELAY "outranks the rest and is the one class
+    that argues AGAINST the candidate"), so this pins that ip_class carrying
+    that verdict changes nothing about NON_ATTRIBUTIVE_SIGNALS gating
+    shared_ip already does independent of enrichment (see the trace this loop
+    ran: candidate operator IPs are auto-piped through ip_module's live
+    ExoneraTor check, but shared_ip is gated categorically either way).
+    """
+    exit_ip = '171.25.193.25'
+    relay = {'tor_relay': True, 'checked_date': '2026-08-13', 'org': 'Foreningen for digitala fri'}
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        for onion in (ONION_A, ONION_B):
+            ingest(_result(onion, seen=JAN,
+                           favicon={'favicon_mmh3': 999,
+                                    'shodan_matches': [{'ip': exit_ip, 'org': relay['org']}]}),
+                   store)
+            ingest(_pivot_result(onion, [
+                {'target': exit_ip, 'type': 'ip', 'summary': relay},
+            ]), store)
+
+        ip = store.find_entity("IP", exit_ip)
+        assert store.metadata(ip)["ip_class"] == "TOR_RELAY"
+
+        pairs = detect_successors(store, min_score=0.0)
+        assert pairs, "still worth ranking as a lead"
+        assert pairs[0]["relation"] is None
+        assert pairs[0]["suppressed"] == "REFERENCES_ONLY"
+
+        results = run_correlation(store)
+        assert results["operators"] == []
+        assert not store._all(
+            "SELECT 1 FROM relationships WHERE rtype IN "
+            "('SUCCESSOR_OF','LINKED_TO','SAME_OPERATOR')")
+
+        # Visible to the analyst as exactly what it is: shared Tor egress, not
+        # shared origin infrastructure.
+        ips = candidate_ips(store)
+        assert ips and ips[0]["value"] == exit_ip and ips[0]["ip_class"] == "TOR_RELAY"
 
 
 def test_chainabuse_reports_never_link_two_unrelated_markets(tmp_path):
@@ -1024,6 +1133,49 @@ def test_chainabuse_reports_never_link_two_unrelated_markets(tmp_path):
         assert run_correlation(store)["operators"] == []
 
 
+def test_chainabuse_report_dates_are_external_paperwork_not_a_sighting(tmp_path):
+    """Section 12: createdAt is when a REPORT was filed, not when the address
+    did anything. Two markets whose wallets were both reported on the exact
+    same date must not read as "co-active at time T" — correlate.py's
+    temporal engine (market_windows/temporal_handoff/temporal_overlap) only
+    ever reads snapshot/observation timestamps, never entity metadata, so
+    chainabuse_report_dates landing as metadata is structurally inert to it;
+    this pins that it also creates no relationship, the same way
+    reported_scam/scam_categories already do not.
+    """
+    same_filing_date = "2026-02-01T00:00:00.000Z"
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, bitcoin_addresses=[BTC_VALID]), store)
+        ingest(_result(ONION_B, bitcoin_addresses=[BTC_OTHER]), store)
+
+        for addr in (BTC_VALID, BTC_OTHER):
+            entity = store.find_entity("BTC_ADDRESS", addr)
+            target = store.upsert_target("btc:" + addr)
+            sid = store.insert_snapshot(target, {}, "bitcoin")
+            enrich_bitcoin(store, sid, entity, {
+                "address": addr,
+                "reported_scam": True,
+                "chainabuse_scam_categories": ["RANSOMWARE"],
+                "chainabuse_trusted_report_count": 2,
+                "chainabuse_report_dates": [same_filing_date],
+            }, "bitcoin")
+
+        addr_a = store.find_entity("BTC_ADDRESS", BTC_VALID)
+        addr_b = store.find_entity("BTC_ADDRESS", BTC_OTHER)
+        assert store.metadata(addr_a)["chainabuse_report_dates"] == [same_filing_date]
+        assert store.metadata(addr_b)["chainabuse_report_dates"] == [same_filing_date]
+
+        assert not store._all(
+            "SELECT 1 FROM relationships WHERE source_entity_id=? AND target_entity_id=?",
+            (addr_a, addr_b))
+        assert not store._all(
+            "SELECT 1 FROM relationships WHERE source_entity_id=? AND target_entity_id=?",
+            (addr_b, addr_a))
+        results = run_correlation(store)
+        assert results["operators"] == []
+        assert all(s["relation"] is None for s in results["successors"])
+
+
 def test_ellipticpp_illicit_label_never_links_two_unrelated_markets(tmp_path):
     """Adversarial false-attribution check for the Elliptic++ offline dataset
     context: two markets whose wallets both carry the dataset's "illicit"
@@ -1066,6 +1218,46 @@ def test_ellipticpp_illicit_label_never_links_two_unrelated_markets(tmp_path):
         clusters = crypto_clusters(store)
         assert addr_a not in clusters and addr_b not in clusters
         assert run_correlation(store)["operators"] == []
+
+
+def test_evolution_pgp_dataset_match_never_links_two_unrelated_markets(tmp_path):
+    """Adversarial false-attribution check for the Evolution live PGP pivot
+    (Section 11): two markets whose DIFFERENT keys both happen to match a
+    vendor record in the 2014-2015 Evolution corpus share nothing but a
+    historical dataset's row count. Same discipline as
+    test_ellipticpp_illicit_label_never_links_two_unrelated_markets, on
+    evolution_dataset_match instead of a dataset_label -- a fingerprint match
+    against a defunct marketplace is not a claim that these two keys, let
+    alone these two markets, are related to each other at all.
+    """
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=[{
+            'armored': KEY_A, 'evolution_dataset_match': True,
+            'evolution_vendor_count': 12,
+        }]), store)
+        ingest(_result(ONION_B, pgp_keys=[{
+            'armored': KEY_B, 'evolution_dataset_match': True,
+            'evolution_vendor_count': 3,
+        }]), store)
+
+        key_a = store.find_entity("PGP_KEY", pgp_fingerprint(KEY_A))
+        key_b = store.find_entity("PGP_KEY", pgp_fingerprint(KEY_B))
+        assert store.metadata(key_a)["evolution_dataset_match"] is True
+        assert store.metadata(key_b)["evolution_dataset_match"] is True
+        assert store.metadata(key_a)["evolution_vendor_count"] == 12
+        assert store.metadata(key_b)["evolution_vendor_count"] == 3
+
+        # No edge between the two keys, in either direction: a shared dataset
+        # match carries no relationship, so there is nothing to create one.
+        assert not store._all(
+            "SELECT 1 FROM relationships WHERE source_entity_id=? AND target_entity_id=?",
+            (key_a, key_b))
+        assert not store._all(
+            "SELECT 1 FROM relationships WHERE source_entity_id=? AND target_entity_id=?",
+            (key_b, key_a))
+        results = run_correlation(store)
+        assert results["operators"] == []
+        assert all(s["relation"] is None for s in results["successors"])
 
 
 # --- broadened contradictions ------------------------------------------------

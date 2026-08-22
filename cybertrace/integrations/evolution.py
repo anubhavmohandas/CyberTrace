@@ -32,6 +32,7 @@ import csv
 import io
 import json
 import re
+import sqlite3
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
@@ -41,6 +42,7 @@ from ..normalize import pgp_fingerprint
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "external_data" / "evolution"
 ZIP_PATH = DATA_DIR / "original" / "data-and-readme.zip"
 MANIFEST_PATH = DATA_DIR / "manifest.json"
+INDEX_PATH = DATA_DIR / "index.sqlite"
 
 
 def manifest() -> Dict[str, Any]:
@@ -169,13 +171,92 @@ def match_pgp_fingerprint(fingerprint: str) -> List[dict]:
     stronger evidence than that: a vendor holding a key in 2014-2015 says
     nothing about who holds it now.
 
-    occam: O(n) scan over ~54K rows (a few seconds), same ceiling
-    lookup_wallet's plain scan documented before ellipticpp.build_index()
-    existed. Build a fingerprint->rows index if this becomes a repeated,
-    hot-path lookup rather than an occasional offline check.
+    occam: O(n) scan over ~54K rows (a few seconds) -- fine for an occasional
+    offline check; see lookup_pgp_fingerprint for the indexed, live-pivot path
+    (darkweb_module._extract_pgp_keys calls that one, not this one).
     """
     fingerprint = fingerprint.upper()
     return [r for r in iter_vendor_pgp_fingerprints() if r["fingerprint"] == fingerprint]
+
+
+def index_available() -> bool:
+    """Whether the local PGP-fingerprint lookup index has been built (see
+    build_index)."""
+    return INDEX_PATH.exists()
+
+
+def build_index(force: bool = False) -> Path:
+    """Build a local read-only SQLite index of vendor PGP fingerprints, so a
+    live-crawl lookup (darkweb_module._extract_pgp_keys, one call per key
+    found on a page) is an indexed query instead of the ~54K-row armor-reflow
+    scan match_pgp_fingerprint does.
+
+    A one-time, few-minutes offline step (2,429 distinct fingerprints among
+    54,294 vendor rows -- see vendor_pgp_fingerprint's docstring for that
+    count) -- not run implicitly by lookup_pgp_fingerprint, which raises a
+    clear error instead if the index is missing, the same discipline
+    ellipticpp.build_index/lookup_wallet already established: a silent
+    fallback to the O(n) scan would make the "efficient lookup" this index
+    exists for invisible until a live crawl stalled on it.
+
+    The index itself stays local context (external_data/evolution/, already
+    gitignored, and *.sqlite is gitignored globally) -- a cache over the
+    dataset, not a copy of it into CyberTrace's own evidence.db.
+    """
+    if INDEX_PATH.exists() and not force:
+        return INDEX_PATH
+    tmp_path = INDEX_PATH.with_suffix(".sqlite.building")
+    tmp_path.unlink(missing_ok=True)
+    conn = sqlite3.connect(tmp_path)
+    try:
+        conn.executescript("""
+            PRAGMA journal_mode=OFF;
+            PRAGMA synchronous=OFF;
+            CREATE TABLE vendor_pgp (
+                fingerprint TEXT NOT NULL, vid TEXT, username TEXT,
+                armored_original TEXT
+            );
+        """)
+        conn.executemany(
+            "INSERT INTO vendor_pgp (fingerprint, vid, username, armored_original) "
+            "VALUES (?,?,?,?)",
+            ((r["fingerprint"], r["vid"], r["username"], r["armored_original"])
+             for r in iter_vendor_pgp_fingerprints()))
+        conn.execute("CREATE INDEX idx_vendor_pgp_fingerprint ON vendor_pgp(fingerprint)")
+        conn.commit()
+    finally:
+        conn.close()
+    tmp_path.replace(INDEX_PATH)
+    return INDEX_PATH
+
+
+def lookup_pgp_fingerprint(fingerprint: str) -> List[dict]:
+    """Indexed equivalent of match_pgp_fingerprint -- O(log n), not a scan of
+    every vendor row. Same result shape, same EXTERNAL_DATASET_MATCH-only
+    classification; this is the one darkweb_module calls per key found on a
+    live page.
+
+    Raises RuntimeError if build_index() has not been run yet -- see
+    ellipticpp.lookup_wallet for why that is a hard failure rather than a
+    silent fallback to the slow scan.
+    """
+    if not index_available():
+        raise RuntimeError(
+            "Evolution PGP lookup index not built yet -- call "
+            "cybertrace.integrations.evolution.build_index() once first "
+            "(offline, one-time, a few minutes).")
+    fingerprint = fingerprint.upper()
+    conn = sqlite3.connect(f"file:{INDEX_PATH}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT fingerprint, vid, username, armored_original FROM vendor_pgp "
+            "WHERE fingerprint=?", (fingerprint,)).fetchall()
+    finally:
+        conn.close()
+    return [{"source": "evolution", "provenance": "OFFLINE_DATASET",
+             "entity_type": "PGP_KEY", "fingerprint": row[0],
+             "vid": row[1], "username": row[2], "armored_original": row[3]}
+            for row in rows]
 
 
 def iter_listings() -> Iterator[Dict[str, Any]]:

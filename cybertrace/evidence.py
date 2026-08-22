@@ -1053,6 +1053,18 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
                         meta["key_created_at"] = times["created_at"]
                     if times.get("expires_at"):
                         meta["key_expires_at"] = times["expires_at"]
+                # Evolution EXTERNAL_DATASET_MATCH — same non-attributive shape
+                # as ellipticpp's dataset_label (see enrich_bitcoin's docstring
+                # for the ecosystem-leakage failure this class exists to avoid,
+                # here recast as "held this key" instead of "flagged illicit").
+                # A vendor holding this exact fingerprint in 2014-2015 says
+                # nothing about who holds it now, and never becomes a
+                # relationship: see darkweb_module._extract_pgp_keys and
+                # test_evolution_pgp_dataset_match_never_links_two_unrelated_
+                # markets in tests/test_correlate.py.
+                if key.get("evolution_dataset_match"):
+                    meta["evolution_dataset_match"] = True
+                    meta["evolution_vendor_count"] = key.get("evolution_vendor_count")
                 store.set_metadata(key_id, **meta)
             # occam: 20 certifiers per key. A keyring-signed key can carry
             # hundreds, and past the first few they are web-of-trust background
@@ -1354,6 +1366,16 @@ def enrich_bitcoin(store: EvidenceStore, snapshot_id: str, addr_id: str, summary
     relationship, ever — see
     test_ellipticpp_illicit_label_never_links_two_unrelated_markets in
     tests/test_correlate.py.
+
+    chainabuse_report_dates carries WHEN each report was FILED — a fact about
+    a third party's paperwork, not a sighting of the address. It must never be
+    read as "address active at time T": nothing in correlate.py's temporal
+    engine (market_windows, temporal_handoff/temporal_overlap) reads entity
+    metadata at all, only snapshot/observation timestamps, so this stays
+    display-only context the same way key_created_at is a fact and never a
+    market-window edge — see test_chainabuse_reports_never_link_two_unrelated_
+    markets for the same non-attributive discipline applied to the report
+    itself.
     """
     store.set_metadata(
         addr_id,
@@ -1362,6 +1384,12 @@ def enrich_bitcoin(store: EvidenceStore, snapshot_id: str, addr_id: str, summary
                              ("first_tx", summary.get("first_seen")),
                              ("last_tx", summary.get("last_seen")),
                              ("reported_scam", summary.get("reported_scam")),
+                             ("chainabuse_scam_categories",
+                              summary.get("chainabuse_scam_categories")),
+                             ("chainabuse_trusted_report_count",
+                              summary.get("chainabuse_trusted_report_count")),
+                             ("chainabuse_report_dates",
+                              summary.get("chainabuse_report_dates")),
                              ("ellipticpp_dataset_label",
                               summary.get("ellipticpp_dataset_label")),
                              ("ellipticpp_dataset_label_name",

@@ -13,6 +13,7 @@ from cybertrace.modules import (
     DarkwebModule,
     IndianModule,
 )
+from cybertrace.integrations import evolution
 from cybertrace.modules.base import ModuleResult, SourceResult
 from cybertrace.normalize import norm_btc, norm_email, norm_xmr
 
@@ -104,8 +105,10 @@ class TestBitcoinModuleChainabuse:
                 assert kwargs['params']['chain'] == 'BTC'
                 return {
                     'reports': [
-                        {'id': 'r1', 'trusted': True, 'scamCategory': 'RUG_PULL'},
-                        {'id': 'r2', 'trusted': False, 'scamCategory': 'PHISHING'},
+                        {'id': 'r1', 'trusted': True, 'scamCategory': 'RUG_PULL',
+                         'createdAt': '2026-02-01T00:00:00.000Z'},
+                        {'id': 'r2', 'trusted': False, 'scamCategory': 'PHISHING',
+                         'createdAt': '2026-01-15T00:00:00.000Z'},
                     ],
                     'count': 2,
                 }
@@ -118,6 +121,10 @@ class TestBitcoinModuleChainabuse:
                 'report_count': 2,
                 'scam_categories': ['PHISHING', 'RUG_PULL'],
                 'trusted_report_count': 1,
+                # Sorted, not filing order — report_dates is when each report
+                # was FILED (external paperwork), never a sighting of the
+                # address; see evidence.enrich_bitcoin's chainabuse_* docstring.
+                'report_dates': ['2026-01-15T00:00:00.000Z', '2026-02-01T00:00:00.000Z'],
             }
         finally:
             module.config.api_keys.chainabuse = None
@@ -934,6 +941,43 @@ class TestDarkwebOperatorIntel:
         assert len(keys) == 1
         assert 'armored' not in keys[0]
         assert keys[0].get('fingerprint')
+
+    @pytest.mark.skipif(not evolution.index_available(),
+                        reason="Evolution PGP index not built (call build_index() once)")
+    def test_extract_pgp_keys_pivots_a_real_key_against_evolution(self):
+        """Section 11's live pivot end to end: a REAL vendor key from the
+        recovered 2,429-fingerprint Evolution corpus, reflowed and dropped
+        into synthetic page HTML the same shape a live onion crawl would
+        produce, must round-trip through the same fingerprint parser a real
+        crawl uses (norm_pgp) and come back tagged as an
+        EXTERNAL_DATASET_MATCH -- not a synthetic fixture standing in for one.
+        """
+        rec = next(evolution.iter_vendor_pgp_fingerprints())
+        reflowed = evolution._reflow_armor(rec["armored_original"])
+        html = f"<div class='pgp'>Our key:<br>{reflowed}<br>Verify before paying.</div>"
+        keys = DarkwebModule._extract_pgp_keys(html)
+        assert len(keys) == 1
+        assert keys[0]["fingerprint"] == rec["fingerprint"]
+        assert keys[0]["evolution_dataset_match"] is True
+        assert keys[0]["evolution_vendor_count"] >= 1
+        # A dataset match is a label to display, never a role: it must not
+        # promote a merely-displayed key to 'signing', or affect anything
+        # about how the key is otherwise ingested.
+        assert keys[0]["role"] == "displayed"
+
+    def test_extract_pgp_keys_degrades_silently_without_the_dataset(self, monkeypatch):
+        """No dataset, no index, or both: extraction must still succeed with a
+        real fingerprint and simply carry no evolution_* fields — the same
+        degrade-quietly discipline bitcoin_module._check_ellipticpp follows
+        for a missing local dataset, applied at the point evolution is
+        actually called rather than through a SourceResult."""
+        from .test_evidence import _armor, _pubkey_packet
+        monkeypatch.setattr(evolution, "available", lambda: False)
+        key_block = _armor(_pubkey_packet((1 << 2047) | 0x6666))
+        keys = DarkwebModule._extract_pgp_keys(f"<div>{key_block}</div>")
+        assert len(keys) == 1
+        assert keys[0].get("fingerprint")
+        assert "evolution_dataset_match" not in keys[0]
 
     def test_favicon_hash_matches_shodan_scheme(self):
         import base64, mmh3
