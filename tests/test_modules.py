@@ -348,6 +348,24 @@ class TestDarkwebOperatorIntel:
         assert ev['UA-111111-1']['section'] == 'quoted'
         assert ev['GTM-ABCD12']['section'] == 'footer'
 
+    def test_pgp_fingerprint_shown_as_0x_hex_is_not_read_as_an_eth_address(self):
+        """parckwart.de (runs/raw/v11) displays 'My OpenPGP Key Fingerprint:
+        0x47BC7DE8...' — shape-identical to the ETH regex, and the extractor
+        recorded it as an ethereum_addresses hit even though it is the same
+        40 hex chars as the page's own PGP key. A person's fingerprint must
+        never read as their own wallet."""
+        from .test_evidence import _armor, _pubkey_packet
+
+        key_block = _armor(_pubkey_packet((1 << 2047) | 0x9999))
+        keys = DarkwebModule._extract_pgp_keys(key_block)
+        fp = keys[0]['fingerprint']
+
+        html = f'My OpenPGP Key Fingerprint: 0x{fp} {key_block}'
+        found = DarkwebModule()._extract_artifacts(html, 'x' * 56 + '.onion')
+        assert found['pgp_keys'], "fixture must actually carry a parseable key"
+        assert f'0x{fp}' not in found['ethereum_addresses']
+        assert f'0x{fp}' not in found['artifact_evidence']
+
     def test_quoted_artifacts_are_never_enriched(self):
         """Enrichment is the step that turns a string into a named person, so a
         quoted address has to be stopped before the pivot, not scored down

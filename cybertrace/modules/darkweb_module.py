@@ -700,6 +700,15 @@ class DarkwebModule(BaseModule):
         eth, ev_eth = self._validated(html, self._RE_ETH, norm_eth)
         xmr, ev_xmr = self._validated(html, self._RE_XMR, norm_xmr)
         ips, ev_ip = self._public_ipv4_in(html, require_host_use=True)
+        pgp_keys = self._extract_pgp_keys(html)
+        # A PGP fingerprint is conventionally displayed as "0x<40 hex chars>",
+        # which is shape-identical to an ETH address — same page, same key,
+        # already known not to be a wallet. Drop the collision rather than let
+        # one person's fingerprint read as their own Ethereum address.
+        pgp_fingerprints = {k['fingerprint'].upper() for k in pgp_keys if k.get('fingerprint')}
+        if pgp_fingerprints:
+            eth = [a for a in eth if a[2:].upper() not in pgp_fingerprints]
+            ev_eth = {a: v for a, v in ev_eth.items() if a in eth}
         # Sectioned like every other artifact. An analytics id is the one class
         # that reaches correlation at FULL control weight — USES_ANALYTICS is not
         # in CONTEXT_WEIGHT, and "one account id across two markets is an
@@ -714,7 +723,7 @@ class DarkwebModule(BaseModule):
             'ethereum_addresses': eth,
             'monero_addresses': xmr,
             'analytics_ids': analytics,
-            'pgp_keys': self._extract_pgp_keys(html),
+            'pgp_keys': pgp_keys,
             # norm_domain rejects onions and anything that isn't a real hostname.
             'clearnet_hosts_referenced': sorted({
                 d for d in (norm_domain(h) for h in self._RE_URL.findall(html)) if d
