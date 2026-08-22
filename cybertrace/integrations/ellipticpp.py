@@ -11,8 +11,12 @@ CyberTrace evidence, and must never be written as SAME_OPERATOR, OWNER, or
 OPERATOR_CONFIRMED for any target -- see tests/test_integrations.py, which
 pins that nothing in this module imports EvidenceStore or ingest().
 
-Offline use only (research/evaluation), per the brief's Section 8: no
-runtime enrichment path, no ML training here, no SUCCESSOR_SIGNALS changes.
+This module itself is offline-only: no ML training here, no SUCCESSOR_SIGNALS
+changes, nothing that reaches past lookup_wallet/wallet_neighbors. lookup_wallet
+IS called live, per address, from bitcoin_module.BitcoinModule._check_ellipticpp
+-- but only to write dataset_label as non-attributive entity metadata via
+evidence.enrich_bitcoin, never a relationship, so the safety boundary above
+still holds; see that function's docstring.
 Streamed row-by-row (stdlib csv, not pandas) -- these files run 2-700MB each
 and nothing here needs the whole table in memory at once.
 """
