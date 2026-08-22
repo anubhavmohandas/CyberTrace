@@ -961,3 +961,168 @@ operator = "tor.taxi"
 platform = "tortaxi"
 evidence_class = "operator-specific"
 basis = "named as tor.taxi's own mirror in the PGP-signed /mirrors.txt served from the address above; serves the same site, the same contact@tor.taxi, and the same key A5E0A839…1588778A at its own /pgp.txt"
+
+# =============================================================================
+# Corpus expansion, 2026-08-22: new real operator families, captured live in
+# runs/raw/v10/. Ground truth basis for every family below is the operator's
+# own `Onion-Location` HTTP header, served from the operator's own clearnet
+# domain — the site announcing its own address, which is the same standard the
+# original corpus already applies to Riseup and tor.taxi (an operator naming
+# its own service beats a third party repeating it), except here it is the
+# origin server's own response header rather than a page a crawler has to
+# parse. Each onion below was fetched with `cybertrace search --deep --tor`
+# through the production darkweb module, not hand-inspected and then typed in.
+#
+# None of the four families produced a SECOND operator-specific positive. Each
+# is real, each pair is genuinely one operator by this basis, and each was
+# searched by hand for a shared EMAIL, PGP_KEY or wallet the same way the
+# original 4-of-4 was found — and none turned one up. That is reported as the
+# result, not hidden: every family below is `evidence_class = "none"`, the
+# same class nowhere.moe already occupies, for the same reason. What differs
+# operator to operator is where the reachable evidence sits: the front/about
+# page of a marketing site publishes a real contact mailbox (freedom.press:
+# giving@/info@/media@/john.h@freedom.press; systemli: support@systemli.org;
+# disroot: support@/david@disroot.org), but the sibling onions captured here
+# are app shells (webmail login, Nextcloud login, Etherpad, a GitLab/Discourse
+# instance, a blog) that never repeat it — no footer, no about page reachable
+# in an 8-page crawl, nothing for the extractor to fold into a second market.
+# That is a structural finding, not a collection failure: a security-conscious
+# multi-service operator keeping per-surface contact addresses is good OPSEC,
+# and it is exactly the shape of operator this corpus has the least of. See
+# memory: corpus-positive-ceiling.
+
+# --- The Tor Project: one operator, mirrored across independent onions ------
+# blog.torproject.org and support.torproject.org each publish their own v3
+# onion via `Onion-Location`, distinct keys from the already-labeled main-site
+# `torproject` row above and from each other — genuinely independent captures,
+# not vhosts of one address (contrast Proton, whose calendar/drive onions are
+# subdomains of the SAME address and so are not independent evidence at all,
+# and were excluded from this corpus for that reason).
+#
+# A fresh operator string (`torproject-org`, not `torproject`) is used
+# deliberately so this addition touches zero existing rows or pairs; the
+# already-labeled main-site row is untouched and this family stands alone.
+#
+# Crawled: front page, /about-tor/, /abuse/, /donation/ (support) and the
+# front page plus recent posts (blog). No email, PGP key or wallet on either
+# — Tor Project's abuse and donation pages route through contact forms and a
+# payment processor, not a listed mailbox.
+
+[[target]]
+name = "torproject-blog"
+onion = "pzhdfe7jraknpj2qgu5cz2u3i4deuyfwmonvzu5i3nyw4t4bmg7o5pad.onion"
+operator = "torproject-org"
+platform = "torproject-blog"
+evidence_class = "none"
+basis = "blog.torproject.org announces this onion via its own Onion-Location header; content and copyright both identify The Tor Project"
+
+[[target]]
+name = "torproject-support"
+onion = "rzuwtpc4wb3xdzrj3yeajsvm3fkq4vbeubm2tdxaqruzzzgs5dwemlad.onion"
+operator = "torproject-org"
+platform = "torproject-support"
+evidence_class = "none"
+basis = "support.torproject.org announces this onion via its own Onion-Location header; content and copyright both identify The Tor Project"
+
+# --- Freedom of the Press Foundation: one nonprofit, three onion projects ---
+# freedom.press is FPF's own site. securedrop.org's own front page states in
+# its page description that SecureDrop "is now managed by Freedom of the Press
+# Foundation" and its nav links to freedom.press/donate/ — the operator's own
+# text, not a directory's claim. pressfreedomtracker.us's own /about page
+# states it is "a project of Freedom of the Press Foundation (FPF)". All three
+# addresses came from each site's own Onion-Location header.
+#
+# Checked for overlap and found none: freedom.press's /contact/ and /donate/
+# pages carry giving@/info@/media@/john.h@freedom.press; securedrop.org's
+# crawled pages (help, overview, directory, contribute, research) carry no
+# email at all; pressfreedomtracker.us carries its own distinct mailboxes
+# (media@/tips@pressfreedomtracker.us, plus emergencies@cpj.org for its
+# co-sponsor). Three real properties of one foundation, three separate inboxes.
+
+[[target]]
+name = "freedom-press"
+onion = "fpfjxcrmw437h6z2xl3w4czl55kvkmxpapg37bbopsafdu7q454byxid.onion"
+operator = "freedom-of-the-press-foundation"
+platform = "freedom-press"
+evidence_class = "none"
+basis = "freedom.press announces this onion via its own Onion-Location header; /about/ names Freedom of the Press Foundation"
+
+[[target]]
+name = "securedrop-org"
+onion = "sdolvtfhatvsysc6l34d65ymdwxcujausv7k5jk4cy5ttzhjoi6fzvyd.onion"
+operator = "freedom-of-the-press-foundation"
+platform = "securedrop-org"
+evidence_class = "none"
+basis = "securedrop.org announces this onion via its own Onion-Location header; its own page text states SecureDrop 'is now managed by Freedom of the Press Foundation'"
+
+[[target]]
+name = "pressfreedomtracker"
+onion = "pftvpxbg4jdvviyqbuxw26yo66t36t4uy64fa6bkgxre3wzqm3yrpqid.onion"
+operator = "freedom-of-the-press-foundation"
+platform = "pressfreedomtracker"
+evidence_class = "none"
+basis = "pressfreedomtracker.us announces this onion via its own Onion-Location header; its own /about page states it is 'a project of Freedom of the Press Foundation (FPF)'"
+
+# --- Disroot: one collective, three onion services ---------------------------
+# disroot.org, cloud.disroot.org and mail.disroot.org each announce their own
+# onion via Onion-Location; mail.disroot.org actually announces two (an
+# apparent address migration), and the older of the two was unreachable at
+# both attempts on 2026-08-22, so only the currently-live mail address is
+# labeled here. The main site's own /contact and /donate pages carry
+# support@disroot.org and david@disroot.org (its listed maintainer). The
+# cloud and mail addresses are bare Nextcloud/webmail login screens — one
+# page each, no footer or about link reachable — and repeat neither.
+
+[[target]]
+name = "disroot-main"
+onion = "j4dhkkxfcsvzvh3p5djkmuehhgd6t6l7wmzih6b4ss744hegwkiae7ad.onion"
+operator = "disroot"
+platform = "disroot-main"
+evidence_class = "none"
+basis = "disroot.org announces this onion via its own Onion-Location header; /contact and /donate carry support@disroot.org and david@disroot.org"
+
+[[target]]
+name = "disroot-cloud"
+onion = "3rhtbo7bb3o5qvx2iyirppxxtpwnlxkavdyjdckmuzh2uohibignufqd.onion"
+operator = "disroot"
+platform = "disroot-cloud"
+evidence_class = "none"
+basis = "cloud.disroot.org announces this onion via its own Onion-Location header; a Nextcloud login screen, no contact artifact reachable"
+
+[[target]]
+name = "disroot-mail"
+onion = "mdlwkwn2nhzzuymmyr5mjyoqppoyp46k4remaliu2zrmkayl5yfeh7ad.onion"
+operator = "disroot"
+platform = "disroot-mail"
+evidence_class = "none"
+basis = "mail.disroot.org announces this onion via its own Onion-Location header (the current of two addresses announced; the other did not answer on 2026-08-22); a webmail login screen, no contact artifact reachable"
+
+# --- Systemli: one collective, three onion services --------------------------
+# systemli.org, pad.systemli.org and mail.systemli.org each announce their own
+# onion via Onion-Location. The main site's own /kontakt/ page carries
+# support@systemli.org. The pad (Etherpad) and mail (webmail) addresses are
+# single-page apps with no reachable footer or about link, and repeat nothing.
+
+[[target]]
+name = "systemli-main"
+onion = "7sk2kov2xwx6cbc32phynrifegg6pklmzs7luwcggtzrnlsolxxuyfyd.onion"
+operator = "systemli"
+platform = "systemli-main"
+evidence_class = "none"
+basis = "systemli.org announces this onion via its own Onion-Location header; /kontakt/ carries support@systemli.org"
+
+[[target]]
+name = "systemli-pad"
+onion = "mjrkrqnlf26etelsi7zpkqc3dzlrzyurvmd3jksmndarzzbugz5xctid.onion"
+operator = "systemli"
+platform = "systemli-pad"
+evidence_class = "none"
+basis = "pad.systemli.org announces this onion via its own Onion-Location header; an Etherpad instance, no contact artifact reachable"
+
+[[target]]
+name = "systemli-mail"
+onion = "jymhbez5sqlcsmykpvdat7uv6tc4cpb36hq3bdabjm7xvsh2jyrfnhyd.onion"
+operator = "systemli"
+platform = "systemli-mail"
+evidence_class = "none"
+basis = "mail.systemli.org announces this onion via its own Onion-Location header; a webmail login screen, no contact artifact reachable"

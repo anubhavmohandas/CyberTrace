@@ -11,6 +11,12 @@ runs/
   raw/v9/         live re-captures used to validate the pivot fabric end to end,
                   kept OUT of the graded corpus so before/after stays comparable
                   (scoring them in changes no figure — checked, 99 runs)
+  raw/v10/        four new real operator families captured 2026-08-22 while
+                  searching for a 5th operator-specific positive (Tor Project
+                  satellite sites, Freedom of the Press Foundation's onion
+                  projects, Disroot, Systemli) — IN the graded corpus, added to
+                  corpus/labels.toml. All 14 onions are evidence_class "none":
+                  see memory corpus-positive-ceiling for what was checked.
   raw/superseded/ captures taken before an extractor fix, kept as the "before"
                   half of the comparison and excluded from the corpus
   corpora/        .db + .html written by `correlate --db --html --dossier`
