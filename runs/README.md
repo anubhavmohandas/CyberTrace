@@ -17,6 +17,22 @@ runs/
                   projects, Disroot, Systemli) — IN the graded corpus, added to
                   corpus/labels.toml. All 14 onions are evidence_class "none":
                   see memory corpus-positive-ceiling for what was checked.
+  raw/v11/        24 unrelated onions (10 markets, 2 ransomware, 2 personal,
+                  5 mail/comms, 2 forums, 3 directories/misc) captured
+                  2026-08-22 as a discovery-corpus triage — NOT in the graded
+                  corpus, no labels added. 13/24 answered; 9 of 10 markets in
+                  this batch were dark. Full correlation pass against v5-v8 +
+                  v10 found zero new candidates and zero new edges among the
+                  24: the only touch was a LEAD (score 0.382, shared DOMAIN
+                  cock.li + FAVICON) between the new Cock.li recapture and the
+                  Cock.li target already labeled `namespace` in
+                  corpus/labels.toml — a reproduction of an existing control,
+                  not a discovery. Headline metrics unchanged with these files
+                  ingested: eval_corpus.py still scores exactly 3486 labeled
+                  pairs at 4/4 precision, 4/52 recall, 0 false attribution, 0
+                  ecosystem leakage. Kept as a negative-result discovery batch
+                  and a live artifact-extraction sample (audit_corpus.py: 1.00
+                  precision on every entity type observed).
   raw/superseded/ captures taken before an extractor fix, kept as the "before"
                   half of the comparison and excluded from the corpus
   corpora/        .db + .html written by `correlate --db --html --dossier`
