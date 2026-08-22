@@ -35,3 +35,6 @@ requests>=2.32.4
 PySocks>=1.7.1
 stem>=1.8.2
 aiohttp_socks>=0.10.0  # SOCKS5 connector for aiohttp — routes .onion via Tor
+
+# Interactive evidence-graph rendering (correlate.render_html)
+pyvis>=0.3.2
