@@ -645,6 +645,38 @@ def test_ingest_builds_provenance_chain(tmp_path):
         assert "Pay to" in chain[0]["context"]
 
 
+def test_a_directory_listing_more_onions_than_the_old_cap_persists_all_of_them(tmp_path):
+    """ingest() reads target_onion's payload straight through ARTIFACT_MAP —
+    darkweb_module._fetch_target_onion used to hand it 'onion_addresses_found'
+    already sliced to [:10] and 'clearnet_hosts_referenced' sliced to [:40],
+    so a directory page naming more than that lost the rest before a single
+    row was written: not a query limit, not a display limit, gone. This pins
+    the store side of that fix — 67 references in the payload must become 67
+    ONION_ADDRESS entities and 67 LINKS_TO edges, not 10.
+    """
+    # Excludes 'a' — onion("a") is ONION_A, the target itself, and its own
+    # address is HAS_ADDRESS rather than a referenced LINKS_TO.
+    onions = [onion(c) for c in "bcdefghijklmnopqrstuvwxyz0123456789"]
+    hosts = [f"host{i}.opsec{i}.net" for i in range(45)]
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, onion_addresses_found=onions,
+                       clearnet_hosts_referenced=hosts), store)
+
+        onion_entities = store._all("SELECT 1 FROM entities WHERE etype='ONION_ADDRESS'")
+        # 37 referenced + the target's own address (HAS_ADDRESS, not LINKS_TO).
+        assert len(onion_entities) == len(onions) + 1
+        domain_entities = store._all("SELECT 1 FROM entities WHERE etype='DOMAIN'")
+        assert len(domain_entities) == len(hosts)
+
+        links_to = store._all(
+            "SELECT 1 FROM relationships WHERE rtype='LINKS_TO'")
+        assert len(links_to) == len(onions)
+        mentions = store._all(
+            "SELECT 1 FROM relationships WHERE rtype='MENTIONS' "
+            "AND target_entity_id IN (SELECT entity_id FROM entities WHERE etype='DOMAIN')")
+        assert len(mentions) == len(hosts)
+
+
 def test_reingest_is_idempotent(tmp_path):
     with EvidenceStore(str(tmp_path / "e.db")) as store:
         r = _result(ONION_A, emails=['op@proton.me'])

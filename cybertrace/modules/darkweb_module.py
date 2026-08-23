@@ -938,12 +938,21 @@ class DarkwebModule(BaseModule):
                 'pages': page_records,
                 'server_fingerprint': fingerprint,
                 'clock_skew_seconds': clock_skew,
-                'clearnet_hosts_referenced': clearnet_hosts[:40],
-                'emails': emails[:20],
-                'bitcoin_addresses': btc[:20],
-                'ethereum_addresses': eth[:20],
-                'monero_addresses': xmr[:20],
-                'analytics_ids': analytics[:20],
+                # Every validated artifact this crawl found, uncapped: the
+                # crawl itself is already bounded (MAX_CRAWL_PAGES=8,
+                # CRAWL_BUDGET_SECONDS=180), so a slice here does not protect
+                # anything — it just drops evidence between extraction and
+                # evidence.ingest(), which reads this exact dict. A directory
+                # page listing 67 onions used to persist 10 of them and lose
+                # the other 57 with no record they ever existed. Display-time
+                # truncation lives in output.py, which already caps its own
+                # rendering independent of list length.
+                'clearnet_hosts_referenced': clearnet_hosts,
+                'emails': emails,
+                'bitcoin_addresses': btc,
+                'ethereum_addresses': eth,
+                'monero_addresses': xmr,
+                'analytics_ids': analytics,
                 'pgp_keys': list(pgp_keys.values()),
                 'leaked_public_ipv4': leaked_ips,
                 'misconfigurations': misconfigs,
@@ -951,7 +960,7 @@ class DarkwebModule(BaseModule):
                 'tls_cert': tls_cert,
                 'candidate_operator_ips': candidate_ips,
                 'onion_links_found': len(onion_links),
-                'onion_addresses_found': onion_links[:10],
+                'onion_addresses_found': onion_links,
                 # {value: {section, context}} — where on the page each artifact
                 # was seen, so graph edges carry evidence and not just a link.
                 'artifact_evidence': artifact_evidence,
@@ -1238,7 +1247,7 @@ class DarkwebModule(BaseModule):
             data={
                 'directories_checked': directories_checked,
                 'services_found': len(all_services),
-                'services': dict(list(all_services.items())[:20]),  # Top 20
+                'services': all_services,
                 'note': 'Current verified .onion addresses. Use these instead of hardcoded URLs.',
             },
         )
@@ -1361,7 +1370,7 @@ class DarkwebModule(BaseModule):
         titles = re.findall(title_pattern, html)
         descriptions = re.findall(desc_pattern, html)
 
-        for i, redirect in enumerate(redirects[:20]):
+        for i, redirect in enumerate(redirects):
             try:
                 decoded_url = unquote(redirect)
                 result_item = {
@@ -1383,7 +1392,7 @@ class DarkwebModule(BaseModule):
             data={
                 'result_count': len(results),
                 'results': results,
-                'onion_addresses_found': list(onion_addresses)[:10],
+                'onion_addresses_found': list(onion_addresses),
                 'search_url': url,
             },
         )
@@ -1442,7 +1451,7 @@ class DarkwebModule(BaseModule):
             block_pattern = r'([a-z2-7]{56}\.onion)'
             raw_onions = re.findall(block_pattern, html, re.IGNORECASE)
             # Try to find titles close to these onion addresses
-            for onion in list(dict.fromkeys(raw_onions))[:20]:  # deduplicate, cap 20
+            for onion in dict.fromkeys(raw_onions):  # dedup, order-preserving
                 # Search for a title tag or heading near this onion address
                 idx = html.find(onion)
                 snippet = html[max(0, idx - 300):idx + len(onion) + 50]
@@ -1470,8 +1479,8 @@ class DarkwebModule(BaseModule):
             error=None if results else 'Dargle returned no parseable results',
             data={
                 'result_count': len(results),
-                'results': results[:20],
-                'onion_addresses_found': onion_addresses[:10],
+                'results': results,
+                'onion_addresses_found': onion_addresses,
                 'search_url': url,
             },
         )
@@ -1531,12 +1540,12 @@ class DarkwebModule(BaseModule):
             success=len(results) > 0,
             data={
                 'result_count': len(results),
-                'results': results[:20],
+                'results': results,
                 # Previously omitted — meant the phase-6 onion validation
                 # step in search() had to fall back to re-deriving addresses
                 # from results[].onion_url instead of this field, and the
                 # summary's unique_onion_addresses never included torch hits.
-                'onion_addresses_found': list(seen_onions)[:10],
+                'onion_addresses_found': list(seen_onions),
             },
         )
 
@@ -1752,7 +1761,7 @@ class DarkwebModule(BaseModule):
         items = data if isinstance(data, list) else data.get('data', [])
 
         results = []
-        for item in items[:20]:
+        for item in items:
             results.append({
                 'id': item.get('id', ''),
                 'url': f"https://pastebin.com/{item.get('id', '')}" if item.get('id') else '',

@@ -660,6 +660,61 @@ class TestDarkwebOperatorIntel:
         assert result.data['url'] == f'http://{onion}/'
         assert result.data['onion_addresses_found'] == [other]
 
+    def test_a_page_with_more_artifacts_than_the_old_caps_persists_all_of_them(self):
+        """Collection must not silently drop evidence it already extracted.
+
+        onion_addresses_found/clearnet_hosts_referenced/emails/ethereum_addresses
+        used to be sliced to [:10]/[:40]/[:20]/[:20] right here in the
+        collector, before evidence.ingest() ever sees the payload
+        (evidence.ARTIFACT_MAP reads this exact dict — a slice here IS
+        evidence loss, not a display choice). A directory page listing more
+        than the old cap silently lost the rest with no record they ever
+        existed: onion_links_found kept the true count while
+        onion_addresses_found kept only the first 10 values. The crawl is
+        already bounded (MAX_CRAWL_PAGES=8, CRAWL_BUDGET_SECONDS=180), so the
+        slice bought nothing.
+        """
+        import asyncio
+        onion = 'r' * 56 + '.onion'
+        module = DarkwebModule()
+
+        async def noop_list(*a, **k):
+            return []
+
+        async def noop_dict(*a, **k):
+            return {}
+
+        module._probe_misconfigs = noop_list
+        module._favicon_pivot = noop_dict
+        module._crawl_pages = noop_list      # everything lives on the root page
+
+        n_onions, n_hosts, n_emails, n_eth = 15, 45, 25, 25
+        onions = [checksummed_onion(c) for c in 'abcdefghijklmno'][:n_onions]
+        hosts = [f'host{i}.opsec{i}.net' for i in range(n_hosts)]
+        emails = [f'op{i}@opsec{i}.net' for i in range(n_emails)]
+        eths = [f'0x{i:040x}' for i in range(n_eth)]
+
+        html = '<title>Directory</title>' + ' '.join(
+            f'<a href="http://{o}">{o}</a>' for o in onions) + ' ' + ' '.join(
+            f'<a href="https://{h}/">{h}</a>' for h in hosts) + ' ' + \
+            ' '.join(emails) + ' ' + ' '.join(eths)
+
+        async def fake_fetch(url):
+            return 200, {'Server': 'nginx'}, html
+
+        module._fetch_full = fake_fetch
+
+        result = asyncio.run(module._fetch_target_onion(onion))
+
+        assert result.success
+        # The list AND its count metadata agree, and both match what was
+        # actually on the page — not a cap.
+        assert result.data['onion_links_found'] == n_onions
+        assert sorted(result.data['onion_addresses_found']) == sorted(onions)
+        assert sorted(result.data['clearnet_hosts_referenced']) == sorted(hosts)
+        assert sorted(result.data['emails']) == sorted(emails)
+        assert len(result.data['ethereum_addresses']) == n_eth
+
     def test_a_catch_all_site_exposes_nothing(self):
         """81chan answers every unknown path with its 17 kB front page, so
         `/server-status`, `/server-info` and `/status` all read as exposed —
