@@ -1088,6 +1088,38 @@ def test_two_onions_behind_one_tor_exit_are_not_linked(tmp_path):
         assert ips and ips[0]["value"] == exit_ip and ips[0]["ip_class"] == "TOR_RELAY"
 
 
+def test_stacking_every_non_attributive_signal_still_does_not_assert(tmp_path):
+    """shared_domain + shared_favicon + shared_ip on one pair, and nothing else.
+
+    Each of the three is tested alone elsewhere in this file; none combines all
+    three. The gate in detect_successors (`attributive = any(... not in
+    NON_ATTRIBUTIVE_SIGNALS ...)`) is categorical, not score-based — but the
+    noisy-OR score is what would expose a categorical gate implemented as a
+    threshold by mistake. Priced individually these three signals noisy-OR to
+    0.4, 0.4, 0.9 -> a combined score of 1-(0.6*0.6*0.1) = 0.964, comfortably
+    over min_score=0.5 and higher than most real operator-specific pairs in
+    the corpus. If `attributive` were ever computed from the score instead of
+    the signal classes, this is the pair that would slip through.
+    """
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        for site in (ONION_A, ONION_B):
+            ingest(_result(site, seen=JAN,
+                           clearnet_hosts_referenced=['shared-host.li'],
+                           favicon={'favicon_mmh3': 42},
+                           leaked_public_ipv4=['203.0.113.99']), store)
+
+        pairs = detect_successors(store, min_score=0.0)
+        assert pairs
+        pair = pairs[0]
+        assert {"shared_domain", "shared_favicon", "shared_ip"} <= set(pair["signals"])
+        assert pair["score"] >= 0.9, "the stacked score must actually be high"
+        assert pair["suppressed"] == "REFERENCES_ONLY"
+        assert pair["relation"] is None
+        assert run_correlation(store)["operators"] == []
+        assert not store._all(
+            "SELECT 1 FROM relationships WHERE rtype IN ('SUCCESSOR_OF','LINKED_TO')")
+
+
 def test_chainabuse_reports_never_link_two_unrelated_markets(tmp_path):
     """Two markets, two different wallets, each independently reported to
     Chainabuse under the same scam category — the same failure shape as
