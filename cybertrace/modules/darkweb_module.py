@@ -646,7 +646,14 @@ class DarkwebModule(BaseModule):
             if cls._SKIP_EXT.search(parts.path):
                 continue
             # Fragment dropped: /vendor and /vendor#top are one page, one fetch.
-            links.append(urlunsplit(('http', onion_host, parts.path or '/', parts.query, '')))
+            # Scheme kept as resolved, not forced to http: _crawl_pages has no
+            # redirect-follower of its own (only the caller's front-page fetch
+            # does), so a page served over https whose links get rebuilt as
+            # http re-triggers the same http->https redirect the front page
+            # already resolved — and it comes back as an unfollowed 307 stub
+            # instead of the page. Measured on EFF's onion: every discovered
+            # link decayed into an empty redirect stub until this stayed https.
+            links.append(urlunsplit((parts.scheme, onion_host, parts.path or '/', parts.query, '')))
         return list(dict.fromkeys(links))
 
     async def _crawl_pages(self, base: str, onion_host: str,

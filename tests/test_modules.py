@@ -1122,6 +1122,18 @@ class TestDarkwebCrawl:
         # Off-host links would attribute another site's artifacts to this operator.
         assert links == [f'http://{self.HOST}/contact', f'http://{self.HOST}/rules.html']
 
+    def test_links_preserve_https_when_the_page_was_served_over_https(self):
+        """_crawl_pages has no redirect-follower of its own — only the caller's
+        front-page fetch does. A link rebuilt as http on an https-only onion
+        re-triggers the same redirect the front page already resolved, and
+        since nothing follows it there, the page comes back as an unfollowed
+        307 stub instead of real content. Reproduced live against EFF's
+        onion: every discovered subpage stubbed out this way before the fix.
+        """
+        html = '<a href="/contact">c</a>'
+        links = DarkwebModule._same_onion_links(f'https://{self.HOST}/', html, self.HOST)
+        assert links == [f'https://{self.HOST}/contact']
+
     def test_links_are_kept_when_the_site_serves_from_a_www_vhost(self):
         """`www.<addr>.onion` is the same hidden service as `<addr>.onion`, and
         the big wiki-backed onions redirect to it. Their own links are absolute

@@ -33,6 +33,38 @@ runs/
                   ecosystem leakage. Kept as a negative-result discovery batch
                   and a live artifact-extraction sample (audit_corpus.py: 1.00
                   precision on every entity type observed).
+  raw/v14/        blind operator-family rediscovery test, 2026-08-23: EFF's own
+                  2023 announcement names eff.org/Certbot/SSD as one operator's
+                  three onions; newsroom main-site onions were captured fresh
+                  and paired against their already-labeled SecureDrop rows
+                  (Guardian, ProPublica, NYT) without telling the engine they
+                  were related. IN the graded corpus, added to
+                  corpus/labels.toml. Found and fixed a real bug along the way:
+                  _same_onion_links forced scheme=http when rebuilding crawl
+                  links, so every subpage of an https-only onion re-triggered
+                  the same redirect the front-page fetch already resolves —
+                  and _crawl_pages has no redirect-follower of its own, so it
+                  silently kept a 168-byte 307 stub instead of the page. All
+                  four sites in this batch showed it (target_onion: 1 real page
+                  + 7 empty stubs each); fixed in darkweb_module.py (scheme
+                  preserved, not forced), regression test added
+                  (test_modules.py), full suite reruns at 348/348. Re-crawled
+                  after the fix: all four now genuinely 8/8 real pages, and the
+                  positive pairs still share no artifact (eff-main/-certbot/
+                  -ssd share nothing but a generic social-footer domain also
+                  seen against unrelated sites; guardian-main and
+                  securedrop-guardian share nothing at all) — a verified `none`
+                  finding, not a collection gap the fix left behind.
+                  propublica-main and theintercept-main were unreachable on
+                  2026-08-23 (3 attempts each); nytimes-main is NYT's original
+                  2017 address, a v2 onion — a format Tor removed from the
+                  network in 2021, unreachable by construction. Headline
+                  metrics with these files ingested: eval_corpus.py scores 3828
+                  labeled pairs at 4/4 precision, 4/56 recall, 0 false
+                  attribution, 0 ecosystem leakage — the crawl-bug fix changed
+                  nothing for the pre-existing v5-v8+v10 corpus (those captures
+                  predate it and were not re-crawled) but will improve every
+                  capture taken from here on.
   raw/superseded/ captures taken before an extractor fix, kept as the "before"
                   half of the comparison and excluded from the corpus
   corpora/        .db + .html written by `correlate --db --html --dossier`

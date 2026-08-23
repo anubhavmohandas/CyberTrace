@@ -559,21 +559,24 @@ name = "securedrop-guardian"
 onion = "xp44cagis447k3lpb4wwhcqukix6cgqokbuys24vmxmbzmaq2gjvc2yd.onion"
 operator = "guardian"
 platform = "securedrop"
-basis = "securedrop.org's published instance directory attributes this address to The Guardian, which operates it; SecureDrop is deployed and run separately by each newsroom"
+evidence_class = "none"
+basis = "securedrop.org's published instance directory attributes this address to The Guardian, which operates it; SecureDrop is deployed and run separately by each newsroom. evidence_class set 2026-08-23 for the guardian-main pairing below (v14 blind test): the two share no artifact at all"
 
 [[target]]
 name = "securedrop-new-york-times"
 onion = "ej3kv4ebuugcmuwxctx5ic7zxh73rnxt42soi3tdneu2c2em55thufqd.onion"
 operator = "new-york-times"
 platform = "securedrop"
-basis = "securedrop.org's published instance directory attributes this address to New York Times, which operates it; SecureDrop is deployed and run separately by each newsroom"
+evidence_class = "unverified"
+basis = "securedrop.org's published instance directory attributes this address to New York Times, which operates it; SecureDrop is deployed and run separately by each newsroom. evidence_class set 2026-08-23 for the nytimes-main pairing below (v14 blind test): nytimes-main is an obsolete v2 address, unreachable by construction, so what the pair would share was never observed"
 
 [[target]]
 name = "securedrop-propublica"
 onion = "33xu4yhum2eiisxm6fntaslayop76fvaqgt3ak5dakdm3t7cub25cead.onion"
 operator = "propublica"
 platform = "securedrop"
-basis = "securedrop.org's published instance directory attributes this address to ProPublica, which operates it; SecureDrop is deployed and run separately by each newsroom"
+evidence_class = "unverified"
+basis = "securedrop.org's published instance directory attributes this address to ProPublica, which operates it; SecureDrop is deployed and run separately by each newsroom. evidence_class set 2026-08-23 for the propublica-main pairing below (v14 blind test): propublica-main was unreachable on 2026-08-23 (3 attempts), so what the pair would share was never observed"
 
 [[target]]
 name = "securedrop-the-economist"
@@ -1126,3 +1129,89 @@ operator = "systemli"
 platform = "systemli-mail"
 evidence_class = "none"
 basis = "mail.systemli.org announces this onion via its own Onion-Location header; a webmail login screen, no contact artifact reachable"
+
+# --- EFF: one operator, three onion services ---------------------------------
+# eff.org's own 2023 announcement (eff.org/deeplinks/2023/04/eff-now-has-tor-onions)
+# names all three addresses below as EFF-operated: eff.org itself, Certbot and
+# Surveillance Self-Defense. Blind-tested v14 2026-08-23: the front-page-only
+# crawl bug (_same_onion_links forcing scheme=http on an https-only site,
+# throwing away the front page's own redirect resolution and starving the
+# bounded crawl of every subpage — see darkweb_module.py) meant all three sites
+# had only their homepage's real content until fixed same day; re-crawled full
+# 8-page captures after the fix and checked for overlap: no PGP key, email or
+# wallet on any of the three, no shared favicon or TLS cert between them.
+# eff-certbot and eff-ssd each link back to eff-main's own onion address in
+# their footer, which is a same-operator co-reference, not shared control, and
+# is correctly not scored — the only cross-target signal at all is a generic
+# social-media footer (facebook.com, bsky.app) that eff-main also shares with
+# unrelated sites in this corpus. /.well-known/security.txt returns 403 on
+# eff-main, so no PGP contact is being missed there either.
+
+[[target]]
+name = "eff-main"
+onion = "iykpqm7jiradoeezzkhj7c4b33g4hbgfwelht2evxxeicbpjy44c7ead.onion"
+operator = "eff"
+platform = "eff-main"
+evidence_class = "none"
+basis = "EFF's own 2023 blog post names this as its own onion, alongside Certbot and Surveillance Self-Defense below"
+
+[[target]]
+name = "eff-certbot"
+onion = "5yl6j7al5iwjn3kltayvumj5d25agnq4t6rznkvphossoqyzb3batwid.onion"
+operator = "eff"
+platform = "eff-certbot"
+evidence_class = "none"
+basis = "EFF's own 2023 blog post names this as EFF's Certbot onion"
+
+[[target]]
+name = "eff-ssd"
+onion = "y7yea4pmqqtznb33qiugvysyn2bob5v62e4pvoadoibrwkq3tsddjeyd.onion"
+operator = "eff"
+platform = "eff-ssd"
+evidence_class = "none"
+basis = "EFF's own 2023 blog post names this as EFF's Surveillance Self-Defense onion"
+
+# --- Cross-platform same-operator: newsroom main site vs. its own SecureDrop -
+# Every SecureDrop row already in this corpus is the instance only; these rows
+# pair a newsroom's own main-site onion against its already-labeled SecureDrop
+# row above, blind-tested v14 2026-08-23. guardian-main was reachable and
+# recrawled after the crawl-bug fix (see EFF section above); it shares no
+# artifact at all with securedrop-guardian — different CMS, different software,
+# nothing in common but both being theguardian.com/SecureDrop, which is a
+# namespace-style claim neither page's content actually makes. propublica-main
+# and theintercept-main were unreachable on both of two attempts (2026-08-23);
+# nytimes-main uses NYT's original 2017 address, a v2 onion — a format Tor
+# removed from the network in 2021, so it is not "the site is down", it is an
+# address that cannot resolve on the current network by construction.
+
+[[target]]
+name = "guardian-main"
+onion = "guardian2zotagl6tmjucg3lrhxdk4dw3lhbqnkvvkywawy3oqfoprid.onion"
+operator = "guardian"
+platform = "guardian-main"
+evidence_class = "none"
+basis = "The Guardian's own front page publishes this onion address (widely corroborated: Tor Project forum, press coverage of the 2022 launch); pairs against the already-labeled securedrop-guardian row"
+
+[[target]]
+name = "propublica-main"
+onion = "p53lf57qovyuvwsc6xnrppyply3vtqm7l6pcobkmyqsiofyeznfu5uqd.onion"
+operator = "propublica"
+platform = "propublica-main"
+evidence_class = "unverified"
+basis = "ProPublica's own 2016 blog post (propublica.org/nerds/a-more-secure-and-anonymous-propublica-using-tor-hidden-services) names this as its main-site onion; unreachable on 2026-08-23 (3 attempts), so what it would share with securedrop-propublica was never observed"
+
+[[target]]
+name = "nytimes-main"
+onion = "nytimes3xbfgragh.onion"
+operator = "new-york-times"
+platform = "nytimes-main"
+evidence_class = "unverified"
+basis = "NYT's own 2017 launch announcement (Runa Sandvik, then NYT Director of Information Security) named this address; it is a v2 onion, a format Tor Project removed from the network in 2021, so it is unreachable by construction rather than currently dark"
+
+[[target]]
+name = "theintercept-main"
+onion = "27m3p2uv7igmj6kvd4ql3cct5h3sdwrsajovkkndeufumzyfhlfev4qd.onion"
+operator = "theintercept"
+platform = "theintercept-main"
+evidence_class = "unverified"
+basis = "The Intercept's own 2021 announcement (theintercept.com/2021/04/28/tor-browser-onion) names this as its main-site onion; unreachable on 2026-08-23 (3 attempts). Kept unpaired: The Intercept's current SecureDrop onion rotates and could not be confirmed from a live first-party source, so it is not claimed here — this row exists only as an adversarial control, to confirm it is never pulled into another operator's cluster by shared platform or infrastructure"
