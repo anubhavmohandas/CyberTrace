@@ -1,0 +1,31 @@
+"""Locks the shape tools/export_case_gui.py hands to web/CyberTrace Workspace.dc.html
+against the real tor.taxi captures — not a synthetic fixture, per the same
+real-corpus-over-fixture convention as test_corpus_regression.py.
+"""
+
+from pathlib import Path
+
+from tools.export_case_gui import build
+
+ROOT = Path(__file__).resolve().parent.parent
+CAPTURES = [ROOT / "runs" / "raw" / "v8" / "tortaxi-prd.json",
+            ROOT / "runs" / "raw" / "v8" / "tortaxi-2dev.json"]
+
+
+def test_tortaxi_export_matches_gui_shape():
+    assert all(p.is_file() for p in CAPTURES), "runs/raw/v8 tortaxi captures are missing"
+    case = build(CAPTURES, "CASE-TEST", "tor.taxi mirror pair")
+
+    assert len(case["candidates"]) == 2
+    assert {c["etype"] for c in case["candidates"]} == {"PGP_KEY", "EMAIL"}
+    assert all(c["band"] in ("LOW", "MEDIUM", "HIGH") for c in case["candidates"])
+    assert all(c["markets"] for c in case["candidates"])
+
+    # The real clone-similarity contradiction must survive into `suppressed`,
+    # since that is what the GUI's verdict modal and graph edge read from.
+    assert case["suppressed"], "expected the page-similarity contradiction to surface"
+    assert any("cloning" in s["rule"].lower() for s in case["suppressed"])
+
+    assert case["evidence"]
+    assert case["timeline"] == sorted(case["timeline"], key=lambda r: r["date"])
+    assert len(case["markets"]) == 2
