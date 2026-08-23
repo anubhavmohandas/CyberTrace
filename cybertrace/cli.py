@@ -404,6 +404,69 @@ def feedback(candidate_id: str, db_path: str, outcome: str, note: Optional[str],
         click.echo(f"[+] Recorded {outcome.upper()} for {candidate_id} ({fid})", err=True)
 
 
+@cli.command('case')
+@click.option('--db', 'db_path', required=True, type=click.Path(dir_okay=False),
+              help='Evidence store to show or update')
+@click.option('--name', default=None, help='Set the case name')
+@click.option('--status', type=click.Choice(['open', 'closed', 'archived'], case_sensitive=False),
+              default=None, help='Set the case status')
+@click.option('--note', default=None, help='Append an analyst note to the case')
+@click.option('--analyst', default=None, help='Who is recording the note')
+@click.option('--output', '-o', 'output_format', default='table',
+              type=click.Choice(['table', 'json']), help='Output format')
+def case_cmd(db_path: str, name: Optional[str], status: Optional[str], note: Optional[str],
+            analyst: Optional[str], output_format: str):
+    """
+    Show or update case-level metadata for an evidence store.
+
+    A `--db` file is already one investigation; this names it, tracks its
+    status, and holds analyst notes that aren't about any single candidate.
+    With no options, prints the case summary: name, status, targets, notes.
+
+    \b
+      cybertrace case --db case.db
+      cybertrace case --db case.db --name "Market X takedown" --status open
+      cybertrace case --db case.db --note "confirmed with legal" --analyst jdoe
+    """
+    import json
+
+    from .evidence import EvidenceStore
+
+    with EvidenceStore(db_path) as store:
+        if name or status:
+            try:
+                store.update_case(name=name, status=status.upper() if status else None)
+            except ValueError as e:
+                click.echo(f"[!] {e}", err=True)
+                sys.exit(1)
+        if note:
+            store.add_case_note(note, analyst=analyst)
+
+        info = store.case_info()
+        notes = [dict(n) for n in store.case_notes()]
+        targets = [dict(t) for t in store._all(
+            "SELECT url, kind, active FROM targets ORDER BY first_seen")]
+
+        if output_format == 'json':
+            click.echo(json.dumps({**info, 'targets': targets, 'notes': notes},
+                                  indent=2, default=str))
+            return
+
+        click.echo(f"\nCase {info.get('case_id')}  [{info.get('status')}]")
+        if info.get('name'):
+            click.echo(f"  {info['name']}")
+        click.echo(f"  created {info.get('created_at')}  updated {info.get('updated_at')}")
+        click.echo(f"\n  {len(targets)} target(s):")
+        for t in targets:
+            mark = 'active' if t['active'] else 'dark'
+            click.echo(f"    [{mark:6}] {t['url']} ({t['kind']})")
+        if notes:
+            click.echo("\n  Notes:")
+            for n in notes:
+                who = f" — {n['analyst']}" if n.get('analyst') else ''
+                click.echo(f"    {n['recorded_at']}  {n['note']}{who}")
+
+
 @cli.command('config')
 @click.option('--check', is_flag=True, help='Check API key status')
 @click.option('--show', is_flag=True, help='Show current configuration')

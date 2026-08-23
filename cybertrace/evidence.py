@@ -141,6 +141,27 @@ CREATE TABLE IF NOT EXISTS analyst_feedback (
   recorded_at  TEXT NOT NULL
 );
 
+-- Case-level metadata for the store as a whole. One row: a `--db` file is
+-- already one investigation (its targets/entities/candidates all scope to
+-- it), so this just gives that existing scope a name, a status and a place
+-- for notes that aren't about any single candidate.
+CREATE TABLE IF NOT EXISTS case_info (
+  case_id    TEXT PRIMARY KEY,
+  name       TEXT,
+  status     TEXT NOT NULL DEFAULT 'OPEN',   -- OPEN | CLOSED | ARCHIVED
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+-- Case-wide analyst notes, append-only like analyst_feedback -- a note is a
+-- fact about when it was recorded, not a field to overwrite.
+CREATE TABLE IF NOT EXISTS case_notes (
+  note_id     TEXT PRIMARY KEY,
+  note        TEXT NOT NULL,
+  analyst     TEXT,
+  recorded_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_snap_target ON snapshots(target_id);
 CREATE INDEX IF NOT EXISTS idx_ent_type    ON entities(etype);
 CREATE INDEX IF NOT EXISTS idx_obs_snap    ON observations(snapshot_id);
@@ -207,6 +228,8 @@ IP_CLASSES = {"INFRA_IP", "PERSONAL_IP", "VPN_IP", "TOR_RELAY", "EXCHANGE_IP",
 # UNKNOWN records that someone looked and could not tell either way, which is
 # still worth keeping — it is a used lead, not a fresh one.
 FEEDBACK_OUTCOMES = {"CONFIRMED", "REJECTED", "BENIGN", "MALICIOUS", "UNKNOWN"}
+
+CASE_STATUSES = {"OPEN", "CLOSED", "ARCHIVED"}
 
 # Netblock owners that are anonymity egress rather than origin hosting. The
 # distinction changes the next investigative step, not the score: for a tunnel
@@ -437,6 +460,12 @@ class EvidenceStore:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self.conn.commit()
+        if not self._one("SELECT case_id FROM case_info LIMIT 1"):
+            now = utcnow()
+            self.conn.execute(
+                "INSERT INTO case_info (case_id, status, created_at, updated_at) "
+                "VALUES (?,?,?,?)", (self._id("case"), "OPEN", now, now))
+            self.conn.commit()
         # (etype, raw) -> times normalization refused it. Extractor precision is
         # valid/extracted, and the store otherwise keeps only the numerator: a
         # rejected value leaves no row anywhere, so without this the denominator
@@ -809,6 +838,37 @@ class EvidenceStore:
             "SELECT af.* FROM analyst_feedback af "
             "JOIN candidates c ON c.candidate_id = af.candidate_id "
             "WHERE c.entity_id=? ORDER BY af.recorded_at DESC", (entity_id,))
+
+    # --- case metadata --------------------------------------------------------
+
+    def case_info(self) -> dict:
+        row = self._one("SELECT * FROM case_info LIMIT 1")
+        return dict(row) if row else {}
+
+    def update_case(self, name: Optional[str] = None, status: Optional[str] = None) -> None:
+        if status and status not in CASE_STATUSES:
+            raise ValueError(f"unknown case status: {status}")
+        fields, params = [], []
+        if name is not None:
+            fields.append("name=?"); params.append(name)
+        if status is not None:
+            fields.append("status=?"); params.append(status)
+        if not fields:
+            return
+        fields.append("updated_at=?"); params.append(utcnow())
+        self.conn.execute(f"UPDATE case_info SET {', '.join(fields)}", params)
+        self.conn.commit()
+
+    def add_case_note(self, note: str, analyst: Optional[str] = None) -> str:
+        nid = self._id("note")
+        self.conn.execute(
+            "INSERT INTO case_notes (note_id, note, analyst, recorded_at) VALUES (?,?,?,?)",
+            (nid, note, analyst, utcnow()))
+        self.conn.commit()
+        return nid
+
+    def case_notes(self) -> List[sqlite3.Row]:
+        return self._all("SELECT * FROM case_notes ORDER BY recorded_at")
 
     def findings(self, ftype: Optional[str] = None) -> List[sqlite3.Row]:
         if ftype:

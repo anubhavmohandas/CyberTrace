@@ -102,6 +102,30 @@ def test_rejects_are_counted():
     store.close()
 
 
+def test_case_info_is_seeded_and_updatable():
+    """A `--db` file is already one investigation; case_info just names that
+    scope. A fresh store gets a case_id with no round trip, updates persist,
+    notes accumulate rather than overwrite, and an unknown status is refused
+    the same way an unknown relationship type is."""
+    store = EvidenceStore(":memory:")
+    info = store.case_info()
+    assert info["case_id"] and info["status"] == "OPEN" and info["name"] is None
+
+    store.update_case(name="Market X takedown", status="closed".upper())
+    info = store.case_info()
+    assert info["name"] == "Market X takedown" and info["status"] == "CLOSED"
+
+    with pytest.raises(ValueError):
+        store.update_case(status="INVESTIGATING")
+
+    store.add_case_note("confirmed with legal", analyst="jdoe")
+    store.add_case_note("re-opened after appeal")
+    notes = store.case_notes()
+    assert [n["note"] for n in notes] == ["confirmed with legal", "re-opened after appeal"]
+    assert notes[0]["analyst"] == "jdoe"
+    store.close()
+
+
 def test_misc_normalizers():
     # A real domain on purpose: reserved names are rejected outright now, so
     # using one here would test the placeholder guard instead of the casing and
