@@ -626,12 +626,13 @@
 <script type="text/x-dc" data-dc-script data-props="{&quot;aiMode&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;scripted&quot;,&quot;live&quot;],&quot;default&quot;:&quot;scripted&quot;,&quot;tsType&quot;:&quot;'scripted' | 'live'&quot;,&quot;section&quot;:&quot;Prototype&quot;},&quot;startView&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;landing&quot;,&quot;cases&quot;,&quot;case&quot;],&quot;default&quot;:&quot;landing&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Prototype&quot;}}">
 const C = { cyan:'#2fb4e8', green:'#63c48b', red:'#d97a6c', sand:'#c2b280', violet:'#9b8fd6', grey:'#7c878c', text:'#c5ccd0', mute:'#67716f' };
 
-// Real case data (web/case-tortaxi.json) is produced by
-// tools/export_case_gui.py, which runs actual captures through
-// cybertrace.correlate.run_correlation() — nothing below this line is
-// hand-authored fixture data. Regenerate the JSON after a new capture;
-// this file only lays it out.
-const CASE_DATA_URL = 'case-tortaxi.json';
+// Real case data comes live from tools/case_api.py, which runs the actual
+// cybertrace.correlate.run_correlation() against a case .db on every
+// request — nothing below this line is hand-authored fixture data. Run
+// `python tools/case_api.py` and open this page through it (not as a bare
+// file) for /api/cases and /api/case/<id> to resolve.
+const CASES_URL = 'api/cases';
+const caseUrl = (id) => 'api/case/' + encodeURIComponent(id);
 const EMPTY_CASE = { case_id:'', title:'', stats:[], candidates:[], drawers:{}, evidence:[], timeline:[], captures:[], suppressed:[], markets:[] };
 
 const ETYPE_COLOR = { PGP_KEY:C.violet, EMAIL:C.green, BTC_ADDRESS:C.sand, ONION_ADDRESS:C.cyan, IP:'#4c565a' };
@@ -673,16 +674,27 @@ class Component extends DCLogic {
     thread: [{ role:'INVESTIGATOR', text:'Ask why any relationship in this case exists, or what the engine rejected. Every answer cites the evidence it used.', points:[] }],
     evFilter: 'All', scoreOpen: {}, verdict: null, verdictNote: '', outcome: null,
     verdicts: {}, snapshot: null, sections: [],
-    caseData: null, loadError: null
+    caseData: null, loadError: null, cases: []
   };
 
   componentDidMount() {
     const v = this.props.startView;
     if (v && v !== this.state.view) this.setState({ view: v });
-    fetch(CASE_DATA_URL)
+    fetch(CASES_URL)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+      .then(cases => {
+        this.setState({ cases });
+        if (cases[0]) this.loadCase(cases[0].id);
+        else this.setState({ loadError: 'no cases in cases/ yet' });
+      })
+      .catch(err => this.setState({ loadError: String(err) }));
+  }
+
+  loadCase(id) {
+    fetch(caseUrl(id))
       .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
       .then(data => this.setState({
-        caseData: data,
+        caseData: data, loadError: null,
         sections: ['Executive summary','Candidates','Evidence','Timeline','Sources','Suppressed evidence'],
         thread: [{ role:'INVESTIGATOR', text:`Loaded ${data.case_id} — ${data.title}. Ask why any candidate is here, or what the engine rejected.`, points:[] }]
       }))
@@ -804,13 +816,19 @@ class Component extends DCLogic {
       openCases: () => this.set({ view:'cases', drawer:null, aiOpen:false }),
       goHome: () => this.set({ view:'landing', drawer:null, aiOpen:false }),
 
-      cases: cd.case_id ? [{
-        id:cd.case_id, title:cd.title,
-        counts:`${cd.markets.length} markets · ${cd.evidence.length} evidence · ${cd.candidates.length} candidates`,
-        band: cd.candidates[0] ? cd.candidates[0].band : 'LOW', bandColor: cd.candidates[0] ? band(cd.candidates[0].band) : C.mute,
-        changed: st.loadError ? 'load error' : 'loaded from real capture', analyst:'—', crossCase:'',
-        open:()=>this.set({view:'case',tab:'Overview'})
-      }] : [],
+      cases: st.cases.map(c => {
+        const isOpen = c.id === cd.case_id;
+        return {
+          id: c.id, title: c.title,
+          counts: isOpen
+            ? `${cd.markets.length} markets · ${cd.evidence.length} evidence · ${cd.candidates.length} candidates`
+            : c.status,
+          band: isOpen && cd.candidates[0] ? cd.candidates[0].band : 'LOW',
+          bandColor: isOpen && cd.candidates[0] ? band(cd.candidates[0].band) : C.mute,
+          changed: isOpen && st.loadError ? 'load error' : 'loaded from real capture', analyst:'—', crossCase:'',
+          open: () => { this.loadCase(c.id); this.set({ view:'case', tab:'Overview' }); }
+        };
+      }),
 
       sourceHealth: [
         { name:'Tor', state: st.loadError ? 'ERR' : 'UP', color: st.loadError ? C.red : C.green }
