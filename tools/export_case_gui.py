@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from cybertrace.correlate import run_correlation, entity_timeline
+from cybertrace.correlate import render_markdown, run_correlation, entity_timeline
 from cybertrace.evidence import EvidenceStore, ingest
 
 BAND_COLOR = {"HIGH": "#63c48b", "MEDIUM": "#2fb4e8", "LOW": "#7c878c"}
@@ -64,8 +64,16 @@ def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
             "label": short(ent["value"], 40), "strength": "DIRECT", "color": "#63c48b"}]
         contradicting = [{"label": c["detail"]} for c in d["contradictions"]] or [{"label": "None recorded"}]
 
+        feedback_rows = store.feedback_for_entity(key)
+        verdict = None
+        if feedback_rows:
+            latest = feedback_rows[0]  # feedback_for_entity is already DESC by recorded_at
+            verdict = {"outcome": latest["outcome"], "note": latest["note"] or "",
+                       "analyst": latest["analyst"] or "", "recorded_at": latest["recorded_at"]}
+
         candidates.append({
-            "key": key, "name": short(ent["value"], 22), "etype": ent["etype"],
+            "key": key, "candidate_id": d["candidate_id"],
+            "name": short(ent["value"], 22), "etype": ent["etype"],
             "band": band, "score": f"{d['score']:.2f}", "markets": d["markets"],
             "assessment": (
                 f"Shared {ent['etype'].replace('_', ' ').title()} across "
@@ -74,8 +82,12 @@ def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
             "supporting": supporting, "contradicting": contradicting,
             "objections": [{"text": c["detail"], "rule": c["rule"].upper()}
                            for c in d["contradictions"]],
+            "recommended_actions": d["recommended_actions"],
+            "limitations": d["limitations"],
+            "verdict": verdict,
         })
 
+        drawer_sources = sorted({ke["url"] for ke in d["key_evidence"]})
         drawers[key] = {
             "etype": ent["etype"], "value": ent["value"],
             "first": d["timeline"][0]["observed_at"][:10] if d["timeline"] else "",
@@ -88,7 +100,8 @@ def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
             } for c in d["contradictions"]],
             "relationships": [{"to": short(m, 24), "rtype": "LINKED_TO", "color": "#2fb4e8"}
                                for m in d["markets"]],
-            "sources": [{"name": "CyberTrace capture · Tor"}],
+            "sources": [{"name": short(u, 40)} for u in drawer_sources]
+                       or [{"name": "CyberTrace capture · Tor"}],
         }
 
         for row in entity_timeline(store, key, limit=20):
@@ -117,7 +130,7 @@ def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
 
     captures = [{
         "source": short(targets.get(s["target_id"], s["target_id"]), 20),
-        "reliability": "—", "rel": "#67716f",
+        "reliability": "—", "rel": "#67716f", "snapshot_id": s["snapshot_id"],
         "sha": s["sha256"][:24] + "…", "at": s["observed_at"][:16].replace("T", " "),
         "status": s["status"], "sc": "#63c48b" if s["status"] == "OK" else "#d97a6c",
     } for s in snaps]
@@ -133,12 +146,15 @@ def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
         {"label": "CANDIDATES", "value": str(len(candidates)), "note": f"{len(results['contradictions'])} contradictions recorded"},
     ]
 
+    info = store.case_info()
     return {
         "case_id": case_id, "title": title,
+        "status": info.get("status", "OPEN"), "updated_at": info.get("updated_at", ""),
         "stats": stats, "candidates": candidates, "drawers": drawers,
         "evidence": evidence_rows, "timeline": timeline_rows,
         "captures": captures, "suppressed": suppressed,
         "markets": sorted(targets.values()),
+        "report_markdown": render_markdown(results["dossiers"], results),
     }
 
 

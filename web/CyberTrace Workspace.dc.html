@@ -119,7 +119,7 @@
       <div style="display:flex;flex-direction:column;gap:1px">
         <div style="padding:0 18px 8px;font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#495255">CASES</div>
         <div onClick="{{ openCases }}" style="cursor:pointer;padding:7px 18px;color:#879196;font-size:13px;border-left:2px solid transparent" style-hover="color:#d5dbde">All cases</div>
-        <div style="padding:7px 18px;color:#2fb4e8;font:500 12px/1.4 'IBM Plex Mono',monospace;background:#10171a;border-left:2px solid #2fb4e8">CASE-0042</div>
+        <div style="padding:7px 18px;color:#2fb4e8;font:500 12px/1.4 'IBM Plex Mono',monospace;background:#10171a;border-left:2px solid #2fb4e8">{{ caseHeaderId }}</div>
       </div>
       <div style="display:flex;flex-direction:column;gap:1px">
         <div style="padding:0 18px 8px;font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#495255">TOOLS</div>
@@ -143,12 +143,12 @@
       <div style="padding:24px 32px 0;border-bottom:1px solid #171c1f;background:#0a0c0e;position:sticky;top:0;z-index:20">
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:24px">
           <div>
-            <div style="font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#2fb4e8">CASE-0042</div>
-            <div style="font-size:20px;font-weight:500;color:#edf2f4;margin-top:8px;letter-spacing:-.3px">Darkweb Actor Investigation</div>
+            <div style="font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#2fb4e8">{{ caseHeaderId }}</div>
+            <div style="font-size:20px;font-weight:500;color:#edf2f4;margin-top:8px;letter-spacing:-.3px">{{ caseTitle }}</div>
             <div style="display:flex;gap:20px;margin-top:10px;font:400 11.5px/1 'IBM Plex Mono',monospace;color:#67716f">
-              <span>STATUS <span style="color:#63c48b">ACTIVE</span></span>
-              <span>CONFIDENCE <span style="color:#2fb4e8">MEDIUM</span></span>
-              <span>UPDATED 2 min ago</span>
+              <span>STATUS <span style="color:{{ caseStatusColor }}">{{ caseStatus }}</span></span>
+              <span>CONFIDENCE <span style="color:#2fb4e8">{{ caseConfidence }}</span></span>
+              <span>UPDATED {{ caseUpdated }}</span>
             </div>
           </div>
           <div style="display:flex;gap:8px;align-items:center">
@@ -228,6 +228,25 @@
                       <div style="display:flex;flex-direction:column;gap:8px">
                         <sc-for list="{{ c.contradicting }}" as="s" hint-placeholder-count="1">
                           <div style="font-size:12.5px;color:#c5ccd0">{{ s.label }}</div>
+                        </sc-for>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-top:1px solid #171c1f;padding-top:16px">
+                    <div style="padding-right:22px">
+                      <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#2fb4e8;margin-bottom:10px">NEXT STEPS</div>
+                      <div style="display:flex;flex-direction:column;gap:6px">
+                        <sc-for list="{{ c.recommendedActions }}" as="a" hint-placeholder-count="2">
+                          <div style="font-size:12px;color:#c5ccd0;line-height:1.5">— {{ a }}</div>
+                        </sc-for>
+                      </div>
+                    </div>
+                    <div style="padding-left:22px;border-left:1px solid #171c1f">
+                      <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:10px">LIMITATIONS</div>
+                      <div style="display:flex;flex-direction:column;gap:6px">
+                        <sc-for list="{{ c.limitations }}" as="l" hint-placeholder-count="2">
+                          <div style="font-size:12px;color:#879196;line-height:1.5">— {{ l }}</div>
                         </sc-for>
                       </div>
                     </div>
@@ -421,7 +440,7 @@
                   <div style="font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:1.2px;color:#2fb4e8">RAW SNAPSHOT · {{ snapshotName }}</div>
                   <div onClick="{{ closeSnapshot }}" style="cursor:pointer;color:#67716f;font-size:12px" style-hover="color:#d5dbde">close</div>
                 </div>
-                <pre style="margin:0;padding:16px;font:400 11.5px/1.7 'IBM Plex Mono',monospace;color:#8b9599;white-space:pre-wrap;word-break:break-all">{{ snapshotBody }}</pre>
+                <pre style="margin:0;padding:16px;max-height:520px;overflow:auto;font:400 11.5px/1.7 'IBM Plex Mono',monospace;color:#8b9599;white-space:pre-wrap;word-break:break-all">{{ snapshotBody }}</pre>
               </div>
             </sc-if>
           </div>
@@ -458,14 +477,14 @@
                   <div style="font:500 9.5px/1 'IBM Plex Mono',monospace;letter-spacing:4px;color:#5c6b72;margin-top:8px">TRACE. ANALYZE. DISRUPT.</div>
                 </div>
                 <div style="text-align:right;font:400 11px/1.7 'IBM Plex Mono',monospace;color:#5c6b72">
-                  CASE-0042<br />23 Aug 2026<br />CONFIDENTIAL
+                  {{ caseHeaderId }}<br />{{ reportDate }}<br />CONFIDENTIAL
                 </div>
               </div>
-              <h2 style="margin:30px 0 0;font-size:25px;font-weight:500;letter-spacing:-.4px">Darkweb Actor Investigation</h2>
+              <h2 style="margin:30px 0 0;font-size:25px;font-weight:500;letter-spacing:-.4px">{{ caseTitle }}</h2>
               <sc-for list="{{ reportBody }}" as="r" hint-placeholder-count="4">
                 <div style="margin-top:28px">
                   <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#8a8175;padding-bottom:9px;border-bottom:1px solid #ddd8ce">{{ r.heading }}</div>
-                  <div style="margin-top:12px;font-size:13.5px;line-height:1.65;color:#2c3336;text-wrap:pretty">{{ r.text }}</div>
+                  <div style="margin-top:12px;font-size:13.5px;line-height:1.65;color:#2c3336;white-space:pre-wrap;text-wrap:pretty">{{ r.text }}</div>
                 </div>
               </sc-for>
               <div style="margin-top:36px;border-top:1px solid #c9c4ba;padding-top:14px;font:400 10px/1.6 'IBM Plex Mono',monospace;color:#8a8175">Scores rank candidates within this case. They are not probabilities. Every claim in this report resolves to a hashed capture listed in Sources.</div>
@@ -639,6 +658,19 @@ const ETYPE_COLOR = { PGP_KEY:C.violet, EMAIL:C.green, BTC_ADDRESS:C.sand, ONION
 
 function short(v, n) { return !v ? v : (v.length <= n ? v : v.slice(0, n - 1) + '…'); }
 
+// The Report tab shows cybertrace.correlate.render_markdown()'s own brief
+// verbatim, chunked on its own '## ' headings — the frontend never re-derives
+// candidate/assessment text itself. Timeline and Sources are appended from
+// already-computed case fields (date/count roll-ups only, no new inference)
+// since render_markdown() has no equivalent section.
+function parseReport(md) {
+  if (!md) return [];
+  return md.split(/\n(?=## )/).map(chunk => {
+    const m = chunk.match(/^##\s+(.+)/);
+    return { heading: m ? m[1].trim() : 'OVERVIEW', body: (m ? chunk.slice(m[0].length) : chunk).trim() };
+  }).filter(s => s.body);
+}
+
 // Fixed 2-market / N-entity layout: this prototype only ever renders one
 // case at a time, so a real force-directed layout is more code than the
 // graph tab needs. occam: hardcode positions for <=2 markets x <=4
@@ -673,7 +705,7 @@ class Component extends DCLogic {
     view: 'landing', tab: 'Overview', query: '', drawer: null, aiOpen: false, aiInput: '',
     thread: [{ role:'INVESTIGATOR', text:'Ask why any relationship in this case exists, or what the engine rejected. Every answer cites the evidence it used.', points:[] }],
     evFilter: 'All', scoreOpen: {}, verdict: null, verdictNote: '', outcome: null,
-    verdicts: {}, snapshot: null, sections: [],
+    snapshot: null, snapshotBody: '',
     caseData: null, loadError: null, cases: []
   };
 
@@ -695,13 +727,20 @@ class Component extends DCLogic {
       .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
       .then(data => this.setState({
         caseData: data, loadError: null,
-        sections: ['Executive summary','Candidates','Evidence','Timeline','Sources','Suppressed evidence'],
         thread: [{ role:'INVESTIGATOR', text:`Loaded ${data.case_id} — ${data.title}. Ask why any candidate is here, or what the engine rejected.`, points:[] }]
       }))
       .catch(err => this.setState({ loadError: String(err) }));
   }
 
   set(p) { this.setState(p); }
+
+  loadSnapshot(caseId, snapshotId, label) {
+    this.setState({ snapshot: label, snapshotBody: 'loading…' });
+    fetch(caseUrl(caseId) + '/snapshot/' + encodeURIComponent(snapshotId))
+      .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+      .then(data => this.setState({ snapshotBody: JSON.stringify(data, null, 2) }))
+      .catch(err => this.setState({ snapshotBody: 'failed to load snapshot: ' + String(err) }));
+  }
 
   ask(q) {
     const cd = this.state.caseData || EMPTY_CASE;
@@ -747,7 +786,7 @@ class Component extends DCLogic {
     const band = (b) => b === 'HIGH' ? C.green : b === 'MEDIUM' ? C.cyan : C.mute;
 
     const candidates = cd.candidates.map(c => {
-      const v = st.verdicts[c.key];
+      const v = c.verdict;
       return Object.assign({}, c, {
         bandColor: band(c.band),
         scoreOpen: !!st.scoreOpen[c.key],
@@ -755,6 +794,8 @@ class Component extends DCLogic {
         toggleScore: () => this.setState(s => ({ scoreOpen: Object.assign({}, s.scoreOpen, { [c.key]: !s.scoreOpen[c.key] }) })),
         openVerdict: () => this.set({ verdict: c, verdictNote: '', outcome: null }),
         explain: () => this.ask('why is ' + c.name + ' connected'),
+        recommendedActions: c.recommended_actions || [],
+        limitations: c.limitations || [],
         verdictLabel: v ? ('ANALYST: ' + v.outcome + ' — ' + v.note) : 'NO ANALYST VERDICT RECORDED',
         verdictColor: v ? (v.outcome === 'REJECTED' ? C.red : C.green) : '#495255'
       });
@@ -794,22 +835,30 @@ class Component extends DCLogic {
 
     const drawer = st.drawer ? cd.drawers[st.drawer] : null;
 
-    const REPORT_TEXT = {
-      'Executive summary': cd.candidates.length
-        ? `${cd.markets.length} onion service(s) assessed. ${cd.candidates.length} candidate(s) generated, top-ranked ${cd.candidates[0].etype.replace(/_/g,' ')} ${short(cd.candidates[0].name,32)} at ${cd.candidates[0].band} (score ${cd.candidates[0].score}). ${cd.suppressed.length} standing objection(s) recorded.`
-        : 'No case data loaded.',
-      'Candidates': cd.candidates.map(c => `${c.etype.replace(/_/g,' ')} ${short(c.name,32)} — ${c.band} (${c.score}): ${c.assessment}`).join(' '),
-      'Evidence': `${cd.evidence.length} observations. Every item resolves to a hashed capture and the section of the page it was extracted from.`,
-      'Timeline': cd.timeline.length ? `First observation ${cd.timeline[0].date}; most recent ${cd.timeline[cd.timeline.length-1].date}.` : '',
-      'Sources': `${cd.captures.length} snapshot(s) captured across ${cd.markets.length} target(s).`,
-      'Suppressed evidence': cd.suppressed.length
-        ? cd.suppressed.map(s => `${s.rule.replace(/_/g,' ')}: ${s.why}`).join(' ')
-        : 'Nothing suppressed in this case.'
-    };
+    // cybertrace.correlate.render_markdown()'s own brief, chunked for display —
+    // Timeline/Sources appended as date/count roll-ups since render_markdown()
+    // has no section for either.
+    const reportChunks = parseReport(cd.report_markdown);
+    if (cd.timeline.length) {
+      reportChunks.push({ heading:'Timeline',
+        body:`First observation ${cd.timeline[0].date}; most recent ${cd.timeline[cd.timeline.length-1].date}.` });
+    }
+    if (cd.captures.length) {
+      reportChunks.push({ heading:'Sources',
+        body:`${cd.captures.length} snapshot(s) captured across ${cd.markets.length} target(s).` });
+    }
 
     return {
       isLanding: st.view === 'landing', isCases: st.view === 'cases', isCase: st.view === 'case',
       query: st.query, detectedType: this.detect(st.query),
+
+      caseHeaderId: cd.case_id || '—',
+      caseTitle: cd.title || 'Untitled case',
+      caseStatus: cd.status || 'OPEN',
+      caseStatusColor: cd.status === 'CLOSED' ? C.mute : cd.status === 'ARCHIVED' ? '#5a6367' : C.green,
+      caseConfidence: cd.candidates[0] ? cd.candidates[0].band : 'LOW',
+      caseUpdated: cd.updated_at ? cd.updated_at.slice(0, 16).replace('T', ' ') + ' UTC' : '—',
+      reportDate: new Date().toISOString().slice(0, 10),
       onQuery: (e) => this.set({ query: e.target.value }),
       onQueryKey: (e) => { if (e.key === 'Enter') this.set({ view:'case', tab:'Overview' }); },
       runTrace: () => this.set({ view:'case', tab:'Overview' }),
@@ -877,17 +926,15 @@ class Component extends DCLogic {
       captures: cd.captures.map(c => ({
         source:c.source, reliability:c.reliability, relColor:c.rel, sha:c.sha, at:c.at,
         status:c.status, statusColor:c.sc,
-        view: () => this.set({ snapshot: c.source })
+        view: () => this.loadSnapshot(cd.case_id, c.snapshot_id, c.source)
       })),
       snapshotOpen: !!st.snapshot, snapshotName: st.snapshot || '',
-      snapshotBody: st.snapshot ? JSON.stringify({ note: 'raw payload not exported to the GUI fixture — read via tools/eval_corpus.py --pairs or the evidence store directly' }, null, 2) : '',
-      closeSnapshot: () => this.set({ snapshot:null }),
+      snapshotBody: st.snapshotBody,
+      closeSnapshot: () => this.set({ snapshot:null, snapshotBody:'' }),
 
-      reportSections: st.sections.map(s => {
-        const on = true;
-        return { label:s, boxColor: C.cyan, boxFill: C.cyan, textColor: '#d5dbde', toggle: () => {} };
-      }),
-      reportBody: st.sections.map(s => ({ heading:s.toUpperCase(), text:REPORT_TEXT[s] || '' })),
+      reportSections: reportChunks.map(s =>
+        ({ label:s.heading, boxColor: C.cyan, boxFill: C.cyan, textColor: '#d5dbde', toggle: () => {} })),
+      reportBody: reportChunks.map(s => ({ heading:s.heading.toUpperCase(), text:s.body })),
 
       drawerOpen: !!drawer && !st.aiOpen,
       drawer: drawer || { etype:'', value:'', first:'', last:'', evidence:[], relationships:[], sources:[] },
@@ -934,10 +981,18 @@ class Component extends DCLogic {
       saveColor: st.outcome && st.verdictNote.trim() ? '#04161f' : '#495255',
       saveVerdict: () => {
         if (!st.outcome || !st.verdictNote.trim()) return;
-        this.setState(s => ({
-          verdicts: Object.assign({}, s.verdicts, { [s.verdict.key]: { outcome:s.outcome, note:s.verdictNote.trim() } }),
-          verdict:null, outcome:null, verdictNote:''
-        }));
+        const caseId = cd.case_id;
+        fetch(caseUrl(caseId) + '/verdict', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ candidate_id: st.verdict.candidate_id, outcome: st.outcome, note: st.verdictNote.trim() })
+        })
+          .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e.error || ('HTTP ' + r.status)))))
+          .then(() => {
+            this.setState({ verdict:null, outcome:null, verdictNote:'' });
+            this.loadCase(caseId);
+          })
+          .catch(err => this.setState({ loadError: 'verdict not saved: ' + String(err) }));
       }
     };
   }

@@ -29,3 +29,18 @@ def test_tortaxi_export_matches_gui_shape():
     assert case["evidence"]
     assert case["timeline"] == sorted(case["timeline"], key=lambda r: r["date"])
     assert len(case["markets"]) == 2
+
+    # case metadata real (section 7): always present even on a fresh store.
+    assert case["status"] == "OPEN"
+    assert case["updated_at"]
+
+    # report output real (section 8): the actual dossier/report machinery,
+    # not a client-generated summary.
+    assert "correlation brief" in case["report_markdown"].lower()
+    for c in case["candidates"]:
+        assert c["candidate_id"]
+        assert c["recommended_actions"]
+        assert c["limitations"]
+        assert c["verdict"] is None  # no analyst_feedback recorded on this fresh store
+
+    assert all("snapshot_id" in cap for cap in case["captures"])

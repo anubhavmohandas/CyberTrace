@@ -51,6 +51,14 @@ def case_payload(cases_dir: Path, case_id: str) -> dict | None:
         return build_payload(store, case_id, title)
 
 
+def snapshot_body(cases_dir: Path, case_id: str, snapshot_id: str) -> dict | None:
+    db_path = cases_dir / f"{case_id}.db"
+    if not db_path.is_file():
+        return None
+    with EvidenceStore(str(db_path)) as store:
+        return store.snapshot_payload(snapshot_id)
+
+
 def make_handler(cases_dir: Path):
     class Handler(SimpleHTTPRequestHandler):
         def do_GET(self):
@@ -59,11 +67,46 @@ def make_handler(cases_dir: Path):
                 cases = [case_summary(p) for p in sorted(cases_dir.glob("*.db"))]
                 return self._json(cases)
             if path.startswith("/api/case/"):
-                payload = case_payload(cases_dir, path[len("/api/case/"):])
+                rest = path[len("/api/case/"):]
+                if "/snapshot/" in rest:
+                    case_id, snapshot_id = rest.split("/snapshot/", 1)
+                    payload = snapshot_body(cases_dir, case_id, snapshot_id)
+                    if payload is None:
+                        return self._json({"error": "no such case"}, status=404)
+                    return self._json(payload)
+                payload = case_payload(cases_dir, rest)
                 if payload is None:
                     return self._json({"error": "no such case"}, status=404)
                 return self._json(payload)
             return super().do_GET()
+
+        def do_POST(self):
+            path = unquote(urlsplit(self.path).path)
+            if path.startswith("/api/case/") and path.endswith("/verdict"):
+                case_id = path[len("/api/case/"):-len("/verdict")]
+                return self._save_verdict(case_id)
+            return self._json({"error": "not found"}, status=404)
+
+        def _save_verdict(self, case_id: str) -> None:
+            db_path = cases_dir / f"{case_id}.db"
+            if not db_path.is_file():
+                return self._json({"error": "no such case"}, status=404)
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except json.JSONDecodeError:
+                return self._json({"error": "invalid JSON body"}, status=400)
+            candidate_id = body.get("candidate_id")
+            outcome = body.get("outcome")
+            if not candidate_id or not outcome:
+                return self._json({"error": "candidate_id and outcome are required"}, status=400)
+            with EvidenceStore(str(db_path)) as store:
+                try:
+                    feedback_id = store.record_feedback(
+                        candidate_id, outcome, note=body.get("note"), analyst=body.get("analyst"))
+                except ValueError as e:
+                    return self._json({"error": str(e)}, status=400)
+            return self._json({"feedback_id": feedback_id}, status=200)
 
         def _json(self, obj, status: int = 200) -> None:
             body = json.dumps(obj).encode("utf-8")
