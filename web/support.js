@@ -309,7 +309,18 @@
     tr: "sc-raw-tr",
     td: "sc-raw-td",
     th: "sc-raw-th",
-    caption: "sc-raw-caption"
+    caption: "sc-raw-caption",
+    // hand-added (not from dc-runtime's build — see CyberTrace's
+    // web/support.js header/CLAUDE.md note): SVG elements with typed
+    // numeric attributes (cx/cy/r, x1/y1/x2/y2, x/y) fail Blink/WebKit's
+    // "Expected length" attribute validation the instant the raw,
+    // un-substituted {{ }} template source is parsed as live DOM, before
+    // this runtime ever gets to compile/hydrate it — same class of raw-
+    // parse quirk RAW_WRAP already exists to route around for table/select.
+    // Reapply this block if support.js is ever regenerated.
+    circle: "sc-raw-circle",
+    line: "sc-raw-line",
+    text: "sc-raw-text"
   };
   var RAW_UNWRAP = Object.fromEntries(
     Object.entries(RAW_WRAP).map(([k, v]) => [v, k])
@@ -583,7 +594,12 @@
           if (!ctx?.__streamingNow) {
             if (document.body?.hasAttribute("data-dc-editor-on")) {
               return h(
-                "span",
+                // hand-added (see RAW_WRAP note above): "tspan", not "span" \u2014
+                // React namespaces this element the same as its parent, so it
+                // renders correctly whether that parent is HTML or (as for the
+                // Graph tab's node/edge labels) SVG <text>; a plain HTML
+                // <span> silently fails to paint inside SVG text content.
+                "tspan",
                 { key: i, className: "sc-interp sc-unresolved" },
                 "{{ " + p.trim() + " }}"
               );
@@ -595,7 +611,7 @@
             return null;
           }
           return h(
-            "span",
+            "tspan",
             { key: i, className: "sc-interp sc-missing" },
             p.trim()
           );
@@ -604,7 +620,7 @@
           return h(getReact().Fragment, { key: i }, v);
         }
         if (v === null || typeof v === "boolean") return null;
-        return h("span", { key: i, className: "sc-interp" }, String(v));
+        return h("tspan", { key: i, className: "sc-interp" }, String(v));
       })
     );
   }

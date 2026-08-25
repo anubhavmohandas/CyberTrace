@@ -314,18 +314,24 @@ window.__resources = {
 
             <div style="border:1px solid #1c2427;background:#0a0d0f;position:relative">
               <svg viewBox="0 0 920 500" style="width:100%;display:block">
+                <!-- circle/line/text below are authored as sc-raw-* (see RAW_WRAP in
+                     support.js): raw, un-substituted "{{ n.x }}" etc. fail SVG's typed
+                     numeric-attribute validation the instant the browser parses this
+                     block as live DOM, before dc-runtime ever compiles/hydrates it.
+                     RAW_UNWRAP restores the real tag names once resolve() has filled
+                     in real numbers, so the hydrated graph is unaffected. -->
                 <sc-for list="{{ edges }}" as="e" hint-placeholder-count="8">
                   <g>
-                    <line x1="{{ e.x1 }}" y1="{{ e.y1 }}" x2="{{ e.x2 }}" y2="{{ e.y2 }}" stroke="{{ e.color }}" stroke-width="{{ e.w }}" stroke-dasharray="{{ e.dash }}"></line>
-                    <text x="{{ e.lx }}" y="{{ e.ly }}" fill="{{ e.labelColor }}" font-family="IBM Plex Mono, monospace" font-size="9.5" letter-spacing="0.6" text-anchor="middle">{{ e.label }}</text>
+                    <sc-raw-line x1="{{ e.x1 }}" y1="{{ e.y1 }}" x2="{{ e.x2 }}" y2="{{ e.y2 }}" stroke="{{ e.color }}" stroke-width="{{ e.w }}" stroke-dasharray="{{ e.dash }}"></sc-raw-line>
+                    <sc-raw-text x="{{ e.lx }}" y="{{ e.ly }}" fill="{{ e.labelColor }}" font-family="IBM Plex Mono, monospace" font-size="9.5" letter-spacing="0.6" text-anchor="middle">{{ e.label }}</sc-raw-text>
                   </g>
                 </sc-for>
                 <sc-for list="{{ nodes }}" as="n" hint-placeholder-count="9">
                   <g onClick="{{ n.select }}" style="cursor:pointer">
-                    <circle cx="{{ n.x }}" cy="{{ n.y }}" r="{{ n.rOuter }}" fill="{{ n.halo }}"></circle>
-                    <circle cx="{{ n.x }}" cy="{{ n.y }}" r="{{ n.r }}" fill="{{ n.fill }}" stroke="{{ n.stroke }}" stroke-width="1.5"></circle>
-                    <text x="{{ n.x }}" y="{{ n.ty }}" fill="{{ n.textColor }}" font-family="IBM Plex Mono, monospace" font-size="11" text-anchor="middle">{{ n.label }}</text>
-                    <text x="{{ n.x }}" y="{{ n.ty2 }}" fill="#5a6367" font-family="IBM Plex Mono, monospace" font-size="9" letter-spacing="0.8" text-anchor="middle">{{ n.etype }}</text>
+                    <sc-raw-circle cx="{{ n.x }}" cy="{{ n.y }}" r="{{ n.rOuter }}" fill="{{ n.halo }}"></sc-raw-circle>
+                    <sc-raw-circle cx="{{ n.x }}" cy="{{ n.y }}" r="{{ n.r }}" fill="{{ n.fill }}" stroke="{{ n.stroke }}" stroke-width="1.5"></sc-raw-circle>
+                    <sc-raw-text x="{{ n.x }}" y="{{ n.ty }}" fill="{{ n.textColor }}" font-family="IBM Plex Mono, monospace" font-size="11" text-anchor="middle">{{ n.label }}</sc-raw-text>
+                    <sc-raw-text x="{{ n.x }}" y="{{ n.ty2 }}" fill="#5a6367" font-family="IBM Plex Mono, monospace" font-size="9" letter-spacing="0.8" text-anchor="middle">{{ n.etype }}</sc-raw-text>
                   </g>
                 </sc-for>
               </svg>
