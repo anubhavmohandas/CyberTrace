@@ -3,6 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+// dc-runtime (support.js) fetches React/ReactDOM from unpkg.com by default —
+// an investigation tool that routes targets over Tor can't assume that CDN
+// is reachable. window.__resources is dc-runtime's own override hook
+// (see cdnScriptFor in support.js); pointing both entries at the vendored
+// copies in web/vendor/ makes the Workspace hydrate with no external network
+// dependency. Keep these two files in sync with the REACT_URL/REACT_DOM_URL
+// versions pinned in support.js if it's ever regenerated.
+window.__resources = {
+  'https://unpkg.com/react@18.3.1/umd/react.production.min.js': './vendor/react.production.min.js',
+  'https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js': './vendor/react-dom.production.min.js'
+};
+</script>
 <script src="./support.js"></script>
 </head>
 <body>
