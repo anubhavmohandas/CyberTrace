@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import argparse
 import functools
+import hmac
 import json
+import os
 import sys
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -33,6 +35,15 @@ from tools.export_case_gui import build_payload
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
+
+# Unset (local dev, same-origin) => open, exactly today's behavior.
+# Set (any public deploy) => every /api/* request needs X-CT-Api-Key: <value>,
+# since this process otherwise has zero authentication and a public URL
+# would let anyone read case evidence or write fake analyst verdicts.
+API_KEY = os.environ.get("CT_API_KEY", "")
+# Netlify (or wherever the frontend is hosted) is a different origin than
+# this API once they're split across two hosts — needs its own CORS grant.
+ALLOWED_ORIGIN = os.environ.get("CT_ALLOWED_ORIGIN", "*")
 
 
 def case_summary(db_path: Path) -> dict:
@@ -61,8 +72,22 @@ def snapshot_body(cases_dir: Path, case_id: str, snapshot_id: str) -> dict | Non
 
 def make_handler(cases_dir: Path):
     class Handler(SimpleHTTPRequestHandler):
+        def _authorized(self) -> bool:
+            if not API_KEY:
+                return True
+            return hmac.compare_digest(self.headers.get("X-CT-Api-Key", ""), API_KEY)
+
+        def do_OPTIONS(self):
+            self.send_response(204)
+            self._cors_headers()
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-CT-Api-Key")
+            self.end_headers()
+
         def do_GET(self):
             path = unquote(urlsplit(self.path).path)
+            if path.startswith("/api/") and not self._authorized():
+                return self._json({"error": "unauthorized"}, status=401)
             if path == "/api/cases":
                 cases = [case_summary(p) for p in sorted(cases_dir.glob("*.db"))]
                 return self._json(cases)
@@ -82,6 +107,8 @@ def make_handler(cases_dir: Path):
 
         def do_POST(self):
             path = unquote(urlsplit(self.path).path)
+            if path.startswith("/api/") and not self._authorized():
+                return self._json({"error": "unauthorized"}, status=401)
             if path.startswith("/api/case/") and path.endswith("/verdict"):
                 case_id = path[len("/api/case/"):-len("/verdict")]
                 return self._save_verdict(case_id)
@@ -108,11 +135,17 @@ def make_handler(cases_dir: Path):
                     return self._json({"error": str(e)}, status=400)
             return self._json({"feedback_id": feedback_id}, status=200)
 
+        def _cors_headers(self) -> None:
+            self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
+            if ALLOWED_ORIGIN != "*":
+                self.send_header("Vary", "Origin")
+
         def _json(self, obj, status: int = 200) -> None:
             body = json.dumps(obj).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self._cors_headers()
             self.end_headers()
             self.wfile.write(body)
 
@@ -123,13 +156,22 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cases-dir", type=Path, default=ROOT / "cases")
-    ap.add_argument("--port", type=int, default=8765)
+    # $PORT: most PaaS hosts (Render, Railway, Fly...) assign the port and
+    # expect the process to read it from the environment.
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8765)))
+    # 127.0.0.1 only accepts connections from the same machine — fine for
+    # local dev, unreachable if this process is meant to serve a public host.
+    ap.add_argument("--host", default=os.environ.get("CT_API_HOST", "127.0.0.1"))
     args = ap.parse_args()
 
     args.cases_dir.mkdir(exist_ok=True)
     handler = functools.partial(make_handler(args.cases_dir), directory=str(WEB_DIR))
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
-    print(f"serving {WEB_DIR} + /api on http://127.0.0.1:{args.port}/CyberTrace%20Workspace.dc.html "
+    server = ThreadingHTTPServer((args.host, args.port), handler)
+    if not API_KEY and args.host != "127.0.0.1":
+        print("WARNING: serving on a non-local host with CT_API_KEY unset — "
+              "every /api/* route is open to anyone who can reach this host.",
+              file=sys.stderr)
+    print(f"serving {WEB_DIR} + /api on http://{args.host}:{args.port}/CyberTrace%20Workspace.dc.html "
           f"(cases dir: {args.cases_dir})")
     try:
         server.serve_forever()

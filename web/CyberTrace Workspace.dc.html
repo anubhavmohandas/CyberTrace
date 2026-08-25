@@ -663,8 +663,19 @@ const C = { cyan:'#2fb4e8', green:'#63c48b', red:'#d97a6c', sand:'#c2b280', viol
 // request — nothing below this line is hand-authored fixture data. Run
 // `python tools/case_api.py` and open this page through it (not as a bare
 // file) for /api/cases and /api/case/<id> to resolve.
-const CASES_URL = 'api/cases';
-const caseUrl = (id) => 'api/case/' + encodeURIComponent(id);
+//
+// When the Workspace is deployed separately from case_api.py (e.g. this
+// page on Netlify, the API on its own host), same-origin relative paths
+// stop working. window.__CT_API_BASE / window.__CT_API_KEY are the same
+// kind of override hook as window.__resources above (see support.js) —
+// set them in a <script> before this one to point at the deployed API.
+// Left unset, both default to today's local same-origin behavior.
+const API_BASE = (window.__CT_API_BASE || '').replace(/\/$/, '');
+const CASES_URL = API_BASE + '/api/cases';
+const caseUrl = (id) => API_BASE + '/api/case/' + encodeURIComponent(id);
+const apiFetch = (url, opts) => fetch(url, window.__CT_API_KEY
+  ? { ...opts, headers: { ...(opts && opts.headers), 'X-CT-Api-Key': window.__CT_API_KEY } }
+  : opts);
 const EMPTY_CASE = { case_id:'', title:'', stats:[], candidates:[], drawers:{}, evidence:[], timeline:[], captures:[], suppressed:[], markets:[] };
 
 const ETYPE_COLOR = { PGP_KEY:C.violet, EMAIL:C.green, BTC_ADDRESS:C.sand, ONION_ADDRESS:C.cyan, IP:'#4c565a' };
@@ -725,7 +736,7 @@ class Component extends DCLogic {
   componentDidMount() {
     const v = this.props.startView;
     if (v && v !== this.state.view) this.setState({ view: v });
-    fetch(CASES_URL)
+    apiFetch(CASES_URL)
       .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
       .then(cases => {
         this.setState({ cases });
@@ -736,7 +747,7 @@ class Component extends DCLogic {
   }
 
   loadCase(id) {
-    fetch(caseUrl(id))
+    apiFetch(caseUrl(id))
       .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
       .then(data => this.setState({
         caseData: data, loadError: null,
@@ -749,7 +760,7 @@ class Component extends DCLogic {
 
   loadSnapshot(caseId, snapshotId, label) {
     this.setState({ snapshot: label, snapshotBody: 'loading…' });
-    fetch(caseUrl(caseId) + '/snapshot/' + encodeURIComponent(snapshotId))
+    apiFetch(caseUrl(caseId) + '/snapshot/' + encodeURIComponent(snapshotId))
       .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
       .then(data => this.setState({ snapshotBody: JSON.stringify(data, null, 2) }))
       .catch(err => this.setState({ snapshotBody: 'failed to load snapshot: ' + String(err) }));
@@ -995,7 +1006,7 @@ class Component extends DCLogic {
       saveVerdict: () => {
         if (!st.outcome || !st.verdictNote.trim()) return;
         const caseId = cd.case_id;
-        fetch(caseUrl(caseId) + '/verdict', {
+        apiFetch(caseUrl(caseId) + '/verdict', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ candidate_id: st.verdict.candidate_id, outcome: st.outcome, note: st.verdictNote.trim() })
