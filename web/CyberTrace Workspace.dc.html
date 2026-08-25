@@ -682,7 +682,7 @@ const caseUrl = (id) => API_BASE + '/api/case/' + encodeURIComponent(id);
 const apiFetch = (url, opts) => fetch(url, window.__CT_API_KEY
   ? { ...opts, headers: { ...(opts && opts.headers), 'X-CT-Api-Key': window.__CT_API_KEY } }
   : opts);
-const EMPTY_CASE = { case_id:'', title:'', stats:[], candidates:[], drawers:{}, evidence:[], timeline:[], captures:[], suppressed:[], markets:[] };
+const EMPTY_CASE = { case_id:'', title:'', stats:[], candidates:[], drawers:{}, evidence:[], timeline:[], captures:[], suppressed:[], markets:[], market_relationships:[] };
 
 const ETYPE_COLOR = { PGP_KEY:C.violet, EMAIL:C.green, BTC_ADDRESS:C.sand, ONION_ADDRESS:C.cyan, IP:'#4c565a' };
 
@@ -701,10 +701,13 @@ function parseReport(md) {
   }).filter(s => s.body);
 }
 
-// Fixed 2-market / N-entity layout: this prototype only ever renders one
-// case at a time, so a real force-directed layout is more code than the
-// graph tab needs. occam: hardcode positions for <=2 markets x <=4
-// entities; revisit with a layout algorithm if a case ever outgrows that.
+// Market nodes stack in a single left-hand column; candidate nodes fan out on
+// the right. Every market-pair edge is read straight off backend-computed
+// cd.market_relationships (build_payload, from correlate.detect_successors) —
+// however many markets a case has, none of its asserted relationships are
+// dropped. occam: a straight-line column means 3+ markets' pairwise edges can
+// visually cross near a middle node; a force-directed layout is more code
+// than this prototype's graph tab needs — revisit if a case routinely runs 3+.
 function buildGraph(cd) {
   const nodes = [], edges = [];
   const marketPos = {};
@@ -721,12 +724,12 @@ function buildGraph(cd) {
       edges.push({ x1:mp.x, y1:mp.y, x2:x, y2:y, label:'PUBLISHES', color:'#4a575c', w:2.4, dash:'0' });
     });
   });
-  if (cd.markets.length === 2) {
-    const [a, b] = cd.markets.map(m => marketPos[m]);
-    const hasContra = cd.suppressed.length > 0;
-    edges.push({ x1:a.x, y1:a.y, x2:b.x, y2:b.y, label: hasContra ? 'CLONE?' : 'LINKED_TO',
-                 color: hasContra ? C.red : '#4a575c', w:1.8, dash: hasContra ? '5 5' : '0' });
-  }
+  (cd.market_relationships || []).forEach(r => {
+    const a = marketPos[r.source], b = marketPos[r.target];
+    if (!a || !b) return;
+    edges.push({ x1:a.x, y1:a.y, x2:b.x, y2:b.y, label: r.suppressed ? 'CLONE?' : r.relation,
+                 color: r.suppressed ? C.red : '#4a575c', w:1.8, dash: r.suppressed ? '5 5' : '0' });
+  });
   return { nodes, edges };
 }
 

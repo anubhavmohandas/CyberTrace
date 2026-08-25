@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from cybertrace.correlate import render_markdown, run_correlation, entity_timeline
+from cybertrace.correlate import DERIVED_TARGET, render_markdown, run_correlation, entity_timeline
 from cybertrace.evidence import EvidenceStore, ingest
 
 BAND_COLOR = {"HIGH": "#63c48b", "MEDIUM": "#2fb4e8", "LOW": "#7c878c"}
@@ -31,6 +31,17 @@ BAND_COLOR = {"HIGH": "#63c48b", "MEDIUM": "#2fb4e8", "LOW": "#7c878c"}
 
 def short(value: str, n: int = 28) -> str:
     return value if len(value) <= n else value[: n - 1] + "…"
+
+
+def _clone_why(results: dict, source: str, target: str) -> str:
+    """The engine's own explanation for a suppressed CLONE_SUSPECT pair,
+    already computed by contradictions_from_clones — matched by market pair
+    rather than recomputed."""
+    pair = frozenset((source, target))
+    for c in results["contradictions"]:
+        if c.get("rule") == "shared_artifacts_explained_by_cloning" and frozenset(c.get("markets", ())) == pair:
+            return c["detail"]
+    return ""
 
 
 def build(paths: list[Path], case_id: str, title: str) -> dict:
@@ -44,8 +55,12 @@ def build(paths: list[Path], case_id: str, title: str) -> dict:
 def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
     """Compute the GUI JSON shape from an already-populated store (batch or live)."""
     results = run_correlation(store)
+    # DERIVED_TARGET (m5.correlate.local) is M5's own pseudo-target for
+    # snapshotting its derived successor claims — excluded here the same way
+    # correlate.py excludes it everywhere else it enumerates markets, so an
+    # asserted (non-suppressed) relationship never adds a phantom market node.
     targets = {r["target_id"]: r["url"] for r in
-               store._all("SELECT target_id, url FROM targets")}
+               store._all("SELECT target_id, url FROM targets WHERE url != ?", (DERIVED_TARGET,))}
     snaps = store._all(
         "SELECT snapshot_id, target_id, collector, status, sha256, observed_at "
         "FROM snapshots ORDER BY observed_at")
@@ -140,6 +155,21 @@ def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
         "rule": c["rule"].upper(), "why": c["detail"],
     } for d in results["dossiers"] for c in d["contradictions"]]
 
+    # Market-to-market edges for the GUI graph, straight off detect_successors
+    # (via run_correlation's "successors") — the engine already ranked every
+    # pair and decided LINKED_TO/SUCCESSOR_OF vs. CLONE_SUSPECT; this only
+    # reshapes it for the frontend, same as every other list above. Leads
+    # (BELOW_THRESHOLD/REFERENCES_ONLY) are excluded on purpose: the engine's
+    # own comment on this calls them "too weak to assert, too specific to
+    # throw away" — visible to an analyst, never drawn as a relationship.
+    market_relationships = [{
+        "source": s["source_url"], "target": s["target_url"],
+        "relation": s["relation"], "suppressed": s["suppressed"], "score": s["score"],
+        "why": (_clone_why(results, s["source_url"], s["target_url"]) if s["suppressed"]
+                else (s["signals_detail"][0]["detail"] if s["signals_detail"] else "")),
+    } for s in results["successors"]
+      if s["source_url"] and s["target_url"] and (s["relation"] or s["suppressed"] == "CLONE_SUSPECT")]
+
     stats = [
         {"label": "ENTITIES", "value": str(len(candidates) + len(targets)), "note": "unique after normalization"},
         {"label": "EVIDENCE", "value": str(len(evidence_rows)), "note": f"observations across {len(snaps)} snapshots"},
@@ -154,6 +184,7 @@ def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
         "evidence": evidence_rows, "timeline": timeline_rows,
         "captures": captures, "suppressed": suppressed,
         "markets": sorted(targets.values()),
+        "market_relationships": market_relationships,
         "report_markdown": render_markdown(results["dossiers"], results),
     }
 
