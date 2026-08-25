@@ -1,0 +1,9 @@
+[build]
+  publish = "web"
+
+# The Workspace's real filename has a space in it — redirect the bare domain
+# root to it so the deployed URL doesn't 404.
+[[redirects]]
+  from = "/"
+  to = "/CyberTrace%20Workspace.dc.html"
+  status = 200
