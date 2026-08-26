@@ -144,6 +144,7 @@ class TronModule(BaseModule):
             'tagged': True,
             'categories': sorted({t['category'] for t in tags if t.get('category')}),
             'labels': sorted({t['label'] for t in tags if t.get('label')})[:10],
+            'packs': sorted({t['pack'] for t in tags if t.get('pack')}),
             'is_exchange_tagged': any((t.get('category') or '').lower() == 'exchange'
                                       for t in tags),
         })
@@ -186,6 +187,7 @@ class TronModule(BaseModule):
             if source == 'exchange_tags' and data.get('tagged'):
                 summary['exchange_tag_categories'] = data.get('categories')
                 summary['exchange_tag_labels'] = data.get('labels')
+                summary['exchange_tag_packs'] = data.get('packs')
                 summary['exchange_tag_is_exchange'] = data.get('is_exchange_tagged')
 
         return summary

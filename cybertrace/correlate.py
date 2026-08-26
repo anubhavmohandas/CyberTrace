@@ -668,6 +668,85 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
     return sorted(out, key=lambda w: (w["hops"], w["entity_id"]))
 
 
+_TRACE_CHAIN_ETYPES = {"bitcoin": "BTC_ADDRESS", "ethereum": "ETH_ADDRESS",
+                       "tron": "TRX_ADDRESS"}
+
+
+def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4) -> Optional[dict]:
+    """One traced wallet's path to the nearest analyst-labeled exchange (see
+    wallet_exchange_paths), plus every piece of third-party evidence already
+    on record for each address along that path -- dataset labels, abuse
+    reports, GraphSense tagpack hits -- each cited to the specific address it
+    came from.
+
+    This is the investigation-report layer, built entirely by reading
+    metadata evidence.enrich_bitcoin already wrote for addresses that were
+    themselves searched; it computes NO new score. `flags` is a list of exact
+    findings, not a risk_level or confidence composite -- inventing either
+    would be exactly the kind of unearned precision this codebase refuses
+    elsewhere (see EXCHANGE_HOP_DECAY's own "prior, not calibrated" note, and
+    evidence.enrich_bitcoin's ellipticpp_*/chainabuse_* non-attributive
+    discipline). An analyst, or the grounded Investigator, reads `flags` and
+    judges risk themselves -- the engine never becomes the attribution
+    decision-maker.
+
+    Only hops that were themselves independently searched carry metadata; a
+    hop discovered purely as a counterparty (never itself investigated) has
+    none, and this is silent about it rather than implying absence-of-risk.
+
+    Returns None if `address` was never searched into this store at all.
+    """
+    from .detector import detect_input_type
+    _, chain = detect_input_type(address)
+    etype = _TRACE_CHAIN_ETYPES.get(chain, "BTC_ADDRESS")
+    start_id = store.find_entity(etype, address)
+    if start_id is None:
+        return None
+
+    hit = next((w for w in wallet_exchange_paths(store, max_hops=max_hops)
+               if w["entity_id"] == start_id), None)
+    path_ids = hit["path"] if hit else [start_id]
+
+    marks = ",".join("?" * len(path_ids))
+    by_id = {r["entity_id"]: r for r in store._all(
+        f"SELECT entity_id, raw_value, metadata FROM entities WHERE entity_id IN ({marks})",
+        tuple(path_ids))}
+
+    flags = []
+    for eid in path_ids:
+        row = by_id.get(eid)
+        if row is None:
+            continue
+        meta = json.loads(row["metadata"] or "{}")
+        addr = row["raw_value"]
+        if meta.get("reported_scam"):
+            cats = meta.get("chainabuse_scam_categories")
+            flags.append(f"{addr}: reported for abuse"
+                         + (f" ({', '.join(cats)})" if cats else ""))
+        if meta.get("ellipticpp_dataset_label_name") == "illicit":
+            flags.append(f"{addr}: Elliptic++ dataset label = illicit")
+        packs = meta.get("exchange_tag_packs")
+        if packs:
+            flags.append(f"{addr}: GraphSense tagpack(s): {', '.join(packs)}")
+
+    if hit:
+        if hit["hops"] > 0:
+            flags.append(f"{hit['hops']} hop(s) of layering before reaching a labeled exchange")
+        flags.append(f"reached analyst-labeled exchange: {hit['exchange']} "
+                     f"(reachability confidence {hit['confidence']:.2f})")
+
+    return {
+        "entity_id": start_id,
+        "address": by_id[start_id]["raw_value"] if start_id in by_id else address,
+        "path": [by_id[eid]["raw_value"] if eid in by_id else eid for eid in path_ids],
+        "hops": hit["hops"] if hit else None,
+        "exchange": hit["exchange"] if hit else None,
+        "exchange_confidence": hit["confidence"] if hit else None,
+        "flags": flags,
+        "evidence_ids": hit["evidence_ids"] if hit else [],
+    }
+
+
 # --- successors --------------------------------------------------------------
 
 def market_artifact_map(store: EvidenceStore) -> Dict[str, Dict[str, Set[str]]]:

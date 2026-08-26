@@ -145,6 +145,53 @@ def test_label_exchange_rejects_an_invalid_address(tmp_path):
     assert 'not a valid' in result.output.lower()
 
 
+# --- trace-wallet ---------------------------------------------------------------
+
+def test_trace_wallet_reports_path_and_flags(tmp_path):
+    """The full loop: an enriched wallet with a scam report and a GraphSense
+    tagpack hit, one hop from a labeled exchange -- trace-wallet must surface
+    both flags plus the path, reading nothing but metadata already on record.
+    """
+    from cybertrace.evidence import EvidenceStore, enrich_bitcoin
+
+    db = str(tmp_path / 'case.db')
+    btc = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+    counterparty = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+    with EvidenceStore(db) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", btc)
+        target = store.upsert_target("btc:" + btc)
+        sid = store.insert_snapshot(target, {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr, {
+            "address": btc, "counterparty_addresses": [counterparty],
+            "reported_scam": True, "chainabuse_scam_categories": ["PHISHING"],
+            "exchange_tag_packs": ["ransomware"],
+        }, "bitcoin")
+
+    CliRunner().invoke(
+        cli, ['label-exchange', counterparty, '--exchange', 'Test Exchange', '--db', db])
+
+    result = CliRunner().invoke(cli, ['trace-wallet', btc, '--db', db, '--output', 'json'])
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output)
+    assert report['address'] == btc
+    assert report['exchange'] == 'test exchange'
+    assert report['hops'] == 1
+    assert any('reported for abuse' in f and 'PHISHING' in f for f in report['flags'])
+    assert any('ransomware' in f for f in report['flags'])
+    assert any('layering' in f for f in report['flags'])
+
+
+def test_trace_wallet_unsearched_address_fails_loudly(tmp_path):
+    from cybertrace.evidence import EvidenceStore
+    db = str(tmp_path / 'case.db')
+    with EvidenceStore(db):
+        pass
+    result = CliRunner().invoke(
+        cli, ['trace-wallet', '1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2', '--db', db])
+    assert result.exit_code != 0
+    assert 'never searched' in result.output.lower()
+
+
 # --- --db input validation ----------------------------------------------------
 
 def test_missing_db_value_is_a_usage_error(tmp_path):

@@ -420,6 +420,60 @@ def label_exchange_cmd(address: str, exchange: str, db_path: str,
         click.echo(f"[+] Recorded {address} as {exchange} ({rel_id})", err=True)
 
 
+@cli.command('trace-wallet')
+@click.argument('address')
+@click.option('--db', 'db_path', required=True, type=click.Path(exists=True, dir_okay=False),
+              help='Evidence store to trace through')
+@click.option('--max-hops', default=4, show_default=True,
+              help='Furthest layering depth to search for a labeled exchange')
+@click.option('--output', '-o', 'output_format', default='table',
+              type=click.Choice(['table', 'json']), help='Output format')
+def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: str):
+    """
+    Trace a wallet already searched into this case: its path (if any) to the
+    nearest analyst-labeled exchange, and every third-party flag already on
+    record for each address along that path.
+
+    Reports findings only — no risk score. Each flag names the address and
+    the evidence it came from; label-exchange and search results feed this,
+    correlate never invents new ones here.
+
+    \b
+      cybertrace trace-wallet bc1q... --db case.db
+    """
+    from .correlate import wallet_trace_report
+    from .evidence import EvidenceStore
+
+    with EvidenceStore(db_path) as store:
+        report = wallet_trace_report(store, address, max_hops=max_hops)
+
+    if report is None:
+        click.echo(f"[!] {address!r} was never searched into this case", err=True)
+        sys.exit(1)
+
+    if output_format == 'json':
+        import json as _json
+        click.echo(_json.dumps(report, indent=2))
+        return
+
+    click.echo(f"Wallet: {report['address']}")
+    if len(report['path']) > 1:
+        click.echo("Path: " + " -> ".join(report['path']))
+    if report['exchange']:
+        click.echo(f"Nearest labeled exchange: {report['exchange']} "
+                  f"({report['hops']} hop(s), reachability confidence "
+                  f"{report['exchange_confidence']:.2f})")
+    else:
+        click.echo("Nearest labeled exchange: none found within "
+                  f"{max_hops} hop(s)")
+    if report['flags']:
+        click.echo("Flags:")
+        for flag in report['flags']:
+            click.echo(f"  - {flag}")
+    else:
+        click.echo("Flags: none on record")
+
+
 @cli.command('case')
 @click.option('--db', 'db_path', required=True, type=click.Path(dir_okay=False),
               help='Evidence store to show or update')

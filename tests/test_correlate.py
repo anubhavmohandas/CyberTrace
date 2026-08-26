@@ -15,7 +15,7 @@ from cybertrace.correlate import (
     crypto_clusters, detect_successors,
     entity_discrimination, entity_funnel_profile, feedback_discrimination, markets_for_entity,
     market_windows, render_dossier_html, render_html, render_markdown, run_correlation,
-    username_aliases, wallet_exchange_paths,
+    username_aliases, wallet_exchange_paths, wallet_trace_report,
 )
 from cybertrace.evidence import EvidenceStore, enrich_bitcoin, enrich_email, ingest, label_exchange
 from cybertrace.modules.base import ModuleResult, SourceResult
@@ -1174,6 +1174,52 @@ def test_wallet_exchange_paths_never_score_a_candidate(tmp_path):
         assert results["operators"] == []
         assert results["infra"] == []
         assert results["ips"] == []
+
+
+def test_wallet_trace_report_never_searched_returns_none(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        assert wallet_trace_report(store, BTC_VALID) is None
+
+
+def test_wallet_trace_report_surfaces_flags_from_metadata_already_on_record(tmp_path):
+    """Every flag must cite the specific address it came from, and the report
+    computes no score of its own -- see the function's own docstring on why
+    that would be exactly the fabricated-precision failure the rest of this
+    engine refuses (EXCHANGE_HOP_DECAY, ellipticpp_*, chainabuse_*)."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        target = store.upsert_target("btc:" + BTC_VALID)
+        sid = store.insert_snapshot(target, {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr, {
+            "address": BTC_VALID, "counterparty_addresses": [BTC_OTHER],
+            "reported_scam": True, "chainabuse_scam_categories": ["PHISHING"],
+            "exchange_tag_packs": ["ransomware", "ofac"],
+        }, "bitcoin")
+        assert label_exchange(store, BTC_OTHER, "Test Exchange") is not None
+
+        report = wallet_trace_report(store, BTC_VALID)
+        assert report["address"] == BTC_VALID
+        assert report["path"] == [BTC_VALID, BTC_OTHER]
+        assert report["hops"] == 1
+        assert report["exchange"] == "test exchange"
+        assert report["exchange_confidence"] == round(EXCHANGE_HOP_DECAY ** 1, 4)
+        assert any(BTC_VALID in f and "PHISHING" in f for f in report["flags"])
+        assert any(BTC_VALID in f and "ransomware" in f and "ofac" in f for f in report["flags"])
+        assert any("1 hop(s) of layering" in f for f in report["flags"])
+        assert any("test exchange" in f for f in report["flags"])
+        assert report["evidence_ids"]
+
+
+def test_wallet_trace_report_with_no_metadata_and_no_path_is_still_honest(tmp_path):
+    """A wallet with no enrichment and no path to a labeled exchange must
+    report an empty flag list, not silently invented ones -- see the
+    function's docstring on staying silent about un-investigated hops."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        report = wallet_trace_report(store, BTC_VALID)
+        assert report["path"] == [BTC_VALID]
+        assert report["exchange"] is None
+        assert report["flags"] == []
 
 
 def test_two_strangers_on_one_shared_host_are_not_linked(tmp_path):

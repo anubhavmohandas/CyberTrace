@@ -395,6 +395,14 @@ class BitcoinModule(BaseModule):
         Degrades the same way _check_ellipticpp does: dataset not
         downloaded, or downloaded but not indexed yet, both report
         success=False with an explanatory error rather than raising.
+
+        `packs` (the contributed tagpack's own filename -- 'ransomware',
+        'ofac', 'lazarus', 'hydra', ...) is included alongside `categories`
+        because `category` is not a reliable risk taxonomy in this corpus:
+        checked directly against the archive, ransomware.yaml, ransomwhere.yaml
+        and sextortion_talos.yaml all carry category=None on every tag, and
+        ofac.yaml uses the generic category 'user'. The pack name is the
+        actually-curated signal for what an address was flagged for.
         """
         if not exchange_tags.available():
             return SourceResult(
@@ -416,6 +424,7 @@ class BitcoinModule(BaseModule):
                 'tagged': True,
                 'categories': sorted({t['category'] for t in tags if t.get('category')}),
                 'labels': sorted({t['label'] for t in tags if t.get('label')})[:10],
+                'packs': sorted({t['pack'] for t in tags if t.get('pack')}),
                 'is_exchange_tagged': any((t.get('category') or '').lower() == 'exchange'
                                           for t in tags),
             },
@@ -539,6 +548,7 @@ class BitcoinModule(BaseModule):
             if source == 'exchange_tags' and data.get('tagged'):
                 summary['exchange_tag_categories'] = data.get('categories')
                 summary['exchange_tag_labels'] = data.get('labels')
+                summary['exchange_tag_packs'] = data.get('packs')
                 summary['exchange_tag_is_exchange'] = data.get('is_exchange_tagged')
 
             # Connected addresses

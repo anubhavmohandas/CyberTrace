@@ -1454,7 +1454,12 @@ def enrich_bitcoin(store: EvidenceStore, snapshot_id: str, addr_id: str, summary
     it never writes EXCHANGE_DEPOSIT itself. Only label_exchange does that,
     always on an analyst's own say-so; exchange_tag_is_exchange exists so an
     analyst reviewing this address knows there IS a third-party exchange
-    claim worth checking before they call it.
+    claim worth checking before they call it. exchange_tag_packs is kept
+    alongside categories/labels because the corpus's own `category` field is
+    not a trustworthy risk taxonomy -- several of its highest-signal packs
+    (ransomware.yaml, ransomwhere.yaml, sextortion_talos.yaml) carry no
+    category at all, so correlate.wallet_trace_report reads pack names, not
+    categories, to surface what an address was actually flagged for.
 
     chainabuse_report_dates carries WHEN each report was FILED — a fact about
     a third party's paperwork, not a sighting of the address. It must never be
@@ -1491,6 +1496,8 @@ def enrich_bitcoin(store: EvidenceStore, snapshot_id: str, addr_id: str, summary
                               summary.get("exchange_tag_categories")),
                              ("exchange_tag_labels",
                               summary.get("exchange_tag_labels")),
+                             ("exchange_tag_packs",
+                              summary.get("exchange_tag_packs")),
                              ("exchange_tag_is_exchange",
                               summary.get("exchange_tag_is_exchange"))) if v})
 
