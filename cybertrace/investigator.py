@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from .correlate import run_correlation, market_windows
+from .correlate import evidence_chain, run_correlation, market_windows
 from .memory import case_history, historical_matches, prior_references, summarize
 from .evidence import EvidenceStore
 from . import llm_provider
@@ -104,12 +104,25 @@ def build_context(store: EvidenceStore, candidate_id: Optional[str] = None) -> d
 
     finding_ids = {c["finding_id"] for c in results["contradictions"] if c.get("finding_id")}
 
+    # Wallet reachability is its own report, not a candidate (see
+    # correlate.wallet_exchange_paths) -- pulled in here only so an answer can
+    # cite its evidence the same validated way as everything else.
+    wallet_exchange_paths = results["wallet_exchange_paths"]
+    for w in wallet_exchange_paths:
+        for e in evidence_chain(store, w["evidence_ids"]):
+            evidence_by_id[e["observation_id"]] = {
+                "id": e["observation_id"], "extraction_method": e["extraction_method"],
+                "url": e["url"], "sha256": e["sha256"], "observed_at": e["observed_at"],
+                "confidence": e["confidence"],
+            }
+
     return {
         "case": store.case_info(),
         "markets": markets,
         "candidates": candidates,
         "suppressed_relationships": suppressed_relationships,
         "contradictions": results["contradictions"],
+        "wallet_exchange_paths": wallet_exchange_paths,
         "memory": memory_ctx,
         "known_ids": {
             "evidence_ids": set(evidence_by_id),
@@ -217,6 +230,23 @@ def _next_steps(ctx: dict) -> dict:
             "claims": claims, "limitations": limitations}
 
 
+def _wallet_exchange(ctx: dict) -> dict:
+    paths = ctx["wallet_exchange_paths"]
+    if not paths:
+        return _insufficient("No wallet in this case has a recorded path to an "
+                             "analyst-labeled exchange address.")
+    claims = [{
+        "text": f"`{_short(w['value'], 32)}` is {w['hops']} hop(s) from {w['exchange']} "
+                f"(confidence {w['confidence']:.2f}).",
+        "kind": "INFERRED", "evidence_ids": w["evidence_ids"],
+        "candidate_ids": [], "finding_ids": [],
+    } for w in paths]
+    return {"answer": "Nearest analyst-labeled exchange for each traced wallet:",
+            "claims": claims,
+            "limitations": ["Exchange labels are analyst-asserted, never inferred by the engine.",
+                            "Hop distance is reachability, not proof of an intentional transfer."]}
+
+
 _INTENTS = [
     (("connect", "related", "linked"), _connected),
     (("reject", "suppress", "why not", "didn't"), _suppressed),
@@ -224,6 +254,7 @@ _INTENTS = [
     (("why is this here", "why here", "why is it here"), _why_here),
     (("changed", "different", "update", "since"), _changed),
     (("next step", "investigate next", "recommended action"), _next_steps),
+    (("vasp", "exchange", "deposit"), _wallet_exchange),
 ]
 
 
@@ -334,12 +365,19 @@ def demo() -> None:
             "timeline": [], "verdict": None,
         }],
         "suppressed_relationships": [], "contradictions": [],
-        "known_ids": {"evidence_ids": {"OBS-1"}, "candidate_ids": {"OP-abc12345"}, "finding_ids": {"FIND-1"}},
-        "_evidence_by_id": {"OBS-1": {"id": "OBS-1"}},
+        "wallet_exchange_paths": [{"entity_id": "e2", "value": "bc1qabc", "exchange": "Test Exchange",
+                                   "hops": 1, "confidence": 0.75, "path": ["e2", "e3"],
+                                   "evidence_ids": ["OBS-2"]}],
+        "known_ids": {"evidence_ids": {"OBS-1", "OBS-2"}, "candidate_ids": {"OP-abc12345"},
+                     "finding_ids": {"FIND-1"}},
+        "_evidence_by_id": {"OBS-1": {"id": "OBS-1"}, "OBS-2": {"id": "OBS-2"}},
     }
 
     det = _deterministic_answer("why are they connected", ctx)
     assert det["claims"][0]["evidence_ids"] == ["OBS-1"]
+
+    wallet_det = _deterministic_answer("which vasp is closest to this wallet", ctx)
+    assert wallet_det["claims"][0]["evidence_ids"] == ["OBS-2"]
 
     fabricated = _validate({"answer": "same operator confirmed", "claims": [
         {"text": "fabricated", "kind": "OBSERVED", "evidence_ids": ["OBS-FAKE"],
@@ -347,6 +385,12 @@ def demo() -> None:
     assert fabricated["claims"][0]["evidence_ids"] == [], "fabricated evidence id must be stripped"
     # the real contradiction must still be force-appended next to the model's claim
     assert any(c["text"] == "clone-consistent overlap" for c in fabricated["claims"])
+
+    fabricated_wallet = _validate({"answer": "closest exchange", "claims": [
+        {"text": "fabricated wallet hop", "kind": "INFERRED", "evidence_ids": ["OBS-WALLET-FAKE"],
+         "candidate_ids": [], "finding_ids": []}]}, ctx)
+    assert fabricated_wallet["claims"][0]["evidence_ids"] == [], \
+        "fabricated wallet-path evidence id must be stripped"
 
     print("investigator.demo() OK")
 

@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from cybertrace.correlate import DERIVED_TARGET, render_markdown, run_correlation, entity_timeline
-from cybertrace.evidence import EvidenceStore, ingest
+from cybertrace.evidence import ANALYST_TARGET, EvidenceStore, ingest
 
 BAND_COLOR = {"HIGH": "#63c48b", "MEDIUM": "#2fb4e8", "LOW": "#7c878c"}
 
@@ -56,11 +56,13 @@ def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
     """Compute the GUI JSON shape from an already-populated store (batch or live)."""
     results = run_correlation(store)
     # DERIVED_TARGET (m5.correlate.local) is M5's own pseudo-target for
-    # snapshotting its derived successor claims — excluded here the same way
-    # correlate.py excludes it everywhere else it enumerates markets, so an
-    # asserted (non-suppressed) relationship never adds a phantom market node.
+    # snapshotting its derived successor claims, and ANALYST_TARGET the same
+    # for an analyst's own label_exchange assertions — both excluded here the
+    # same way correlate.py excludes DERIVED_TARGET everywhere it enumerates
+    # markets, so neither adds a phantom market/capture node.
     targets = {r["target_id"]: r["url"] for r in
-               store._all("SELECT target_id, url FROM targets WHERE url != ?", (DERIVED_TARGET,))}
+               store._all("SELECT target_id, url FROM targets WHERE url NOT IN (?, ?)",
+                          (DERIVED_TARGET, ANALYST_TARGET))}
     snaps = store._all(
         "SELECT snapshot_id, target_id, collector, status, sha256, observed_at "
         "FROM snapshots ORDER BY observed_at")
@@ -185,6 +187,7 @@ def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
         "captures": captures, "suppressed": suppressed,
         "markets": sorted(targets.values()),
         "market_relationships": market_relationships,
+        "wallet_exchange_paths": results["wallet_exchange_paths"],
         "report_markdown": render_markdown(results["dossiers"], results),
         "notes": [{"note": n["note"], "analyst": n["analyst"] or "", "recorded_at": n["recorded_at"]}
                   for n in store.case_notes()],

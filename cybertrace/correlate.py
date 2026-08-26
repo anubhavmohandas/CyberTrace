@@ -56,6 +56,15 @@ FUNNELS: Dict[str, Set[str]] = {
 # in a funnel would score every self-hosted site in a family as the same party.
 # tests/test_correlate.py::test_every_evidence_class_travels_exactly_as_far_as_claimed
 # pins this, so wiring it becomes a deliberate edit rather than a quiet one.
+#
+# TRANSACTED_WITH and EXCHANGE_DEPOSIT are out for the same categorical reason
+# shared_ip/shared_domain are gated (NON_ATTRIBUTIVE_SIGNALS below), just
+# structural instead of runtime: being paid by an address is not control
+# (evidence.enrich_bitcoin), and an EXCHANGE_DEPOSIT edge is an analyst's own
+# citation (evidence.label_exchange), never the engine's finding. Neither can
+# score a funnel or a successor pair without a labelled corpus this tool does
+# not have — see wallet_exchange_paths, which reads both purely for
+# reachability and is never folded into entity_funnel_profile.
 
 # Relative prior per funnel: a reused key is worth more than a referenced host.
 FUNNEL_WEIGHT = {"f1_contact": 1.0, "f2_pgp_reuse": 1.3, "f3_crypto": 1.2,
@@ -574,6 +583,89 @@ def crypto_clusters(store: EvidenceStore) -> Dict[str, str]:
         for node in group:
             out[node] = f"cluster:{label}"
     return out
+
+
+# --- wallet -> exchange reachability -----------------------------------------
+
+EXCHANGE_HOP_DECAY = 0.75  # prior, not calibrated -- see FUNNEL_WEIGHT's own comment
+
+
+def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]:
+    """For every address with a path to an analyst-labeled exchange address,
+    over TRANSACTED_WITH + PART_OF_CLUSTER edges (undirected), the shortest hop
+    count, decayed confidence, and the evidence resolving each hop.
+
+    Never folded into entity_funnel_profile / candidate_operators: reachability
+    is not control, and a wallet must never out-rank an OPERATOR candidate
+    merely because a path to a labeled exchange exists. This is a report for an
+    analyst to act on (see evidence.label_exchange), not a claim the engine
+    makes on its own.
+    """
+    # "evidence_ids" throughout this module means observation ids (what a
+    # relationship's evidence row resolves to, per entity_funnel_profile) --
+    # not the `evidence` table's own primary key -- so investigator._finalize
+    # can resolve every id here the same way it resolves any other claim.
+    adjacency: Dict[str, List[tuple]] = defaultdict(list)
+    for r in store._all(
+            "SELECT r.source_entity_id AS a, r.target_entity_id AS b, "
+            "       ev.observation_ids FROM relationships r "
+            "LEFT JOIN evidence ev ON ev.relationship_id = r.rel_id "
+            "WHERE r.rtype IN ('TRANSACTED_WITH','PART_OF_CLUSTER') AND r.status='ACTIVE'"):
+        obs_ids = json.loads(r["observation_ids"] or "[]")
+        adjacency[r["a"]].append((r["b"], obs_ids))
+        adjacency[r["b"]].append((r["a"], obs_ids))
+
+    exchange_of: Dict[str, tuple] = {}
+    for r in store._all(
+            "SELECT r.source_entity_id AS addr, e.normalized_value AS exchange, "
+            "       ev.observation_ids FROM relationships r "
+            "JOIN entities e ON e.entity_id = r.target_entity_id "
+            "LEFT JOIN evidence ev ON ev.relationship_id = r.rel_id "
+            "WHERE r.rtype='EXCHANGE_DEPOSIT' AND r.status='ACTIVE'"):
+        exchange_of[r["addr"]] = (r["exchange"], json.loads(r["observation_ids"] or "[]"))
+
+    values = {r["entity_id"]: r["normalized_value"] for r in store._all(
+        "SELECT entity_id, normalized_value FROM entities "
+        "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS')")}
+
+    out = []
+    for start in values:
+        if start in exchange_of:
+            exchange, obs_ids = exchange_of[start]
+            out.append({"entity_id": start, "value": values[start], "exchange": exchange,
+                       "hops": 0, "confidence": 1.0, "path": [start],
+                       "evidence_ids": obs_ids})
+            continue
+
+        visited = {start}
+        frontier = [(start, [start], [])]
+        found = None
+        for hop in range(1, max_hops + 1):
+            next_frontier = []
+            for node, path, ev_ids in frontier:
+                for peer, hop_obs in adjacency.get(node, []):
+                    if peer in visited:
+                        continue
+                    visited.add(peer)
+                    new_path = path + [peer]
+                    new_ev = ev_ids + hop_obs
+                    if peer in exchange_of:
+                        exchange, label_obs = exchange_of[peer]
+                        found = {"entity_id": start, "value": values[start], "exchange": exchange,
+                                "hops": hop, "confidence": round(EXCHANGE_HOP_DECAY ** hop, 4),
+                                "path": new_path,
+                                "evidence_ids": new_ev + label_obs}
+                        break
+                    next_frontier.append((peer, new_path, new_ev))
+                if found:
+                    break
+            if found:
+                break
+            frontier = next_frontier
+        if found:
+            out.append(found)
+
+    return sorted(out, key=lambda w: (w["hops"], w["entity_id"]))
 
 
 # --- successors --------------------------------------------------------------
@@ -1479,6 +1571,15 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
         lines += [f"- [{c['severity']}] {c['detail']}" for c in results["contradictions"]]
         lines.append("")
 
+    if results["wallet_exchange_paths"]:
+        lines += ["## Wallet → nearest exchange", "",
+                  "_Reachability only — an analyst-labeled exchange address, never an engine "
+                  "finding. Does not affect any candidate's score._", ""]
+        for w in results["wallet_exchange_paths"]:
+            lines.append(f"- `{w['value']}` → {w['hops']} hop(s) → {w['exchange']} "
+                         f"(confidence {w['confidence']:.2f})")
+        lines.append("")
+
     for d in dossiers:
         lines += [f"## {d['candidate_id']} · {d['role']} · {d['confidence_level']} "
                   f"(score {d['score']:.3f})", "",
@@ -1796,6 +1897,7 @@ def run_correlation(store: EvidenceStore, min_conf: float = 0.35,
         "successors": successors,
         "clones": clones,
         "clusters": sorted(set(crypto_clusters(store).values())),
+        "wallet_exchange_paths": wallet_exchange_paths(store),
         "contradictions": flags,
     }
     dossiers = [build_dossier(store, c, aliases, flags, windows)

@@ -434,6 +434,11 @@ class BitcoinModule(BaseModule):
             # back, and it is the half of `connected_addresses` that evidences
             # shared control rather than a payment.
             'cospend_addresses': [],
+            # The other half of `connected_addresses`: paid-to/paid-from peers,
+            # no shared control implied. This is the raw material for tracing a
+            # wallet toward a labeled exchange address (evidence.enrich_bitcoin
+            # writes these as TRANSACTED_WITH, never PART_OF_CLUSTER).
+            'counterparty_addresses': [],
         }
         
         # Aggregate from sources
@@ -494,5 +499,7 @@ class BitcoinModule(BaseModule):
                 result.related.extend(data['connected_addresses'][:5])
             if data.get('cospend_addresses'):
                 summary['cospend_addresses'] = data['cospend_addresses']
-        
+            if data.get('counterparty_addresses'):
+                summary['counterparty_addresses'] = data['counterparty_addresses']
+
         return summary

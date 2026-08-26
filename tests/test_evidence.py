@@ -1476,5 +1476,44 @@ def test_feedback_candidate_id_survives_a_re_correlate(tmp_path):
         assert len(store.feedback_for(cid)) == 1
 
 
+def test_label_exchange_writes_an_analyst_asserted_fact(tmp_path):
+    """label_exchange is the only writer of EXCHANGE_DEPOSIT edges, and it must
+    look like analyst_feedback -- provenance-tracked, never an OSINT-derived
+    edge -- while still honoring the same evidence-resolves-to-a-hashed-
+    snapshot invariant every other writer does."""
+    from cybertrace.evidence import label_exchange
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        rel_id = label_exchange(store, BTC_VALID, "Test Exchange",
+                                analyst="jdoe", note="publicly documented cold wallet")
+        assert rel_id is not None
+
+        rel = store._one("SELECT * FROM relationships WHERE rel_id=?", (rel_id,))
+        assert rel["rtype"] == "EXCHANGE_DEPOSIT"
+        assert rel["source_label"] == "analyst:jdoe"
+
+        addr_id = store.find_entity("BTC_ADDRESS", BTC_VALID)
+        exch_id = store.find_entity("EXCHANGE", "Test Exchange")
+        assert rel["source_entity_id"] == addr_id
+        assert rel["target_entity_id"] == exch_id
+
+        ev = store._one("SELECT * FROM evidence WHERE relationship_id=?", (rel_id,))
+        assert ev is not None
+        obs_ids = json.loads(ev["observation_ids"])
+        assert len(obs_ids) == 1
+        obs = store._one(
+            "SELECT o.*, s.sha256 FROM observations o "
+            "JOIN snapshots s ON s.snapshot_id = o.snapshot_id WHERE o.observation_id=?",
+            (obs_ids[0],))
+        assert obs["extraction_method"] == "analyst:label"
+        assert obs["sha256"]   # resolves to a real hashed snapshot, like any other claim
+
+
+def test_label_exchange_rejects_an_invalid_address(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        from cybertrace.evidence import label_exchange
+        assert label_exchange(store, "not-a-btc-address", "Test Exchange") is None
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

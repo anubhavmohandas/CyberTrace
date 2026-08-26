@@ -9,15 +9,15 @@ from datetime import datetime, timezone
 
 from cybertrace.correlate import (
     FUNNELS,
-    COMMON_ARTIFACT_FLOOR, LEAD_FLOOR,
+    COMMON_ARTIFACT_FLOOR, EXCHANGE_HOP_DECAY, LEAD_FLOOR,
     canonical_entity_key, candidate_infra, candidate_ips, candidate_operators,
     confidence_level, contradictions_from_identity, contradictions_from_key_temporal,
     crypto_clusters, detect_successors,
     entity_discrimination, entity_funnel_profile, feedback_discrimination, markets_for_entity,
     market_windows, render_dossier_html, render_html, render_markdown, run_correlation,
-    username_aliases,
+    username_aliases, wallet_exchange_paths,
 )
-from cybertrace.evidence import EvidenceStore, enrich_bitcoin, enrich_email, ingest
+from cybertrace.evidence import EvidenceStore, enrich_bitcoin, enrich_email, ingest, label_exchange
 from cybertrace.modules.base import ModuleResult, SourceResult
 from cybertrace.modules.darkweb_module import DarkwebModule
 from cybertrace.monitor import candidate_deltas
@@ -933,9 +933,11 @@ def test_cospend_addresses_form_one_wallet(tmp_path):
 
 
 def test_counterparty_addresses_never_join_the_cluster(tmp_path):
-    """A paid address is not a co-spent one. enrich_bitcoin must read only
-    cospend_addresses — feeding it connected_addresses (cospend | counterparty)
-    would pull every customer of a market into the operator's wallet."""
+    """A paid address is not a co-spent one. enrich_bitcoin must read
+    cospend_addresses into PART_OF_CLUSTER and counterparty_addresses into the
+    separate, weaker TRANSACTED_WITH relation — feeding either into the other
+    would either pull every customer of a market into the operator's wallet
+    (cluster) or claim a payment as shared control (cluster from counterparty)."""
     cospend_peer = "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
     counterparty_peer = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
     with EvidenceStore(str(tmp_path / "e.db")) as store:
@@ -950,8 +952,15 @@ def test_counterparty_addresses_never_join_the_cluster(tmp_path):
         }, "bitcoin")
 
         clusters = crypto_clusters(store)
-        assert store.find_entity("BTC_ADDRESS", counterparty_peer) is None  # never upserted
+        counterparty_id = store.find_entity("BTC_ADDRESS", counterparty_peer)
+        assert counterparty_id is not None  # upserted for tracing, just not clustered
+        assert counterparty_id not in clusters      # never joins the co-spend component
         assert clusters[addr] == clusters[store.find_entity("BTC_ADDRESS", cospend_peer)]
+
+        rel = store._one(
+            "SELECT rtype FROM relationships WHERE source_entity_id=? AND target_entity_id=?",
+            (addr, counterparty_id))
+        assert rel["rtype"] == "TRANSACTED_WITH"
 
 
 def test_exchange_consolidation_cospend_does_not_link_two_unrelated_markets(tmp_path):
@@ -1007,6 +1016,148 @@ def test_exchange_consolidation_cospend_does_not_link_two_unrelated_markets(tmp_
         results = run_correlation(store)
         assert all(s["relation"] is None for s in results["successors"])
         assert results["operators"] == []
+
+
+def test_transacted_with_never_links_two_unrelated_markets(tmp_path):
+    """The counterparty analog of the cospend-consolidation test above: being
+    paid by the same address is even weaker than co-spending it, so it must be
+    at least as safe -- no funnel score, no successor edge, no operator."""
+    shared_counterparty = "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, seen=JAN, bitcoin_addresses=[BTC_VALID]), store)
+        ingest(_result(ONION_B, seen=JAN, bitcoin_addresses=[BTC_OTHER]), store)
+
+        addr_a = store.find_entity("BTC_ADDRESS", BTC_VALID)
+        target_a = store.upsert_target("btc:" + BTC_VALID)
+        sid_a = store.insert_snapshot(target_a, {}, "bitcoin")
+        enrich_bitcoin(store, sid_a, addr_a,
+                       {"address": BTC_VALID, "counterparty_addresses": [shared_counterparty]},
+                       "bitcoin")
+
+        addr_b = store.find_entity("BTC_ADDRESS", BTC_OTHER)
+        target_b = store.upsert_target("btc:" + BTC_OTHER)
+        sid_b = store.insert_snapshot(target_b, {}, "bitcoin")
+        enrich_bitcoin(store, sid_b, addr_b,
+                       {"address": BTC_OTHER, "counterparty_addresses": [shared_counterparty]},
+                       "bitcoin")
+
+        counterparty_id = store.find_entity("BTC_ADDRESS", shared_counterparty)
+        assert entity_funnel_profile(store, counterparty_id)["total_conf"] == 0.0
+
+        results = run_correlation(store)
+        assert all(s["relation"] is None for s in results["successors"])
+        assert results["operators"] == []
+
+
+def test_transacted_with_and_exchange_deposit_are_in_no_funnel():
+    """Structural non-attribution, not a runtime gate: unlike shared_domain/
+    shared_favicon/shared_ip (NON_ATTRIBUTIVE_SIGNALS, checked at scoring
+    time), these two relationship types are simply never assigned to a funnel
+    at all -- the same mechanism DISCOVERED_VIA and HAS_FINGERPRINT rely on."""
+    funnelled = {rtype for rtypes in FUNNELS.values() for rtype in rtypes}
+    assert "TRANSACTED_WITH" not in funnelled
+    assert "EXCHANGE_DEPOSIT" not in funnelled
+
+
+# --- wallet -> exchange reachability ------------------------------------------
+
+def test_wallet_exchange_paths_direct_hit(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        rel = label_exchange(store, BTC_VALID, "Test Exchange", analyst="jdoe",
+                             note="public disclosure")
+        assert rel is not None
+
+        paths = wallet_exchange_paths(store)
+        assert len(paths) == 1
+        assert paths[0]["exchange"] == "test exchange"
+        assert paths[0]["hops"] == 0
+        assert paths[0]["confidence"] == 1.0
+        assert paths[0]["evidence_ids"]
+
+
+def test_wallet_exchange_paths_one_hop_via_transacted_with(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        target = store.upsert_target("btc:" + BTC_VALID)
+        sid = store.insert_snapshot(target, {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": BTC_VALID, "counterparty_addresses": [BTC_OTHER]}, "bitcoin")
+        assert label_exchange(store, BTC_OTHER, "Test Exchange") is not None
+
+        paths = wallet_exchange_paths(store)
+        row = next(w for w in paths if w["entity_id"] == addr)
+        assert row["hops"] == 1
+        assert row["confidence"] == round(EXCHANGE_HOP_DECAY ** 1, 4)
+        assert row["evidence_ids"]
+
+
+def test_wallet_exchange_paths_two_hops_mixing_cluster_and_transacted_with(tmp_path):
+    """A -cospend-> B -counterparty-> C(labeled exchange): the walk must cross
+    both PART_OF_CLUSTER and TRANSACTED_WITH edges to find the nearest label."""
+    third = "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr_a = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        target_a = store.upsert_target("btc:" + BTC_VALID)
+        sid_a = store.insert_snapshot(target_a, {}, "bitcoin")
+        enrich_bitcoin(store, sid_a, addr_a,
+                       {"address": BTC_VALID, "cospend_addresses": [BTC_OTHER]}, "bitcoin")
+
+        addr_b = store.find_entity("BTC_ADDRESS", BTC_OTHER)
+        target_b = store.upsert_target("btc:" + BTC_OTHER)
+        sid_b = store.insert_snapshot(target_b, {}, "bitcoin")
+        enrich_bitcoin(store, sid_b, addr_b,
+                       {"address": BTC_OTHER, "counterparty_addresses": [third]}, "bitcoin")
+
+        assert label_exchange(store, third, "Test Exchange") is not None
+
+        paths = wallet_exchange_paths(store)
+        row = next(w for w in paths if w["entity_id"] == addr_a)
+        assert row["hops"] == 2
+        assert row["confidence"] == round(EXCHANGE_HOP_DECAY ** 2, 4)
+
+
+def test_wallet_exchange_paths_no_path_and_max_hops_cutoff(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        assert wallet_exchange_paths(store) == []   # no exchange labeled anywhere yet
+
+        # A chain longer than max_hops must not report the far end at all.
+        chain = [BTC_VALID, BTC_OTHER, "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy",
+                "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"]
+        target = store.upsert_target("btc:chain")
+        sid = store.insert_snapshot(target, {}, "bitcoin")
+        prev = store.upsert_entity("BTC_ADDRESS", chain[0])
+        for nxt_value in chain[1:]:
+            nxt = store.upsert_entity("BTC_ADDRESS", nxt_value)
+            enrich_bitcoin(store, sid, prev, {"address": "x", "counterparty_addresses": [nxt_value]},
+                           "bitcoin")
+            prev = nxt
+        assert label_exchange(store, chain[-1], "Test Exchange") is not None  # 3 hops from chain[0]
+
+        near = {w["entity_id"] for w in wallet_exchange_paths(store, max_hops=2)}
+        assert store.find_entity("BTC_ADDRESS", chain[0]) not in near   # 3 hops away, past the cutoff
+
+        far = {w["entity_id"]: w["hops"] for w in wallet_exchange_paths(store, max_hops=4)}
+        assert far[store.find_entity("BTC_ADDRESS", chain[0])] == 3
+
+
+def test_wallet_exchange_paths_never_score_a_candidate(tmp_path):
+    """A wallet's reachability to a labeled exchange must never upgrade or
+    create an OPERATOR/INFRA/IP candidate -- see wallet_exchange_paths'
+    own docstring on why this is a report, not a finding."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        target = store.upsert_target("btc:" + BTC_VALID)
+        sid = store.insert_snapshot(target, {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": BTC_VALID, "counterparty_addresses": [BTC_OTHER]}, "bitcoin")
+        assert label_exchange(store, BTC_OTHER, "Test Exchange") is not None
+
+        results = run_correlation(store)
+        assert results["wallet_exchange_paths"], "sanity: the path was actually found"
+        assert results["operators"] == []
+        assert results["infra"] == []
+        assert results["ips"] == []
 
 
 def test_two_strangers_on_one_shared_host_are_not_linked(tmp_path):

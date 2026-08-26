@@ -333,6 +333,7 @@ def watch(db_path: str, targets, discover: bool, output_format: str,
     """
     import json
     from pathlib import Path
+    from .correlate import wallet_exchange_paths
     from .evidence import EvidenceStore
     from .monitor import run_watch
 
@@ -361,6 +362,9 @@ def watch(db_path: str, targets, discover: bool, output_format: str,
                            f"not in this case:")
                 for row in report['discovered'][:20]:
                     click.echo(f"    {row['service'][:28]:<30} {row['onion']}")
+            for w in wallet_exchange_paths(store):
+                click.echo(f"\n  [WALLET] {w['value']} -> {w['hops']} hop(s) -> "
+                           f"{w['exchange']} (confidence {w['confidence']:.2f})")
 
         if dossier_path:
             from .correlate import render_dossier_html, run_correlation
@@ -406,6 +410,38 @@ def feedback(candidate_id: str, db_path: str, outcome: str, note: Optional[str],
             click.echo(f"[!] {e}", err=True)
             sys.exit(1)
         click.echo(f"[+] Recorded {outcome.upper()} for {candidate_id} ({fid})", err=True)
+
+
+@cli.command('label-exchange')
+@click.argument('address')
+@click.option('--exchange', required=True, help='Exchange/VASP name this address belongs to')
+@click.option('--db', 'db_path', required=True, type=click.Path(exists=True, dir_okay=False),
+              help='Evidence store to record the label against')
+@click.option('--note', default=None, help='Citation: report, filing, or how you know this')
+@click.option('--analyst', default=None, help='Who is recording this')
+def label_exchange_cmd(address: str, exchange: str, db_path: str,
+                       note: Optional[str], analyst: Optional[str]):
+    """
+    Record that a Bitcoin address is a known deposit/hot-wallet address for an
+    exchange, from an analyst's own knowledge — never inferred by CyberTrace.
+
+    This is the only way an EXCHANGE_DEPOSIT edge is created. Once recorded,
+    `correlate`/`watch` report the shortest reachable hop count from any traced
+    wallet in this case to the nearest labeled address — reachability, not an
+    attribution the engine makes on its own.
+
+    \b
+      cybertrace label-exchange bc1q... --exchange "Exchange X" --db case.db \\
+          --note "publicly documented cold wallet" --analyst jdoe
+    """
+    from .evidence import EvidenceStore, label_exchange
+
+    with EvidenceStore(db_path) as store:
+        rel_id = label_exchange(store, address, exchange, analyst=analyst, note=note)
+        if rel_id is None:
+            click.echo(f"[!] {address!r} is not a valid Bitcoin address", err=True)
+            sys.exit(1)
+        click.echo(f"[+] Recorded {address} as {exchange} ({rel_id})", err=True)
 
 
 @cli.command('case')

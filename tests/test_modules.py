@@ -187,6 +187,23 @@ class TestBitcoinModuleEllipticpp:
         assert summary['ellipticpp_dataset_label_name'] == 'illicit'
         assert summary['ellipticpp_record_count'] == 1
 
+    def test_counterparty_addresses_reach_the_summary(self):
+        """_build_summary must carry counterparty_addresses through the same
+        way it already does cospend_addresses -- this is the raw material
+        evidence.enrich_bitcoin turns into TRANSACTED_WITH tracing edges, and
+        it was silently dropped before this test existed."""
+        from cybertrace.modules.base import SourceResult
+        module = BitcoinModule()
+        result = ModuleResult(target='1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa',
+                              target_type='bitcoin', module='bitcoin')
+        result.sources['blockchain.com'] = SourceResult(
+            source='blockchain.com', success=True,
+            data={'balance_btc': 0.0, 'cospend_addresses': ['3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy'],
+                 'counterparty_addresses': ['bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4']})
+        summary = module._build_summary(result)
+        assert summary['counterparty_addresses'] == ['bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4']
+        assert summary['cospend_addresses'] == ['3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy']
+
 
 class TestUsernameModule:
     """Test Username module."""

@@ -147,3 +147,53 @@ def test_candidate_id_filters_context(store):
     one = full["candidates"][0]["candidate_id"]
     filtered = investigator.build_context(store, candidate_id=one)
     assert {c["candidate_id"] for c in filtered["candidates"]} == {one}
+
+
+def _label_a_traced_wallet(store):
+    """Wire a wallet -> exchange path into the tortaxi store, the same way an
+    analyst would via `cybertrace label-exchange`."""
+    from cybertrace.evidence import enrich_bitcoin, label_exchange
+    btc = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+    counterparty = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+    addr = store.upsert_entity("BTC_ADDRESS", btc)
+    target = store.upsert_target("btc:" + btc)
+    sid = store.insert_snapshot(target, {}, "bitcoin")
+    enrich_bitcoin(store, sid, addr, {"address": btc, "counterparty_addresses": [counterparty]},
+                   "bitcoin")
+    assert label_exchange(store, counterparty, "Test Exchange") is not None
+
+
+def test_wallet_exchange_paths_are_citable_in_context(store):
+    _label_a_traced_wallet(store)
+    ctx = investigator.build_context(store)
+    assert ctx["wallet_exchange_paths"], "expected the labeled path to appear in context"
+    for w in ctx["wallet_exchange_paths"]:
+        for eid in w["evidence_ids"]:
+            assert eid in ctx["known_ids"]["evidence_ids"]
+            assert eid in ctx["_evidence_by_id"]
+
+
+def test_deterministic_mode_answers_nearest_exchange(store):
+    _label_a_traced_wallet(store)
+    result = investigator.answer(store, "tortaxi", "which vasp is closest to this wallet")
+    assert result["mode"] == "deterministic"
+    assert result["claims"], "expected at least one wallet-exchange claim"
+    assert any("test exchange" in c["text"].lower() for c in result["claims"])
+    known_evidence = {e["id"] for e in result["evidence"]}
+    for claim in result["claims"]:
+        for eid in claim["evidence_ids"]:
+            assert eid in known_evidence
+
+
+def test_live_mode_strips_fabricated_wallet_evidence_id(store, monkeypatch):
+    _label_a_traced_wallet(store)
+    fake = FakeProvider({"nearest exchange question": {
+        "answer": "Reaches an exchange in one hop.",
+        "claims": [{"text": "fabricated wallet claim", "kind": "INFERRED",
+                    "evidence_ids": ["OBS-WALLET-DOES-NOT-EXIST"],
+                    "candidate_ids": [], "finding_ids": []}],
+        "limitations": [],
+    }})
+    monkeypatch.setattr(llm_provider, "get_provider", lambda: fake)
+    result = investigator.answer(store, "tortaxi", "nearest exchange question")
+    assert result["claims"][0]["evidence_ids"] == []

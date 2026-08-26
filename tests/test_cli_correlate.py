@@ -102,6 +102,49 @@ def test_quoted_artifact_never_attributes_with_db(tmp_path):
                    for d in data['dossiers'])
 
 
+# --- label-exchange -----------------------------------------------------------
+
+def test_label_exchange_then_correlate_reports_the_wallet_path(tmp_path):
+    """cybertrace label-exchange is the only way an EXCHANGE_DEPOSIT edge gets
+    written; a later `correlate --db` pass over the same store must report the
+    resulting wallet_exchange_paths without needing anything re-ingested."""
+    from cybertrace.evidence import EvidenceStore, enrich_bitcoin
+
+    db = str(tmp_path / 'case.db')
+    btc = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+    counterparty = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+    with EvidenceStore(db) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", btc)
+        target = store.upsert_target("btc:" + btc)
+        sid = store.insert_snapshot(target, {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": btc, "counterparty_addresses": [counterparty]}, "bitcoin")
+
+    result = CliRunner().invoke(
+        cli, ['label-exchange', counterparty, '--exchange', 'Test Exchange', '--db', db,
+             '--analyst', 'jdoe'])
+    assert result.exit_code == 0, result.output
+    assert 'Recorded' in result.output
+
+    dummy = _write_result(tmp_path / 'dummy.json', ONION_X)
+    result = CliRunner().invoke(cli, ['correlate', dummy, '--db', db, '--output', 'json'])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert any(w['exchange'] == 'test exchange' and w['hops'] == 1
+              for w in data['wallet_exchange_paths'])
+
+
+def test_label_exchange_rejects_an_invalid_address(tmp_path):
+    from cybertrace.evidence import EvidenceStore
+    db = str(tmp_path / 'case.db')
+    with EvidenceStore(db):
+        pass
+    result = CliRunner().invoke(
+        cli, ['label-exchange', 'not-a-btc-address', '--exchange', 'Test Exchange', '--db', db])
+    assert result.exit_code != 0
+    assert 'not a valid' in result.output.lower()
+
+
 # --- --db input validation ----------------------------------------------------
 
 def test_missing_db_value_is_a_usage_error(tmp_path):
