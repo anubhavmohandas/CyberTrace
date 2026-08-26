@@ -179,6 +179,8 @@ cybertrace search TARGET [OPTIONS]
 # Attribution
 cybertrace correlate FILES... [--db case.db] [--html graph.html] [--dossier case.html]
 cybertrace watch --db case.db [--target ONION] [--discover] [--dossier case.html]
+# run continuously via cron, not a built-in scheduler:
+#   0 */6 * * * cybertrace watch --db case.db -o json >> watch.log
 cybertrace feedback CANDIDATE_ID --db case.db --outcome confirmed|rejected|benign|malicious|unknown [--note TEXT] [--analyst NAME]
 
 # Shortcut commands

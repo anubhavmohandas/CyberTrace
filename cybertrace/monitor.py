@@ -12,7 +12,11 @@ module is deliberately thin: re-collect, ingest, then read the chain.
 occam: no scheduler, no daemon, no watchlist table. The targets already in the
 store ARE the watchlist, and cron (or the operator) decides when this runs.
 A schedule column earns its place when different targets need different
-cadences, which no case here has yet.
+cadences, which no case here has yet. Run it continuously with the OS's own
+scheduler, not a new one:
+
+    # cron: re-check every 6 hours
+    0 */6 * * * cybertrace watch --db /path/case.db -o json >> /path/watch.log
 """
 
 from __future__ import annotations
@@ -155,8 +159,25 @@ def read_candidates(store: EvidenceStore) -> List[dict]:
         "SELECT candidate_id, confidence, assessment FROM candidates")]
 
 
+def watch_narrative(store: EvidenceStore, case_id: str, deltas: List[dict]) -> Optional[dict]:
+    """The one analyst-alert step M7 didn't have: "what changed and why it
+    might matter", grounded rather than a bare NEW/MOVED/GONE list.
+
+    None on a quiet re-check (deltas empty) so an unattended cron run costs
+    nothing — no investigator call, no LLM spend — when there is nothing to
+    say. Reuses cybertrace.investigator.answer() end to end: that module
+    already has a `_changed` handler reading memory.py's case_history for
+    exactly this question, so this is wiring, not a second reasoning path.
+    """
+    if not deltas:
+        return None
+    from .investigator import answer
+    return answer(store, case_id, "what changed")
+
+
 def run_watch(store: EvidenceStore, urls: Optional[List[str]] = None,
-              discover: bool = False, correlate: bool = True) -> Dict[str, Any]:
+              discover: bool = False, correlate: bool = True,
+              case_id: Optional[str] = None) -> Dict[str, Any]:
     """Synchronous entry point: re-check, then re-correlate and diff."""
     before = read_candidates(store)
     report = asyncio.run(recheck(store, urls=urls, discover=discover))
@@ -166,4 +187,5 @@ def run_watch(store: EvidenceStore, urls: Optional[List[str]] = None,
         report["deltas"] = candidate_deltas(before, read_candidates(store))
         report["successors"] = [s for s in results["successors"] if not s["suppressed"]]
         report["contradictions"] = results["contradictions"]
+        report["narrative"] = watch_narrative(store, case_id or "case", report["deltas"])
     return report

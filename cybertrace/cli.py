@@ -332,11 +332,13 @@ def watch(db_path: str, targets, discover: bool, output_format: str,
       cybertrace watch --db case.db --discover --dossier case.html
     """
     import json
+    from pathlib import Path
     from .evidence import EvidenceStore
     from .monitor import run_watch
 
     with EvidenceStore(db_path) as store:
-        report = run_watch(store, urls=list(targets) or None, discover=discover)
+        report = run_watch(store, urls=list(targets) or None, discover=discover,
+                           case_id=Path(db_path).stem)
 
         if output_format == 'json':
             click.echo(json.dumps(report, indent=2, default=str))
@@ -352,6 +354,8 @@ def watch(db_path: str, targets, discover: bool, output_format: str,
             for row in report.get('deltas', []):
                 click.echo(f"\n  [{row['change']}] {row['candidate_id']} "
                            f"({row['confidence']}) {row['assessment']}")
+            if report.get('narrative'):
+                click.echo(f"\n  [ANALYST ALERT] {report['narrative']['answer']}")
             if report.get('discovered'):
                 click.echo(f"\n  {len(report['discovered'])} directory service(s) "
                            f"not in this case:")
