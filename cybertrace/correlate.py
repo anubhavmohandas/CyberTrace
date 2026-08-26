@@ -672,6 +672,51 @@ _TRACE_CHAIN_ETYPES = {"bitcoin": "BTC_ADDRESS", "ethereum": "ETH_ADDRESS",
                        "tron": "TRX_ADDRESS"}
 
 
+def wallet_path_flags(store: EvidenceStore, hit: Optional[dict],
+                      fallback_path_ids: Optional[List[str]] = None) -> List[str]:
+    """Exact, cited third-party findings for one wallet_exchange_paths() entry
+    -- factored out of wallet_trace_report so investigator.build_context can
+    attach the same flags to every entry in an already-computed
+    wallet_exchange_paths() list without re-running its BFS per wallet.
+
+    `hit` is one wallet_exchange_paths() item, or None if that wallet has no
+    path to a labeled exchange (fallback_path_ids then substitutes just the
+    wallet itself, so its own metadata is still checked).
+    """
+    path_ids = hit["path"] if hit else (fallback_path_ids or [])
+    if not path_ids:
+        return []
+
+    marks = ",".join("?" * len(path_ids))
+    by_id = {r["entity_id"]: r for r in store._all(
+        f"SELECT entity_id, raw_value, metadata FROM entities WHERE entity_id IN ({marks})",
+        tuple(path_ids))}
+
+    flags = []
+    for eid in path_ids:
+        row = by_id.get(eid)
+        if row is None:
+            continue
+        meta = json.loads(row["metadata"] or "{}")
+        addr = row["raw_value"]
+        if meta.get("reported_scam"):
+            cats = meta.get("chainabuse_scam_categories")
+            flags.append(f"{addr}: reported for abuse"
+                         + (f" ({', '.join(cats)})" if cats else ""))
+        if meta.get("ellipticpp_dataset_label_name") == "illicit":
+            flags.append(f"{addr}: Elliptic++ dataset label = illicit")
+        packs = meta.get("exchange_tag_packs")
+        if packs:
+            flags.append(f"{addr}: GraphSense tagpack(s): {', '.join(packs)}")
+
+    if hit:
+        if hit["hops"] > 0:
+            flags.append(f"{hit['hops']} hop(s) of layering before reaching a labeled exchange")
+        flags.append(f"reached analyst-labeled exchange: {hit['exchange']} "
+                     f"(reachability confidence {hit['confidence']:.2f})")
+    return flags
+
+
 def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4) -> Optional[dict]:
     """One traced wallet's path to the nearest analyst-labeled exchange (see
     wallet_exchange_paths), plus every piece of third-party evidence already
@@ -706,34 +751,12 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4) -
     hit = next((w for w in wallet_exchange_paths(store, max_hops=max_hops)
                if w["entity_id"] == start_id), None)
     path_ids = hit["path"] if hit else [start_id]
+    flags = wallet_path_flags(store, hit, fallback_path_ids=path_ids)
 
     marks = ",".join("?" * len(path_ids))
     by_id = {r["entity_id"]: r for r in store._all(
-        f"SELECT entity_id, raw_value, metadata FROM entities WHERE entity_id IN ({marks})",
+        f"SELECT entity_id, raw_value FROM entities WHERE entity_id IN ({marks})",
         tuple(path_ids))}
-
-    flags = []
-    for eid in path_ids:
-        row = by_id.get(eid)
-        if row is None:
-            continue
-        meta = json.loads(row["metadata"] or "{}")
-        addr = row["raw_value"]
-        if meta.get("reported_scam"):
-            cats = meta.get("chainabuse_scam_categories")
-            flags.append(f"{addr}: reported for abuse"
-                         + (f" ({', '.join(cats)})" if cats else ""))
-        if meta.get("ellipticpp_dataset_label_name") == "illicit":
-            flags.append(f"{addr}: Elliptic++ dataset label = illicit")
-        packs = meta.get("exchange_tag_packs")
-        if packs:
-            flags.append(f"{addr}: GraphSense tagpack(s): {', '.join(packs)}")
-
-    if hit:
-        if hit["hops"] > 0:
-            flags.append(f"{hit['hops']} hop(s) of layering before reaching a labeled exchange")
-        flags.append(f"reached analyst-labeled exchange: {hit['exchange']} "
-                     f"(reachability confidence {hit['confidence']:.2f})")
 
     return {
         "entity_id": start_id,
