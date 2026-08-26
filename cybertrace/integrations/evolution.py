@@ -44,6 +44,15 @@ ZIP_PATH = DATA_DIR / "original" / "data-and-readme.zip"
 MANIFEST_PATH = DATA_DIR / "manifest.json"
 INDEX_PATH = DATA_DIR / "index.sqlite"
 
+# Python's csv default field limit (131072 bytes) is too small for real rows
+# in this dataset -- measured: some forum/post.tsv posts (long PGP-signed
+# messages) exceed it and raise "field larger than field limit" partway
+# through a stream, not at row 1, so this has to be set before any _rows()
+# read rather than caught per-caller. 10MB comfortably covers the largest
+# real field here with headroom, without csv.field_size_limit(sys.maxsize)'s
+# platform-dependent OverflowError risk on a 32-bit C long.
+csv.field_size_limit(10_000_000)
+
 
 def manifest() -> Dict[str, Any]:
     """Provenance metadata: source, license, checksums, citation."""
@@ -269,6 +278,16 @@ def iter_user_matching() -> Iterator[Dict[str, Any]]:
     linkage -- dataset ground truth about ONE platform's accounts, not a
     CyberTrace operator claim. See module docstring."""
     for row in _rows("forum-market/user-matching.tsv"):
+        yield {"source": "evolution", "provenance": "OFFLINE_DATASET",
+               "relationship_type": "SAME_PLATFORM_ACCOUNT", **row}
+
+
+def iter_identity_nodes() -> Iterator[Dict[str, Any]]:
+    """network/nodes.tsv -- one row per matched identity: up to three forum
+    uids (uid, secondary_uid, tertiary_uid) Evolution's own record ties to one
+    match_id across account changes. Same scope as iter_user_matching: this is
+    dataset-internal same-platform-account linkage, not a CyberTrace claim."""
+    for row in _rows("network/nodes.tsv"):
         yield {"source": "evolution", "provenance": "OFFLINE_DATASET",
                "relationship_type": "SAME_PLATFORM_ACCOUNT", **row}
 
