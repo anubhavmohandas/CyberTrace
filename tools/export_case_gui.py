@@ -186,6 +186,8 @@ def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
         "markets": sorted(targets.values()),
         "market_relationships": market_relationships,
         "report_markdown": render_markdown(results["dossiers"], results),
+        "notes": [{"note": n["note"], "analyst": n["analyst"] or "", "recorded_at": n["recorded_at"]}
+                  for n in store.case_notes()],
     }
 
 
