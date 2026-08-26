@@ -93,6 +93,10 @@ class APIKeys:
     # https://docs.chainabuse.com — community-reported scam/abuse address database
     # Requires an organization API key (no free self-serve tier at signup)
 
+    trongrid: Optional[str] = None
+    # https://www.trongrid.io — TRON (TRX) account/transaction data
+    # Free tier works unauthenticated; a key just raises the rate limit
+
     # ── Social Media & Identity ───────────────────────────────────────────────
     github: Optional[str] = None
     # https://github.com/settings/tokens — public repo/user/commit OSINT
@@ -134,6 +138,7 @@ class APIKeys:
             # Crypto
             etherscan=os.getenv('ETHERSCAN_API_KEY'),
             chainabuse=os.getenv('CHAINABUSE_API_KEY'),
+            trongrid=os.getenv('TRONGRID_API_KEY'),
             # Social
             github=os.getenv('GITHUB_TOKEN'),
             telegram_bot=os.getenv('TELEGRAM_BOT_TOKEN'),
@@ -165,7 +170,7 @@ class APIKeys:
             'Email':                  ['emailrep', 'hunter'],
             'Breach Databases':       ['hibp', 'dehashed', 'leakcheck'],
             'Phone':                  ['numverify', 'twilio_sid', 'twilio_token'],
-            'Crypto / Blockchain':    ['etherscan', 'chainabuse'],
+            'Crypto / Blockchain':    ['etherscan', 'chainabuse', 'trongrid'],
             'Social & Identity':      ['github', 'telegram_bot'],
             'Automation':             ['twocaptcha'],
         }

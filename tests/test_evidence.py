@@ -20,9 +20,9 @@ from cybertrace.modules.domain_module import DomainModule
 from cybertrace.modules.email_module import EmailModule
 from cybertrace.normalize import (
     dom_simhash, norm_asn, norm_btc, norm_domain, norm_email, norm_eth, norm_ip,
-    norm_onion, norm_pgp, norm_username, norm_xmr, pgp_certifier_details,
+    norm_onion, norm_pgp, norm_tron, norm_username, norm_xmr, pgp_certifier_details,
     pgp_certifiers, pgp_fingerprint, pgp_key_times, pgp_signature_issuers,
-    simhash_similarity,
+    simhash_similarity, tron_hex_to_address,
 )
 
 # A real mainnet address (block 170 coinbase) and the BIP-173 P2WPKH vector.
@@ -30,6 +30,9 @@ BTC_VALID = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
 BTC_BECH32 = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
 XMR_VALID = ("44AFFq5kSiGBoZ4NMDwYtN18obc8AemS33DBLWs3H7otXft3"
              "XjrpDtQGv7SqSsaBYBb98uNbr2VBBEt7f2wfn3RVGQBEP3A")
+# Real TRON mainnet address (the USDT-TRC20 contract) -- a genuine base58check
+# string, not one shaped to merely satisfy the regex.
+TRX_VALID = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 def onion(seed: str) -> str:
     """A synthetic but checksum-VALID v3 address, one per seed character.
 
@@ -88,6 +91,32 @@ def test_xmr_and_eth():
     assert norm_xmr("4" + "A" * 94) is not None        # known gap: no checksum
     assert norm_eth("0x" + "Ab" * 20) == "ETH:0x" + "ab" * 20
     assert norm_eth("0x1234") is None
+
+
+def test_tron_checksum_is_enforced():
+    """Same double-SHA256 base58check scheme norm_btc verifies, 0x41 prefix
+    instead of BTC's 0x00/0x05 -- see norm_tron."""
+    assert norm_tron(TRX_VALID) == f"TRX:{TRX_VALID}"
+    # One character changed: passes the detector's regex, fails base58check.
+    assert norm_tron(TRX_VALID[:-1] + ("t" if TRX_VALID[-1] != "t" else "u")) is None
+    assert norm_tron("notanaddress") is None
+    assert norm_tron(BTC_VALID) is None  # 0x00 prefix, not 0x41 -- wrong chain
+
+
+def test_tron_hex_to_address_round_trips_through_norm_tron():
+    """TronGrid's own API returns transaction addresses as raw hex (0x41 +
+    20-byte pubkey hash), not the base58check T... form -- this is the
+    conversion tron_module.py needs so a counterparty round-trips to the same
+    TRX_ADDRESS entity norm_tron would mint for the address directly."""
+    raw = norm_tron(TRX_VALID)
+    assert raw is not None
+    # Recover the same 21-byte payload norm_tron itself validated, re-encode
+    # through the hex path, and confirm it reaches the identical address.
+    from cybertrace.normalize import b58decode
+    payload = b58decode(TRX_VALID)[:-4]  # drop the 4-byte checksum
+    assert tron_hex_to_address(payload.hex()) == TRX_VALID
+    assert tron_hex_to_address("not hex") is None
+    assert tron_hex_to_address("00" * 21) is None  # wrong prefix byte
 
 
 def test_rejects_are_counted():
@@ -1513,6 +1542,23 @@ def test_label_exchange_rejects_an_invalid_address(tmp_path):
     with EvidenceStore(str(tmp_path / "e.db")) as store:
         from cybertrace.evidence import label_exchange
         assert label_exchange(store, "not-a-btc-address", "Test Exchange") is None
+
+
+def test_label_exchange_detects_chain_from_address_shape(tmp_path):
+    """label_exchange isn't BTC-only: a VASP's ETH or TRON hot wallet must
+    label onto an ETH_ADDRESS/TRX_ADDRESS entity, not get forced onto
+    BTC_ADDRESS (where norm_btc would just reject it and silently no-op)."""
+    from cybertrace.evidence import label_exchange
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        eth_addr = "0x" + "ab" * 20
+        rel_id = label_exchange(store, eth_addr, "Test Exchange")
+        assert rel_id is not None
+        assert store.find_entity("ETH_ADDRESS", eth_addr) is not None
+
+        rel_id = label_exchange(store, TRX_VALID, "Test Exchange")
+        assert rel_id is not None
+        assert store.find_entity("TRX_ADDRESS", TRX_VALID) is not None
 
 
 if __name__ == "__main__":

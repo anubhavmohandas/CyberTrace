@@ -19,6 +19,7 @@ how to shape a store into what the GUI expects.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import functools
 import hmac
 import json
@@ -26,12 +27,14 @@ import os
 import sys
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from cybertrace import investigator
 from cybertrace.evidence import EvidenceStore
+from cybertrace.modules import resolve_module_for_target
+from cybertrace.safety import is_blocked_query
 from tools.export_case_gui import build_payload
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -63,6 +66,32 @@ def case_payload(cases_dir: Path, case_id: str) -> dict | None:
         return build_payload(store, case_id, title)
 
 
+def run_search(target: str) -> dict:
+    """Run the same single-target search `cybertrace search` does and return
+    its ModuleResult as a dict. Raises ValueError on a refused/unsupported
+    target so the caller can turn it into a 400.
+
+    occam: runs inline on the request thread rather than as a background
+    job — fine for bitcoin/domain (~5s), but username/email modules shell
+    out to maigret/holehe and can block a thread for minutes (tool_timeout).
+    ThreadingHTTPServer gives each request its own thread so this doesn't
+    stall other requests; move to a job+polling model if the UI needs to
+    stay responsive during a slow module.
+    """
+    if is_blocked_query(target):
+        raise ValueError("target refused: names prohibited content")
+    module, normalized, specific_type, module_type = resolve_module_for_target(target)
+    if module is None:
+        raise ValueError(f"no module available for type: {module_type}")
+
+    async def _go():
+        async with module:
+            return await module.search(normalized, target_type=specific_type)
+
+    result = asyncio.run(_go())
+    return result.to_dict()
+
+
 def snapshot_body(cases_dir: Path, case_id: str, snapshot_id: str) -> dict | None:
     db_path = cases_dir / f"{case_id}.db"
     if not db_path.is_file():
@@ -92,6 +121,16 @@ def make_handler(cases_dir: Path):
             if path == "/api/cases":
                 cases = [case_summary(p) for p in sorted(cases_dir.glob("*.db"))]
                 return self._json(cases)
+            if path == "/api/search":
+                target = (parse_qs(urlsplit(self.path).query).get("q") or [""])[0].strip()
+                if not target:
+                    return self._json({"error": "q is required"}, status=400)
+                try:
+                    return self._json(run_search(target))
+                except ValueError as e:
+                    return self._json({"error": str(e)}, status=400)
+                except Exception as e:
+                    return self._json({"error": f"search failed: {e}"}, status=502)
             if path.startswith("/api/case/"):
                 rest = path[len("/api/case/"):]
                 if "/snapshot/" in rest:

@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 
 import aiohttp
 
-from ..integrations import ellipticpp
+from ..integrations import ellipticpp, exchange_tags
 from .base import BaseModule, ModuleResult, SourceResult
 
 
@@ -42,12 +42,14 @@ class BitcoinModule(BaseModule):
                 ('bitcoinabuse', self._check_bitcoin_abuse(target)),
                 ('chainabuse', self._check_chainabuse(target, 'BTC')),
                 ('ellipticpp', self._check_ellipticpp(target)),
+                ('exchange_tags', self._check_exchange_tags(target, 'BTC')),
             ]
         elif result.target_type == 'ethereum':
             sources = [
                 ('blockchair_eth', self._check_blockchair(target, 'ethereum')),
                 ('ethplorer', self._check_ethplorer(target)),
                 ('chainabuse', self._check_chainabuse(target, 'ETH')),
+                ('exchange_tags', self._check_exchange_tags(target, 'ETH')),
             ]
         else:
             sources = []
@@ -380,6 +382,45 @@ class BitcoinModule(BaseModule):
             },
         )
 
+    async def _check_exchange_tags(self, address: str, chain: str) -> SourceResult:
+        """Offline lookup against the local GraphSense TagPacks corpus (public,
+        MIT-licensed community address tags) -- no network call, chain is
+        'BTC' or 'ETH'. Same EXTERNAL_DATASET_MATCH class as
+        _check_ellipticpp, from a second, independent dataset: a tag here is
+        a third party's public claim about this address, never proof of
+        control -- evidence.enrich_bitcoin writes it as non-attributive
+        metadata only, never an EXCHANGE_DEPOSIT edge. Only label_exchange
+        (an analyst's own say-so) can create that edge.
+
+        Degrades the same way _check_ellipticpp does: dataset not
+        downloaded, or downloaded but not indexed yet, both report
+        success=False with an explanatory error rather than raising.
+        """
+        if not exchange_tags.available():
+            return SourceResult(
+                source='exchange_tags', success=False,
+                error='GraphSense TagPacks dataset not downloaded locally',
+            )
+        if not exchange_tags.index_available():
+            return SourceResult(
+                source='exchange_tags', success=False,
+                error='GraphSense TagPacks downloaded but not indexed '
+                      '(run exchange_tags.build_index() once, offline)',
+            )
+        tags = exchange_tags.lookup_address(address, chain)
+        if not tags:
+            return SourceResult(source='exchange_tags', success=True, data={'tagged': False})
+        return SourceResult(
+            source='exchange_tags', success=True,
+            data={
+                'tagged': True,
+                'categories': sorted({t['category'] for t in tags if t.get('category')}),
+                'labels': sorted({t['label'] for t in tags if t.get('label')})[:10],
+                'is_exchange_tagged': any((t.get('category') or '').lower() == 'exchange'
+                                          for t in tags),
+            },
+        )
+
     async def _check_ethplorer(self, address: str) -> SourceResult:
         """Query Ethplorer API (no auth for basic)."""
         url = f"https://api.ethplorer.io/getAddressInfo/{address}?apiKey=freekey"
@@ -491,6 +532,14 @@ class BitcoinModule(BaseModule):
                 summary['ellipticpp_dataset_label_name'] = data.get('dataset_label_name')
                 summary['ellipticpp_time_steps'] = data.get('time_steps')
                 summary['ellipticpp_record_count'] = data.get('record_count')
+
+            # GraphSense TagPacks context -- same non-attributive shape as
+            # ellipticpp above, from a second, independent dataset; see
+            # _check_exchange_tags and evidence.enrich_bitcoin.
+            if source == 'exchange_tags' and data.get('tagged'):
+                summary['exchange_tag_categories'] = data.get('categories')
+                summary['exchange_tag_labels'] = data.get('labels')
+                summary['exchange_tag_is_exchange'] = data.get('is_exchange_tagged')
 
             # Connected addresses
             if 'connected_addresses' in data:

@@ -21,6 +21,7 @@ PATTERNS = {
     'btc_legacy': re.compile(r'^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$'),
     'btc_bech32': re.compile(r'^bc1[a-z0-9]{39,59}$'),
     'ethereum': re.compile(r'^0x[a-fA-F0-9]{40}$'),
+    'tron': re.compile(r'^T[a-km-zA-HJ-NP-Z1-9]{33}$'),
     
     # Domains & URLs
     # Onion — bare host, or the full URL users actually paste (scheme/subdomain/
@@ -66,6 +67,7 @@ DETECTION_ORDER = [
     ('btc_bech32', 'bitcoin'),
     ('btc_legacy', 'bitcoin'),
     ('ethereum', 'ethereum'),
+    ('tron', 'tron'),
     ('onion', 'darkweb'),
     ('gstin', 'indian'),
     ('pan_indian', 'indian'),
@@ -157,6 +159,9 @@ if __name__ == '__main__':
     assert detect_input_type('www.example.com') == ('domain', 'domain')
     # Too short to be a real onion address — must stay off the darkweb path.
     assert detect_input_type('facebook.onion') == ('domain', 'domain')
+    # Real TRON mainnet address (the USDT-TRC20 contract) — a genuine base58
+    # string, not one shaped to merely satisfy the regex.
+    assert detect_input_type('TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t') == ('tron', 'tron')
 
     # Quick test
     tests = [

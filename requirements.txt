@@ -38,3 +38,7 @@ aiohttp_socks>=0.10.0  # SOCKS5 connector for aiohttp — routes .onion via Tor
 
 # Interactive evidence-graph rendering (correlate.render_html)
 pyvis>=0.3.2
+
+# GraphSense TagPacks offline adapter (integrations/exchange_tags.py) --
+# yaml.safe_load only, never yaml.load, so no arbitrary-object deserialization
+PyYAML>=6.0.1

@@ -665,6 +665,63 @@ window.__resources = {
   </div>
 </sc-if>
 
+<sc-if value="{{ isSearch }}" hint-placeholder-val="{{ false }}">
+  <div style="min-height:100vh">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:18px 40px;border-bottom:1px solid #171c1f">
+      <div onClick="{{ goHome }}" style="cursor:pointer"><img src="assets/ct-lockup-a.png" alt="CyberTrace" style="height:22px;display:block" /></div>
+      <div onClick="{{ openCases }}" style="cursor:pointer;border:1px solid #262d31;padding:7px 16px;color:#d5dbde;font-size:12.5px" style-hover="border-color:#2fb4e8;color:#2fb4e8">Open workspace</div>
+    </div>
+
+    <div style="max-width:900px;margin:0 auto;padding:40px">
+      <div style="font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#2fb4e8">{{ searchType }}</div>
+      <div style="font-size:22px;font-weight:500;color:#edf2f4;margin-top:8px;word-break:break-all">{{ searchTarget }}</div>
+
+      <sc-if value="{{ searching }}" hint-placeholder-val="{{ false }}">
+        <div style="margin-top:24px;color:#879196;font-size:13px">searching {{ searchModuleName }}…</div>
+      </sc-if>
+
+      <sc-if value="{{ searchError }}" hint-placeholder-val="{{ false }}">
+        <div style="margin-top:24px;border:1px solid #33221f;background:#1a0f0d;color:#d97a6c;padding:14px 16px;font-size:13px">{{ searchError }}</div>
+      </sc-if>
+
+      <sc-if value="{{ searchDone }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;gap:20px;margin-top:20px;font:400 11.5px/1 'IBM Plex Mono',monospace;color:#67716f">
+          <span>MODULE <span style="color:#a7b1b5">{{ searchModuleName }}</span></span>
+          <span>{{ searchStatsLine }}</span>
+        </div>
+
+        <div style="margin-top:28px;display:flex;flex-direction:column;gap:1px">
+          <sc-for list="{{ searchSources }}" as="s" hint-placeholder-count="4">
+            <div style="border:1px solid #1c2427;background:#0d1012">
+              <div onClick="{{ s.toggle }}" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;padding:14px 18px">
+                <span style="font:500 13px/1 'IBM Plex Mono',monospace;color:#edf2f4">{{ s.name }}</span>
+                <span style="font:600 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:1px;color:{{ s.statusColor }}">{{ s.statusLabel }}</span>
+              </div>
+              <sc-if value="{{ s.error }}" hint-placeholder-val="{{ false }}">
+                <div style="padding:0 18px 14px;color:#d97a6c;font-size:12px">{{ s.error }}</div>
+              </sc-if>
+              <sc-if value="{{ s.open }}" hint-placeholder-val="{{ false }}">
+                <pre style="margin:0;padding:14px 18px;border-top:1px solid #171c1f;max-height:360px;overflow:auto;font:400 11.5px/1.7 'IBM Plex Mono',monospace;color:#8b9599;white-space:pre-wrap;word-break:break-all">{{ s.body }}</pre>
+              </sc-if>
+            </div>
+          </sc-for>
+        </div>
+
+        <sc-if value="{{ hasSearchRelated }}" hint-placeholder-val="{{ false }}">
+          <div style="margin-top:28px">
+            <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#67716f;margin-bottom:10px">RELATED</div>
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <sc-for list="{{ searchRelated }}" as="r" hint-placeholder-count="2">
+                <div style="color:#c5ccd0;font-size:12.5px;font-family:'IBM Plex Mono',monospace">{{ r }}</div>
+              </sc-for>
+            </div>
+          </div>
+        </sc-if>
+      </sc-if>
+    </div>
+  </div>
+</sc-if>
+
 </div>
 
 </x-dc>
@@ -686,6 +743,7 @@ const C = { cyan:'#2fb4e8', green:'#63c48b', red:'#d97a6c', sand:'#c2b280', viol
 const API_BASE = (window.__CT_API_BASE || '').replace(/\/$/, '');
 const CASES_URL = API_BASE + '/api/cases';
 const caseUrl = (id) => API_BASE + '/api/case/' + encodeURIComponent(id);
+const searchUrl = (q) => API_BASE + '/api/search?q=' + encodeURIComponent(q);
 const apiFetch = (url, opts) => fetch(url, window.__CT_API_KEY
   ? { ...opts, headers: { ...(opts && opts.headers), 'X-CT-Api-Key': window.__CT_API_KEY } }
   : opts);
@@ -769,7 +827,8 @@ class Component extends DCLogic {
     thread: [{ role:'INVESTIGATOR', text:'Ask why any relationship in this case exists, or what the engine rejected. Every answer cites the evidence it used.', points:[] }],
     evFilter: 'All', scoreOpen: {}, verdict: null, verdictNote: '', outcome: null,
     snapshot: null, snapshotBody: '',
-    caseData: null, loadError: null, cases: []
+    caseData: null, loadError: null, cases: [],
+    searchResult: null, searching: false, searchError: null, searchOpen: {}
   };
 
   componentDidMount() {
@@ -793,6 +852,18 @@ class Component extends DCLogic {
         thread: [{ role:'INVESTIGATOR', text:`Loaded ${data.case_id} — ${data.title}. Ask why any candidate is here, or what the engine rejected.`, points:[] }]
       }))
       .catch(err => this.setState({ loadError: String(err) }));
+  }
+
+  runSearch() {
+    const q = (this.state.query || '').trim();
+    if (!q) return;
+    this.setState({ view: 'search', searching: true, searchError: null, searchResult: null, searchOpen: {} });
+    apiFetch(searchUrl(q))
+      .then(r => r.json().then(body => ({ ok: r.ok, body })))
+      .then(({ ok, body }) => this.setState(ok
+        ? { searchResult: body, searching: false }
+        : { searchError: body.error || 'search failed', searching: false }))
+      .catch(err => this.setState({ searchError: String(err), searching: false }));
   }
 
   set(p) { this.setState(p); }
@@ -912,7 +983,29 @@ class Component extends DCLogic {
 
     return {
       isLanding: st.view === 'landing', isCases: st.view === 'cases', isCase: st.view === 'case',
+      isSearch: st.view === 'search',
       query: st.query, detectedType: this.detect(st.query),
+
+      searching: st.searching,
+      searchError: st.searchError,
+      searchDone: !st.searching && !st.searchError && !!st.searchResult,
+      searchTarget: (st.searchResult && st.searchResult.target) || st.query,
+      searchType: (st.searchResult && st.searchResult.target_type) || this.detect(st.query),
+      searchModuleName: (st.searchResult && st.searchResult.module) || '',
+      searchStatsLine: st.searchResult && st.searchResult.stats
+        ? `${st.searchResult.stats.success}/${st.searchResult.stats.total} sources · ${st.searchResult.stats.duration_sec}s`
+        : '',
+      searchSources: Object.entries((st.searchResult && st.searchResult.sources) || {}).map(([name, s]) => ({
+        key: name, name,
+        statusLabel: s && s.success ? 'OK' : 'FAILED',
+        statusColor: s && s.success ? C.green : C.red,
+        error: (s && s.error) || '',
+        open: !!st.searchOpen[name],
+        toggle: () => this.setState(s2 => ({ searchOpen: Object.assign({}, s2.searchOpen, { [name]: !s2.searchOpen[name] }) })),
+        body: JSON.stringify(s && s.data, null, 2) || '',
+      })),
+      searchRelated: (st.searchResult && st.searchResult.related) || [],
+      hasSearchRelated: !!(st.searchResult && st.searchResult.related && st.searchResult.related.length),
 
       caseHeaderId: cd.case_id || '—',
       caseTitle: cd.title || 'Untitled case',
@@ -922,8 +1015,8 @@ class Component extends DCLogic {
       caseUpdated: cd.updated_at ? cd.updated_at.slice(0, 16).replace('T', ' ') + ' UTC' : '—',
       reportDate: new Date().toISOString().slice(0, 10),
       onQuery: (e) => this.set({ query: e.target.value }),
-      onQueryKey: (e) => { if (e.key === 'Enter') this.set({ view:'case', tab:'Overview' }); },
-      runTrace: () => this.set({ view:'case', tab:'Overview' }),
+      onQueryKey: (e) => { if (e.key === 'Enter') this.runSearch(); },
+      runTrace: () => this.runSearch(),
       openCases: () => this.set({ view:'cases', drawer:null, aiOpen:false }),
       goHome: () => this.set({ view:'landing', drawer:null, aiOpen:false }),
 

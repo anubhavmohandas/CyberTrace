@@ -7,19 +7,20 @@ from cybertrace.modules import (
     MODULE_REGISTRY,
     TYPE_TO_MODULE,
     BitcoinModule,
+    TronModule,
     UsernameModule,
     DomainModule,
     EmailModule,
     DarkwebModule,
     IndianModule,
 )
-from cybertrace.integrations import evolution
+from cybertrace.integrations import evolution, exchange_tags
 from cybertrace.modules.base import ModuleResult, SourceResult
 from cybertrace.normalize import norm_btc, norm_email, norm_xmr
 
 # norm_onion verifies the checksum a v3 address carries, so a fixture has to be
 # an address that could exist — `'b' * 56` is exactly what that gate refuses.
-from .test_evidence import onion as checksummed_onion
+from .test_evidence import onion as checksummed_onion, TRX_VALID
 
 
 class TestModuleRegistry:
@@ -29,7 +30,8 @@ class TestModuleRegistry:
         assert len(MODULE_REGISTRY) > 0
 
     def test_all_modules_registered(self):
-        expected = ['bitcoin', 'ethereum', 'domain', 'username', 'email', 'darkweb', 'indian']
+        expected = ['bitcoin', 'ethereum', 'tron', 'domain', 'username', 'email',
+                   'darkweb', 'indian']
         for name in expected:
             assert name in MODULE_REGISTRY
 
@@ -37,6 +39,12 @@ class TestModuleRegistry:
         assert TYPE_TO_MODULE['email'] == 'email'
         assert TYPE_TO_MODULE['btc_legacy'] == 'bitcoin'
         assert TYPE_TO_MODULE['vehicle_indian'] == 'indian'
+        assert TYPE_TO_MODULE['tron'] == 'tron'
+
+    def test_get_module_returns_tron_instance(self):
+        module = get_module('tron')
+        assert module is not None
+        assert isinstance(module, TronModule)
 
     def test_get_module_returns_instance(self):
         module = get_module('bitcoin')
@@ -203,6 +211,116 @@ class TestBitcoinModuleEllipticpp:
         summary = module._build_summary(result)
         assert summary['counterparty_addresses'] == ['bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4']
         assert summary['cospend_addresses'] == ['3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy']
+
+
+class TestExchangeTagsSource:
+    """Same degrade-without-network-call contract as TestBitcoinModuleEllipticpp,
+    checked once for the shared _check_exchange_tags helper both BitcoinModule
+    and TronModule call -- a tag is EXTERNAL_DATASET_MATCH metadata, never a
+    relationship (see evidence.enrich_bitcoin's exchange_tag_* docstring)."""
+
+    def test_degrades_gracefully_when_dataset_not_downloaded(self, monkeypatch):
+        import asyncio
+        monkeypatch.setattr(exchange_tags, "available", lambda: False)
+        module = BitcoinModule()
+        result = asyncio.run(module._check_exchange_tags(
+            '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa', 'BTC'))
+        assert result.success is False
+        assert 'not downloaded' in result.error
+
+    def test_degrades_gracefully_when_index_not_built(self, monkeypatch):
+        import asyncio
+        monkeypatch.setattr(exchange_tags, "available", lambda: True)
+        monkeypatch.setattr(exchange_tags, "index_available", lambda: False)
+        module = BitcoinModule()
+        result = asyncio.run(module._check_exchange_tags(
+            '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa', 'BTC'))
+        assert result.success is False
+        assert 'build_index' in result.error
+
+    def test_address_not_tagged_is_a_successful_negative(self, monkeypatch):
+        import asyncio
+        monkeypatch.setattr(exchange_tags, "available", lambda: True)
+        monkeypatch.setattr(exchange_tags, "index_available", lambda: True)
+        monkeypatch.setattr(exchange_tags, "lookup_address", lambda addr, cur: [])
+        module = BitcoinModule()
+        result = asyncio.run(module._check_exchange_tags(
+            '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa', 'BTC'))
+        assert result.success is True
+        assert result.data == {'tagged': False}
+
+    def test_a_tag_hit_carries_the_exchange_flag_into_the_summary(self, monkeypatch):
+        """_build_summary only reads exchange_tags fields off the source
+        actually named 'exchange_tags' -- pins that a hit reaches the summary
+        dict evidence.enrich_bitcoin's exchange_tag_* metadata is built from,
+        and that a category of 'exchange' sets is_exchange_tagged."""
+        import asyncio
+        monkeypatch.setattr(exchange_tags, "available", lambda: True)
+        monkeypatch.setattr(exchange_tags, "index_available", lambda: True)
+        monkeypatch.setattr(exchange_tags, "lookup_address", lambda addr, cur: [
+            {"currency": cur, "category": "exchange", "label": "binance.com",
+             "actor": "binance", "source": "https://example.com", "pack": "binance"},
+        ])
+        module = BitcoinModule()
+        result = ModuleResult(target='1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa',
+                              target_type='bitcoin', module='bitcoin')
+        result.sources['exchange_tags'] = asyncio.run(
+            module._check_exchange_tags('1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa', 'BTC'))
+        summary = module._build_summary(result)
+        assert summary['exchange_tag_categories'] == ['exchange']
+        assert summary['exchange_tag_labels'] == ['binance.com']
+        assert summary['exchange_tag_is_exchange'] is True
+
+
+class TestTronModule:
+    """Test TRON module. TRC20 decode assertions use real TronGrid payload
+    shapes (verified live against api.trongrid.io while building this
+    module), not invented ones -- see _decode_trc20_transfer_recipient."""
+
+    def test_module_attributes(self):
+        module = TronModule()
+        assert module.name == 'tron'
+        assert 'tron' in module.supported_types
+
+    def test_no_key_configured_sends_no_auth_header(self):
+        module = TronModule()
+        module.config.api_keys.trongrid = None
+        assert module._headers() == {}
+
+    def test_key_configured_sends_pro_api_key_header(self):
+        module = TronModule()
+        module.config.api_keys.trongrid = 'testkey'
+        try:
+            assert module._headers() == {'TRON-PRO-API-KEY': 'testkey'}
+        finally:
+            module.config.api_keys.trongrid = None
+
+    def test_trc20_transfer_recipient_decodes_a_real_payload(self):
+        from cybertrace.modules.tron_module import _decode_trc20_transfer_recipient
+        # A real TriggerSmartContract calldata captured off api.trongrid.io:
+        # selector + 32-byte padded recipient + 32-byte amount.
+        data = ('a9059cbb0000000000000000000000002f50fc2ad54b274619cb44c9fd26427'
+               'ccdeeeebb00000000000000000000000000000000000000000000000000000'
+               '003680db270')
+        recipient = _decode_trc20_transfer_recipient(data)
+        assert recipient is not None
+        assert recipient.startswith('T')
+
+    def test_trc20_transfer_recipient_ignores_other_selectors(self):
+        from cybertrace.modules.tron_module import _decode_trc20_transfer_recipient
+        assert _decode_trc20_transfer_recipient('095ea7b3' + '00' * 64) is None  # approve()
+        assert _decode_trc20_transfer_recipient('') is None
+
+    def test_counterparty_addresses_reach_the_summary(self):
+        module = TronModule()
+        result = ModuleResult(target=TRX_VALID, target_type='tron', module='tron')
+        result.sources['trongrid_transactions'] = SourceResult(
+            source='trongrid_transactions', success=True,
+            data={'tx_count': 1, 'first_seen': None, 'last_seen': None,
+                 'counterparty_addresses': [TRX_VALID]})
+        summary = module._build_summary(result)
+        assert summary['counterparty_addresses'] == [TRX_VALID]
+        assert summary['connected_addresses'] == [TRX_VALID]
 
 
 class TestUsernameModule:

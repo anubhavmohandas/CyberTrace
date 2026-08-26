@@ -176,7 +176,7 @@ ENTITY_TYPES = {
     "MARKET", "ONION_ADDRESS", "PAGE", "DOCUMENT",
     "OPERATOR_CANDIDATE", "USERNAME", "EMAIL", "PGP_KEY", "PHONE",
     "TELEGRAM", "SESSION_ID",
-    "BTC_ADDRESS", "XMR_ADDRESS", "ETH_ADDRESS", "CRYPTO_CLUSTER", "EXCHANGE",
+    "BTC_ADDRESS", "XMR_ADDRESS", "ETH_ADDRESS", "TRX_ADDRESS", "CRYPTO_CLUSTER", "EXCHANGE",
     "IP", "ASN", "HOSTING_PROVIDER", "VPN_PROVIDER", "DOMAIN",
     "NAMESERVER", "CERTIFICATE", "FAVICON", "HTTP_FINGERPRINT", "ANALYTICS_ID",
     "SOCIAL_ACCOUNT", "FORUM_ACCOUNT", "BREACH_RECORD",
@@ -186,7 +186,7 @@ RELATIONSHIP_TYPES = {
     "HAS_ADDRESS", "HAS_PAGE", "CONTAINS", "MENTIONS",
     "USES_PGP", "USES_EMAIL", "USES_USERNAME", "USES_TELEGRAM", "USES_PHONE",
     "SIGNS_WITH", "ASSOCIATED_WITH",
-    "USES_BTC", "USES_XMR", "USES_ETH", "PART_OF_CLUSTER",
+    "USES_BTC", "USES_XMR", "USES_ETH", "USES_TRX", "PART_OF_CLUSTER",
     "TRANSACTED_WITH", "EXCHANGE_DEPOSIT",
     "HOSTED_ON", "RESOLVES_TO", "BELONGS_TO_ASN", "OWNED_BY",
     "USES_CERT", "USES_NS", "USES_ANALYTICS", "CANDIDATE_IP", "LINKS_TO",
@@ -291,6 +291,7 @@ ARTIFACT_MAP = {
     "bitcoin_addresses":         ("BTC_ADDRESS", "USES_BTC"),
     "monero_addresses":          ("XMR_ADDRESS", "USES_XMR"),
     "ethereum_addresses":        ("ETH_ADDRESS", "USES_ETH"),
+    "tron_addresses":            ("TRX_ADDRESS", "USES_TRX"),
     "clearnet_hosts_referenced": ("DOMAIN", "MENTIONS"),
     "onion_addresses_found":     ("ONION_ADDRESS", "LINKS_TO"),
     "analytics_ids":             ("ANALYTICS_ID", "USES_ANALYTICS"),
@@ -1444,6 +1445,17 @@ def enrich_bitcoin(store: EvidenceStore, snapshot_id: str, addr_id: str, summary
     test_ellipticpp_illicit_label_never_links_two_unrelated_markets in
     tests/test_correlate.py.
 
+    exchange_tag_* fields are the exact same EXTERNAL_DATASET_MATCH class as
+    ellipticpp_*, from a second, independent offline dataset (GraphSense
+    TagPacks -- see integrations/exchange_tags.py): a community-contributed
+    public label ("this address appears in Binance's/OFAC's/a ransomware
+    tracker's tagpack"), not CyberTrace's own finding and not proof of
+    control. This is the suggestion half of nearest-exchange attribution --
+    it never writes EXCHANGE_DEPOSIT itself. Only label_exchange does that,
+    always on an analyst's own say-so; exchange_tag_is_exchange exists so an
+    analyst reviewing this address knows there IS a third-party exchange
+    claim worth checking before they call it.
+
     chainabuse_report_dates carries WHEN each report was FILED — a fact about
     a third party's paperwork, not a sighting of the address. It must never be
     read as "address active at time T": nothing in correlate.py's temporal
@@ -1474,7 +1486,13 @@ def enrich_bitcoin(store: EvidenceStore, snapshot_id: str, addr_id: str, summary
                              ("ellipticpp_time_steps",
                               summary.get("ellipticpp_time_steps")),
                              ("ellipticpp_record_count",
-                              summary.get("ellipticpp_record_count"))) if v})
+                              summary.get("ellipticpp_record_count")),
+                             ("exchange_tag_categories",
+                              summary.get("exchange_tag_categories")),
+                             ("exchange_tag_labels",
+                              summary.get("exchange_tag_labels")),
+                             ("exchange_tag_is_exchange",
+                              summary.get("exchange_tag_is_exchange"))) if v})
 
     row = store._one("SELECT etype FROM entities WHERE entity_id=?", (addr_id,))
     etype = row["etype"] if row else "BTC_ADDRESS"
@@ -1523,10 +1541,20 @@ def label_exchange(store: EvidenceStore, address: str, exchange_name: str,
     "analyst:" so it can never be mistaken for an OSINT-derived edge
     downstream, and correlate.wallet_exchange_paths is the only reader.
 
-    Returns the relationship id, or None if `address` fails BTC normalization
-    (the same "no artifact" contract as upsert_entity).
+    Chain is detected from the address shape (BTC/ETH/TRX -- same detector.
+    detect_input_type every module dispatch already goes through), so a VASP's
+    Ethereum or TRON hot wallet labels the same way a Bitcoin one always could.
+    Anything that doesn't classify as one of those three is still tried against
+    BTC_ADDRESS, matching this function's original BTC-only contract.
+
+    Returns the relationship id, or None if `address` fails normalization for
+    its detected chain (the same "no artifact" contract as upsert_entity).
     """
-    addr_id = store.upsert_entity("BTC_ADDRESS", address, observed_at=observed_at)
+    from .detector import detect_input_type
+    _, chain = detect_input_type(address)
+    etype = {"bitcoin": "BTC_ADDRESS", "ethereum": "ETH_ADDRESS",
+            "tron": "TRX_ADDRESS"}.get(chain, "BTC_ADDRESS")
+    addr_id = store.upsert_entity(etype, address, observed_at=observed_at)
     if addr_id is None:
         return None
     exch_id = store.upsert_entity("EXCHANGE", exchange_name, observed_at=observed_at)
@@ -1568,6 +1596,7 @@ _ENRICHERS = {
     "email":    ("EMAIL", enrich_email),
     "bitcoin":  ("BTC_ADDRESS", enrich_bitcoin),
     "ethereum": ("ETH_ADDRESS", enrich_bitcoin),
+    "tron":     ("TRX_ADDRESS", enrich_bitcoin),
 }
 
 

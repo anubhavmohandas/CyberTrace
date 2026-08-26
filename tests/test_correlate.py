@@ -24,8 +24,8 @@ from cybertrace.monitor import candidate_deltas
 from cybertrace.normalize import pgp_fingerprint
 
 from .test_evidence import (
-    BTC_VALID, KEY_A, KEY_B, ONION_A, ONION_B, _armor, _pivot_result, _pubkey_packet,
-    _result, _signature_packet, onion,
+    BTC_VALID, KEY_A, KEY_B, ONION_A, ONION_B, TRX_VALID, _armor, _pivot_result,
+    _pubkey_packet, _result, _signature_packet, onion,
 )
 
 JAN = datetime(2026, 1, 10, tzinfo=timezone.utc)
@@ -1073,6 +1073,22 @@ def test_wallet_exchange_paths_direct_hit(tmp_path):
         assert paths[0]["hops"] == 0
         assert paths[0]["confidence"] == 1.0
         assert paths[0]["evidence_ids"]
+
+
+def test_wallet_exchange_paths_direct_hit_tron(tmp_path):
+    """Same direct-hit shape as the BTC case, on a TRX_ADDRESS -- pins that
+    wallet_exchange_paths' entity query actually includes TRX_ADDRESS (it did
+    not, before TRON support), not just that label_exchange can write one."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        rel = label_exchange(store, TRX_VALID, "Test Exchange", analyst="jdoe")
+        assert rel is not None
+
+        paths = wallet_exchange_paths(store)
+        assert len(paths) == 1
+        # "value" is entities.normalized_value throughout correlate.py (see
+        # build_dossier) -- the lowercase, prefixed dedup key, not raw_value.
+        assert paths[0]["value"] == f"trx:{TRX_VALID.lower()}"
+        assert paths[0]["hops"] == 0
 
 
 def test_wallet_exchange_paths_one_hop_via_transacted_with(tmp_path):

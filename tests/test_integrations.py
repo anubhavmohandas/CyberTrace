@@ -1,21 +1,22 @@
-"""Offline dataset adapters (Elliptic++, Evolution): provenance + the one
-invariant that actually matters -- a dataset label can never reach the live
-EvidenceStore/ingest() path. See cybertrace/integrations/*.py docstrings."""
+"""Offline dataset adapters (Elliptic++, Evolution, GraphSense TagPacks):
+provenance + the one invariant that actually matters -- a dataset label can
+never reach the live EvidenceStore/ingest() path. See
+cybertrace/integrations/*.py docstrings."""
 
 import inspect
 
 import pytest
 
-from cybertrace.integrations import ellipticpp, evolution
+from cybertrace.integrations import ellipticpp, evolution, exchange_tags
 
 
 class TestEvidenceStoreIsUnreachable:
     """Pins the safety boundary directly against the source, not just against
-    behavior today -- a future edit that imports EvidenceStore into either
+    behavior today -- a future edit that imports EvidenceStore into any
     adapter must fail this test, the same way evidence.py:270 documents
     CERTIFICATE staying unwired rather than leaving it to be noticed later."""
 
-    @pytest.mark.parametrize("module", [ellipticpp, evolution])
+    @pytest.mark.parametrize("module", [ellipticpp, evolution, exchange_tags])
     def test_adapter_never_imports_the_evidence_store(self, module):
         # Checks the module's actual namespace, not its docstring prose (which
         # names EvidenceStore/ingest deliberately, to document the boundary).
@@ -36,6 +37,12 @@ class TestManifestProvenance:
         m = evolution.manifest()
         assert m["license_status"] == "CC-BY-4.0"
         assert m["doi"] == "10.5281/zenodo.10171217"
+
+    def test_exchange_tags_manifest_declares_mit(self):
+        m = exchange_tags.manifest()
+        assert m["license"] == "MIT"
+        assert m["source_url"]
+        assert m["pack_count"] > 0
 
 
 class TestRecordsCarryDatasetLabelNotAttribution:
@@ -173,3 +180,38 @@ class TestEvolutionIndex:
         monkeypatch.setattr(evolution, "index_available", lambda: False)
         with pytest.raises(RuntimeError, match="build_index"):
             evolution.lookup_pgp_fingerprint("0" * 40)
+
+
+class TestExchangeTagsIndex:
+    """Mirrors TestEllipticppIndex: the local lookup index over the tagpack
+    archive, so a single-address lookup is an indexed query instead of an
+    86-file YAML scan."""
+
+    @pytest.mark.skipif(not exchange_tags.index_available(),
+                        reason="GraphSense TagPacks index not built (call build_index() once)")
+    def test_a_real_binance_address_is_tagged_exchange(self):
+        # binance.yaml's own first address, read directly off the pack, not
+        # assumed -- see external_data/exchange_tags/original/.../binance.yaml.
+        hits = exchange_tags.lookup_address("1NDyJtNTjmwk5xPNhjgAMu4HDHigtobu1s", "BTC")
+        assert hits
+        assert any(h["category"] == "exchange" for h in hits)
+
+    @pytest.mark.skipif(not exchange_tags.index_available(),
+                        reason="GraphSense TagPacks index not built (call build_index() once)")
+    def test_lookup_address_absent_returns_empty(self):
+        assert exchange_tags.lookup_address("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", "BTC") == []
+
+    @pytest.mark.skipif(not exchange_tags.index_available(),
+                        reason="GraphSense TagPacks index not built (call build_index() once)")
+    def test_lookup_address_rejects_a_malformed_address(self):
+        # canon is None before any query runs -- an invalid address can never
+        # accidentally match a row through some looser comparison.
+        assert exchange_tags.lookup_address("not-a-real-address", "BTC") == []
+
+    def test_lookup_address_without_an_index_fails_loudly(self, monkeypatch):
+        # Same discipline as ellipticpp.lookup_wallet: a silent fallback to a
+        # full archive scan would make the "efficient lookup" this index
+        # exists for invisible until someone profiles a slow investigation.
+        monkeypatch.setattr(exchange_tags, "index_available", lambda: False)
+        with pytest.raises(RuntimeError, match="build_index"):
+            exchange_tags.lookup_address("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", "BTC")

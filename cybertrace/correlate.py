@@ -40,7 +40,7 @@ from .normalize import _registrable
 FUNNELS: Dict[str, Set[str]] = {
     "f1_contact":   {"USES_EMAIL", "USES_USERNAME", "USES_TELEGRAM", "USES_PHONE"},
     "f2_pgp_reuse": {"USES_PGP", "SIGNS_WITH", "SIGNED_BY", "CROSS_SIGNS"},
-    "f3_crypto":    {"USES_BTC", "USES_XMR", "USES_ETH", "PART_OF_CLUSTER"},
+    "f3_crypto":    {"USES_BTC", "USES_XMR", "USES_ETH", "USES_TRX", "PART_OF_CLUSTER"},
     "f4_cross_plat": {"ASSOCIATED_WITH"},
     "f5_clearnet":  {"HOSTED_ON", "CANDIDATE_IP", "RESOLVES_TO", "BELONGS_TO_ASN",
                      "OWNED_BY", "USES_CERT", "USES_NS", "USES_ANALYTICS", "MENTIONS"},
@@ -626,7 +626,7 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
 
     values = {r["entity_id"]: r["normalized_value"] for r in store._all(
         "SELECT entity_id, normalized_value FROM entities "
-        "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS')")}
+        "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS','TRX_ADDRESS')")}
 
     out = []
     for start in values:

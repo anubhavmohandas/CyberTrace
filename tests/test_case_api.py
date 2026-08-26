@@ -201,6 +201,76 @@ def test_investigator_endpoint_no_such_case(tmp_path):
         assert "error" in resp
 
 
+class _FakeModule:
+    """Stands in for a real OSINT module so /api/search tests don't hit the
+    network — mirrors the `async with module:` / `await module.search()`
+    protocol case_api.run_search() actually drives."""
+    name = "fake"
+    supported_types: tuple = ()
+
+    def __init__(self, result):
+        self._result = result
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def search(self, target, **options):
+        return self._result
+
+
+def test_search_endpoint_returns_module_result(tmp_path, monkeypatch):
+    from cybertrace.modules.base import ModuleResult
+
+    fake_result = ModuleResult(target="13AM4VW2dhxYgXeQepoHkHSQuy6NgaEb94",
+                                target_type="bitcoin", module="bitcoin")
+    monkeypatch.setattr(
+        case_api, "resolve_module_for_target",
+        lambda target, input_type="auto": (_FakeModule(fake_result), target, "bitcoin", "bitcoin"))
+
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+
+    with _running_server(cases_dir) as base:
+        status, body = _get(f"{base}/api/search?q=13AM4VW2dhxYgXeQepoHkHSQuy6NgaEb94")
+        assert status == 200
+        assert body["target_type"] == "bitcoin"
+        assert body["module"] == "bitcoin"
+
+
+def test_search_endpoint_requires_q(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    with _running_server(cases_dir) as base:
+        status, body = _get(f"{base}/api/search")
+        assert status == 400
+        assert "error" in body
+
+
+def test_search_endpoint_refuses_blocked_query(tmp_path, monkeypatch):
+    monkeypatch.setattr(case_api, "is_blocked_query", lambda target: True)
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    with _running_server(cases_dir) as base:
+        status, body = _get(f"{base}/api/search?q=whatever")
+        assert status == 400
+        assert "error" in body
+
+
+def test_search_endpoint_no_module_for_type(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        case_api, "resolve_module_for_target",
+        lambda target, input_type="auto": (None, target, "mystery", "mystery"))
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    with _running_server(cases_dir) as base:
+        status, body = _get(f"{base}/api/search?q=whatever")
+        assert status == 400
+        assert "error" in body
+
+
 def test_snapshot_endpoint_returns_real_payload(tmp_path):
     cases_dir = tmp_path / "cases"
     cases_dir.mkdir()

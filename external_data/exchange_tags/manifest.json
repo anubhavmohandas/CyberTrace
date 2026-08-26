@@ -1,0 +1,24 @@
+{
+  "dataset": "GraphSense TagPacks",
+  "description": "Community-contributed public address tags (exchange, ransomware, sanctions, mixer, scam, and other categories) across multiple cryptocurrencies, maintained by the GraphSense project and outside contributors.",
+  "source_url": "https://github.com/graphsense/graphsense-tagpacks",
+  "license": "MIT",
+  "license_note": "Confirmed via the GitHub API license field on the repo itself. Unlike Elliptic++, this dataset is openly redistributable -- the retrieved archive can be re-fetched by anyone from the same public URL.",
+  "commit_sha": "921ae2ba98fe9f4050f46c80583cd4b98ced1042",
+  "commit_date": "2026-06-29T13:09:15Z",
+  "retrieved_at": "2026-08-26T00:00:00Z",
+  "distribution_channel": {
+    "channel": "github_repo_zip",
+    "url": "https://codeload.github.com/graphsense/graphsense-tagpacks/zip/refs/heads/master",
+    "archive_file": "original/graphsense-tagpacks.zip",
+    "archive_sha256": "548d07965e8db0286493206cb7d32bb404b570a2b3c8b9e781ea315f1dcc94bb",
+    "archive_size_bytes": 13634245
+  },
+  "pack_count": 86,
+  "schema_notes": {
+    "format": "One YAML file per pack under packs/*.yaml. Top-level fields (currency, category, label, actor, source, ...) are pack-wide defaults; each entry under `tags:` is at minimum {address: ...} and may override any of those fields per-tag.",
+    "currencies_indexed": "Only BTC, ETH, and TRX tags are read into the local index -- see integrations/exchange_tags.py:_RELEVANT_NORMALIZERS. The corpus also carries EOS, LTC, and other chains CyberTrace has no entity type for; those rows are skipped at index-build time, not deleted from the archive.",
+    "categories_seen": "exchange, ransomware, sanctions (OFAC), mixer/service, scam, miner, gambling, and others -- category is stored per-tag so any of them can surface, not only 'exchange'."
+  },
+  "safety_boundary": "A tag here is a THIRD PARTY's public claim (a contributed tagpack) that an address belongs to some category/entity -- not independently verified by CyberTrace and never proof of control. It must never be written as EXCHANGE_DEPOSIT or any other relationship automatically -- see cybertrace/integrations/exchange_tags.py and evidence.enrich_bitcoin's exchange_tag_* docstring. Only evidence.label_exchange, on an analyst's own say-so, may create that edge."
+}

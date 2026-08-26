@@ -11,6 +11,7 @@ Every function returns the canonical string or None. Canonical forms:
     BTC      BTC:<address>                  base58check or bech32 verified
     XMR      XMR:<address>                  base58, 69 bytes, network prefix
     ETH      ETH:0x<40 lowercase hex>
+    TRX      TRX:<address>                  base58check, 0x41 mainnet prefix
     email    lowercase
     ip       canonical form via ipaddress
     onion    lowercase v3
@@ -43,6 +44,24 @@ def b58decode(s: str) -> Optional[bytes]:
         n = n * 58 + i
     body = n.to_bytes((n.bit_length() + 7) // 8, "big")
     return b"\x00" * (len(s) - len(s.lstrip("1"))) + body
+
+
+def b58encode(data: bytes) -> str:
+    """Encode bytes as base58 -- the encode side of b58decode above.
+
+    Nothing here mints a BTC/XMR address (this tool only ever validates ones
+    already given to it), but tron_hex_to_address needs it: TronGrid's own API
+    hands back TRON addresses as raw hex, and re-encoding to the base58check
+    T... form is the only way a counterparty pulled from a transaction matches
+    the TRX_ADDRESS entity norm_tron would mint for the same address.
+    """
+    n = int.from_bytes(data, "big")
+    out = ""
+    while n > 0:
+        n, r = divmod(n, 58)
+        out = _B58[r] + out
+    pad = len(data) - len(data.lstrip(b"\x00"))
+    return "1" * pad + out
 
 
 # --- bech32 (BIP-173) --------------------------------------------------------
@@ -510,6 +529,40 @@ def norm_eth(addr: str) -> Optional[str]:
     return f"ETH:{addr}" if re.fullmatch(r"0x[0-9a-f]{40}", addr) else None
 
 
+def norm_tron(addr: str) -> Optional[str]:
+    """TRON base58check: same double-SHA256 checksum scheme norm_btc verifies,
+    a 0x41 mainnet prefix byte in place of BTC's 0x00/0x05, 25 raw bytes total."""
+    addr = addr.strip()
+    raw = b58decode(addr)
+    if raw is None or len(raw) != 25:
+        return None
+    if raw[0] != 0x41:
+        return None
+    if hashlib.sha256(hashlib.sha256(raw[:-4]).digest()).digest()[:4] != raw[-4:]:
+        return None
+    return f"TRX:{addr}"
+
+
+def tron_hex_to_address(hex_addr: str) -> Optional[str]:
+    """21-byte hex (0x41 prefix + 20-byte pubkey hash) -> base58check T...
+
+    TronGrid's own transaction payloads (owner_address/to_address, and the
+    ABI-encoded recipient inside a TRC20 transfer's calldata) are all hex, not
+    the T... form CyberTrace's TRX_ADDRESS entities use — see
+    modules/tron_module.py. None on anything that isn't a well-formed TRON
+    hex address, so a malformed value degrades to "no counterparty" rather
+    than minting a garbage entity.
+    """
+    try:
+        raw = bytes.fromhex(hex_addr)
+    except ValueError:
+        return None
+    if len(raw) != 21 or raw[0] != 0x41:
+        return None
+    checksum = hashlib.sha256(hashlib.sha256(raw).digest()).digest()[:4]
+    return b58encode(raw + checksum)
+
+
 # File extensions that land in the TLD slot when scraping HTML: `logo@2x.webp`
 # is a retina asset filename, not a mailbox. This guard is why the list exists —
 # a false email seeds a false local-part username, which seeds false social
@@ -875,6 +928,7 @@ NORMALIZERS = {
     "BTC_ADDRESS": norm_btc,
     "XMR_ADDRESS": norm_xmr,
     "ETH_ADDRESS": norm_eth,
+    "TRX_ADDRESS": norm_tron,
     "EMAIL": norm_email,
     "IP": norm_ip,
     "ONION_ADDRESS": norm_onion,

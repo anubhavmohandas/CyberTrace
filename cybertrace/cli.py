@@ -8,7 +8,7 @@ import click
 
 from .config import config
 from .detector import detect_input_type, normalize_input
-from .modules import get_module, list_modules, TYPE_TO_MODULE
+from .modules import get_module, list_modules, resolve_module_for_target, TYPE_TO_MODULE
 from .output import print_result, save_result
 from .safety import is_blocked_query
 
@@ -138,41 +138,15 @@ def search(target: str, input_type: str, output_format: str, save_path: Optional
                    "Not searched, nothing stored.", err=True)
         sys.exit(2)
 
-    # Detect input type
-    if input_type == 'auto':
-        specific_type, module_type = detect_input_type(target)
-        if not quiet:
-            click.echo(f"[*] Detected type: {specific_type} → module: {module_type}", err=True)
-    else:
-        module_type = input_type
-        specific_type = input_type
-
-    # Normalize input
-    normalized = normalize_input(target, module_type)
+    module, normalized, specific_type, module_type = resolve_module_for_target(target, input_type)
+    if input_type == 'auto' and not quiet:
+        click.echo(f"[*] Detected type: {specific_type} → module: {module_type}", err=True)
     if normalized != target and not quiet:
         click.echo(f"[*] Normalized: {target} → {normalized}", err=True)
-
-    # Get module
-    module = get_module(module_type)
     if not module:
         click.echo(f"[!] No module available for type: {module_type}", err=True)
         click.echo(f"[!] Available modules: {', '.join(list_modules().keys())}", err=True)
         sys.exit(1)
-
-    # A module may accept several target shapes (breach, social); an explicit
-    # `--type breach` names the MODULE, not one of its own shapes, so it is
-    # never a member of module.supported_types. Detect what the STRING
-    # actually looks like and use that category instead, or every multi-shape
-    # module's options.get('target_type', <default>) silently takes the wrong
-    # branch (breach defaulted every `--type breach` search to 'email'). A
-    # module whose override already names one of its own shapes (geoint's
-    # `--type address`/`--type coordinates`) is left untouched — geoint has no
-    # detector pattern for free-text addresses, so re-detecting would replace
-    # a valid override with the 'username' fallback.
-    if specific_type not in getattr(module, 'supported_types', ()):
-        _, detected_category = detect_input_type(target)
-        if detected_category in getattr(module, 'supported_types', ()):
-            specific_type = detected_category
 
     module.show_progress = not quiet
     if not quiet:
@@ -422,8 +396,9 @@ def feedback(candidate_id: str, db_path: str, outcome: str, note: Optional[str],
 def label_exchange_cmd(address: str, exchange: str, db_path: str,
                        note: Optional[str], analyst: Optional[str]):
     """
-    Record that a Bitcoin address is a known deposit/hot-wallet address for an
-    exchange, from an analyst's own knowledge — never inferred by CyberTrace.
+    Record that a Bitcoin, Ethereum, or TRON address is a known deposit/hot-
+    wallet address for an exchange, from an analyst's own knowledge — never
+    inferred by CyberTrace.
 
     This is the only way an EXCHANGE_DEPOSIT edge is created. Once recorded,
     `correlate`/`watch` report the shortest reachable hop count from any traced
@@ -439,7 +414,8 @@ def label_exchange_cmd(address: str, exchange: str, db_path: str,
     with EvidenceStore(db_path) as store:
         rel_id = label_exchange(store, address, exchange, analyst=analyst, note=note)
         if rel_id is None:
-            click.echo(f"[!] {address!r} is not a valid Bitcoin address", err=True)
+            click.echo(f"[!] {address!r} is not a valid Bitcoin, Ethereum, or "
+                      f"TRON address", err=True)
             sys.exit(1)
         click.echo(f"[+] Recorded {address} as {exchange} ({rel_id})", err=True)
 
@@ -575,6 +551,15 @@ def btc(address: str, output: str):
     """Search for a Bitcoin address."""
     ctx = click.get_current_context()
     ctx.invoke(search, target=address, input_type='bitcoin', output_format=output)
+
+
+@cli.command()
+@click.argument('address')
+@click.option('--output', '-o', default='table', type=click.Choice(['table', 'json', 'rich']))
+def tron(address: str, output: str):
+    """Search for a TRON (TRX) address."""
+    ctx = click.get_current_context()
+    ctx.invoke(search, target=address, input_type='tron', output_format=output)
 
 
 @cli.command()
