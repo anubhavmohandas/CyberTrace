@@ -777,28 +777,22 @@ class Component extends DCLogic {
 
   ask(q) {
     const cd = this.state.caseData || EMPTY_CASE;
-    const clone = cd.suppressed[0];
-    const scripts = [
-      { match:['connected','related'],
-        text:'Direct evidence collected on both markets, not inferred:',
-        points: cd.candidates.map(c => ({ mark:'✓', color:C.green, text:`${c.etype.replace(/_/g,' ')} ${short(c.name,32)} observed on both — score ${c.score}, band ${c.band}` })),
-        cite:'Show evidence' },
-      { match:['reject','suppress'],
-        text: clone ? 'One standing objection was recorded and left unresolved rather than silently discounted:' : 'Nothing was suppressed in this case.',
-        points: cd.suppressed.map(s => ({ mark:'⚠', color:C.sand, text:`${s.rule.replace(/_/g,' ')} — ${s.why}` })),
-        cite:'Open suppressed signals' },
-      { match:['strongest'],
-        text: cd.candidates[0] ? `${cd.candidates[0].etype.replace(/_/g,' ')} ${short(cd.candidates[0].name,32)}, score ${cd.candidates[0].score}. ${cd.candidates[0].assessment}` : 'No candidates loaded yet.',
-        points:[], cite:'Open Evidence' },
-      { match:['why is this here','why here'],
-        text:'Every candidate here entered through a direct capture, not through inference. Everything in the drawer resolves to a snapshot hash listed under Sources.',
-        points:[], cite:'Open Sources' }
-    ];
-    const hit = scripts.find(s => s.match.some(w => q.toLowerCase().includes(w)));
-    const answer = hit
-      ? { role:'INVESTIGATOR', text:hit.text, points:hit.points, cite:hit.cite }
-      : { role:'INVESTIGATOR', text:'No scripted answer covers that. Live mode would query the evidence store directly; in this prototype, try one of the suggested questions below.', points:[] };
-    this.setState(s => ({ aiOpen:true, aiInput:'', thread:[...s.thread, { role:'ANALYST', text:q, points:[] }, answer] }));
+    this.setState(s => ({ aiOpen:true, aiInput:'', thread:[...s.thread, { role:'ANALYST', text:q, points:[] }] }));
+    apiFetch(caseUrl(cd.case_id) + '/investigator', {
+      method:'POST', headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ question:q })
+    })
+      .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+      .then(data => {
+        const points = (data.evidence || []).map(e => ({
+          mark:'✓', color:C.green,
+          text:`${e.extraction_method} on ${short(e.url, 30)} (conf ${e.confidence.toFixed(1)})`,
+        }));
+        const cite = data.mode === 'deterministic' ? 'Evidence-only — no LLM configured' : '';
+        this.setState(s => ({ thread:[...s.thread, { role:'INVESTIGATOR', text:data.answer, points, cite }] }));
+      })
+      .catch(err => this.setState(s => ({ thread:[...s.thread,
+        { role:'INVESTIGATOR', text:'Could not reach the investigator backend: ' + String(err), points:[] }] })));
   }
 
   detect(v) {
@@ -992,9 +986,8 @@ class Component extends DCLogic {
       onAiInput: (e) => this.set({ aiInput: e.target.value }),
       onAiKey: (e) => { if (e.key === 'Enter' && st.aiInput.trim()) this.ask(st.aiInput.trim()); },
       sendAi: () => { if (st.aiInput.trim()) this.ask(st.aiInput.trim()); },
-      aiModeNote: (this.props.aiMode || 'scripted') === 'scripted'
-        ? 'Scripted answers over real correlation output. Live mode would query the evidence store directly.'
-        : 'Live mode. Falls back to scripted answers if the model is unreachable.',
+      aiModeNote: 'Every answer is grounded in this case\'s evidence store; the backend reports '
+        + 'whether a language model or the evidence-only fallback produced it.',
 
       recheck: () => this.ask('what changed'),
 

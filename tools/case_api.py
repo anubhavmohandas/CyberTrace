@@ -30,6 +30,7 @@ from urllib.parse import unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from cybertrace import investigator
 from cybertrace.evidence import EvidenceStore
 from tools.export_case_gui import build_payload
 
@@ -112,7 +113,27 @@ def make_handler(cases_dir: Path):
             if path.startswith("/api/case/") and path.endswith("/verdict"):
                 case_id = path[len("/api/case/"):-len("/verdict")]
                 return self._save_verdict(case_id)
+            if path.startswith("/api/case/") and path.endswith("/investigator"):
+                case_id = path[len("/api/case/"):-len("/investigator")]
+                return self._investigator_answer(case_id)
             return self._json({"error": "not found"}, status=404)
+
+        def _investigator_answer(self, case_id: str) -> None:
+            db_path = cases_dir / f"{case_id}.db"
+            if not db_path.is_file():
+                return self._json({"error": "no such case"}, status=404)
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except json.JSONDecodeError:
+                return self._json({"error": "invalid JSON body"}, status=400)
+            question = (body.get("question") or "").strip()
+            if not question:
+                return self._json({"error": "question is required"}, status=400)
+            with EvidenceStore(str(db_path)) as store:
+                result = investigator.answer(store, case_id, question,
+                                              candidate_id=body.get("candidate_id"))
+            return self._json(result, status=200)
 
         def _save_verdict(self, case_id: str) -> None:
             db_path = cases_dir / f"{case_id}.db"

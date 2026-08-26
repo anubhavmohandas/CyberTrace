@@ -162,6 +162,45 @@ def test_verdict_no_such_case_404(tmp_path):
         assert "error" in resp
 
 
+def test_investigator_endpoint_deterministic(tmp_path):
+    """No CT_LLM_PROVIDER set in this test process -> the real live path
+    (tools/case_api.py -> cybertrace.investigator.answer) falls back to a
+    deterministic, evidence-grounded answer over the real tortaxi case."""
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    _make_case_db(cases_dir / "tortaxi.db")
+
+    with _running_server(cases_dir) as base:
+        status, resp = _post(f"{base}/api/case/tortaxi/investigator",
+                             {"question": "why are these markets connected?"})
+        assert status == 200
+        assert resp["mode"] == "deterministic"
+        assert resp["case_id"] == "tortaxi"
+        assert resp["claims"], "expected grounded claims for a real correlated case"
+
+
+def test_investigator_endpoint_missing_question(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    _make_case_db(cases_dir / "tortaxi.db")
+
+    with _running_server(cases_dir) as base:
+        status, resp = _post(f"{base}/api/case/tortaxi/investigator", {})
+        assert status == 400
+        assert "error" in resp
+
+
+def test_investigator_endpoint_no_such_case(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+
+    with _running_server(cases_dir) as base:
+        status, resp = _post(f"{base}/api/case/does-not-exist/investigator",
+                             {"question": "why are these connected?"})
+        assert status == 404
+        assert "error" in resp
+
+
 def test_snapshot_endpoint_returns_real_payload(tmp_path):
     cases_dir = tmp_path / "cases"
     cases_dir.mkdir()
