@@ -226,6 +226,30 @@ def test_does_this_prove_the_same_operator_refuses_while_citing_evidence(store):
     assert any("never a proven identity" in l for l in result["limitations"])
 
 
+def test_a_question_that_is_not_yes_or_no_is_not_answered_no(store):
+    """"What remains uncertain?" is not a yes/no question, and was being
+    answered "No.".
+
+    The boundary handler assembles exactly what a limitations question wants —
+    band, standing objections, limitations — so routing "uncertain" into it was
+    right. Its opening was not: the sentence is hardcoded for "does this prove
+    …?", and "certain" is a substring of "uncertain", so the boundary keywords
+    swallowed the phrasing either way. An analyst asking what is still open got
+    a flat refusal to a question nobody asked.
+    """
+    for question in ("what remains uncertain?", "why is this candidate weak?"):
+        result = investigator.answer(store, "tortaxi", question)
+        assert "does not have enough observed evidence" not in result["answer"], question
+        assert not result["answer"].startswith("No."), question
+        # Same bounded content as the yes/no form — cited, not merely narrated.
+        assert "not proof of common control" in result["answer"], question
+        assert result["limitations"], question
+        known = {e["id"] for e in result["evidence"]}
+        for claim in result["claims"]:
+            for eid in claim["evidence_ids"]:
+                assert eid in known, question
+
+
 def test_a_standing_objection_is_as_walkable_as_the_support_it_argues_against(store):
     """Supporting ids resolved to observations while contradicting ids resolved
     to a finding whose own evidence list was empty — so 'what supports this'

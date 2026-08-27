@@ -326,6 +326,12 @@ def evaluate(paths: list[Path], labels_path: Path, show_pairs: bool,
         print("\n  pairs that share an artifact and were still not asserted:")
         for _layer, na, nb, klass, in_common in sorted(stuck)[:12]:
             print(f"    {na} ~ {nb}  [{klass}]  shares: {in_common}")
+        # This list is the whole point of the layer table above -- it says
+        # whether the scoring bottleneck is real. Capping it silently under-
+        # reports the one figure a reader would act on, so say what was cut.
+        if len(stuck) > 12:
+            print(f"    ... and {len(stuck) - 12} more (of {len(stuck)}); "
+                  f"pass --pairs for the full list")
 
     if unevaluable:
         print("\n=== unevaluable — target never answered, not the engine's miss ===")

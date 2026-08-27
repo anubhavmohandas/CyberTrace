@@ -264,7 +264,7 @@ def _wallet_exchange(ctx: dict) -> dict:
                             "Hop distance is reachability, not proof of an intentional transfer."]}
 
 
-def _boundary(ctx: dict) -> dict:
+def _boundary(ctx: dict, lead: str = "No. ") -> dict:
     """"Does this prove the same operator?" — the one question the attribution
     boundary exists to answer, and the one an analyst carries into a warrant.
 
@@ -290,7 +290,7 @@ def _boundary(ctx: dict) -> dict:
         "candidate_ids": [c["candidate_id"]],
         "finding_ids": [contra["finding_id"]] if contra.get("finding_id") else [],
     } for c in contradicted for contra in c["contradictions"]]
-    answer = (f"No. The strongest candidate is {best['entity']['etype'].replace('_', ' ').lower()} "
+    answer = (f"{lead}The strongest candidate is {best['entity']['etype'].replace('_', ' ').lower()} "
               f"`{_short(best['entity']['value'], 32)}` at {best['score']:.2f} ({best['confidence_level']}), "
               f"which is shared-artifact evidence, not proof of common control.")
     if contradicted:
@@ -301,12 +301,28 @@ def _boundary(ctx: dict) -> dict:
             "limitations": sorted({lim for c in ctx["candidates"] for lim in c["limitations"]})}
 
 
+def _limits(ctx: dict) -> dict:
+    """Same bounded evidence as _boundary, for a question that is not yes/no.
+
+    "What remains uncertain?" and "why is this candidate weak?" want exactly
+    what the boundary answer already assembles -- band, standing objections,
+    limitations -- but answering either of them "No." replies to a question the
+    analyst did not ask.
+    """
+    return _boundary(ctx, lead="")
+
+
 _INTENTS = [
     # Ordered: the boundary question is matched before the looser keyword sets
     # below, so "does this prove they are connected?" gets the bounded answer
     # rather than the connection list it also mentions.
-    (("prove", "proof", "certain", "same operator", "same person", "who controls",
-      "uncertain", "how sure", "confident"), _boundary),
+    #
+    # _limits comes first because "certain" is a substring of "uncertain" --
+    # the boundary set would otherwise swallow the limitation phrasings and
+    # answer them "No."
+    (("uncertain", "limitation", "how sure", "confident", "weak"), _limits),
+    (("prove", "proof", "certain", "same operator", "same person",
+      "who controls"), _boundary),
     (("connect", "related", "linked", "support", "evidence for"), _connected),
     (("reject", "suppress", "why not", "didn't", "contradict", "objection",
       "against"), _suppressed),
