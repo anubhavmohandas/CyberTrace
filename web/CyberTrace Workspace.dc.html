@@ -236,9 +236,12 @@ window.__resources = {
                       <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#63c48b;margin-bottom:10px">SUPPORTING</div>
                       <div style="display:flex;flex-direction:column;gap:8px">
                         <sc-for list="{{ c.supporting }}" as="s" hint-placeholder-count="3">
-                          <div style="display:grid;grid-template-columns:1fr 78px;gap:10px;align-items:center;font-size:12.5px">
-                            <span style="color:#c5ccd0">{{ s.label }}</span>
-                            <span style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:.8px;color:{{ s.color }};text-align:right">{{ s.strength }}</span>
+                          <div>
+                            <div style="display:grid;grid-template-columns:1fr 78px;gap:10px;align-items:center;font-size:12.5px">
+                              <span style="color:#c5ccd0">{{ s.label }}</span>
+                              <span style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:.8px;color:{{ s.color }};text-align:right">{{ s.strength }}</span>
+                            </div>
+                            <div style="font:400 10px/1.5 'IBM Plex Mono',monospace;color:#5a6367;margin-top:4px;word-break:break-all">{{ s.anchor }}</div>
                           </div>
                         </sc-for>
                       </div>
@@ -247,7 +250,10 @@ window.__resources = {
                       <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#d97a6c;margin-bottom:10px">CONTRADICTING</div>
                       <div style="display:flex;flex-direction:column;gap:8px">
                         <sc-for list="{{ c.contradicting }}" as="s" hint-placeholder-count="1">
-                          <div style="font-size:12.5px;color:#c5ccd0">{{ s.label }}</div>
+                          <div>
+                            <div style="font-size:12.5px;color:#c5ccd0">{{ s.label }}</div>
+                            <div style="font:400 10px/1.5 'IBM Plex Mono',monospace;color:#5a6367;margin-top:4px;word-break:break-all">{{ s.anchor }}</div>
+                          </div>
                         </sc-for>
                       </div>
                     </div>
@@ -633,6 +639,7 @@ window.__resources = {
                   <div>
                     <div style="color:#c5ccd0;font-size:12.5px">{{ o.text }}</div>
                     <div style="font:400 10.5px/1 'IBM Plex Mono',monospace;color:#67716f;margin-top:5px">{{ o.rule }}</div>
+                    <div style="font:400 10px/1.5 'IBM Plex Mono',monospace;color:#5a6367;margin-top:4px;word-break:break-all">{{ o.anchor }}</div>
                   </div>
                 </sc-for>
               </div>

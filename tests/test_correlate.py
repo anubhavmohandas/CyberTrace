@@ -10,12 +10,14 @@ from datetime import datetime, timezone
 
 from cybertrace.correlate import (
     FUNNELS,
-    COMMON_ARTIFACT_FLOOR, EXCHANGE_HOP_DECAY, LEAD_FLOOR,
+    COMMON_ARTIFACT_FLOOR, EXCHANGE_HOP_DECAY, LEAD_FLOOR, RETIRED_ASSESSMENT,
+    SUCCESSOR_SIGNALS, UNJOINED_CONTEXT,
     canonical_entity_key, candidate_infra, candidate_ips, candidate_operators,
-    confidence_level, contradictions_from_identity, contradictions_from_key_temporal,
+    confidence_level, contradiction_anchor, contradictions_from_identity,
+    contradictions_from_key_temporal,
     crypto_clusters, detect_successors,
     entity_discrimination, entity_funnel_profile, evidence_chain, feedback_discrimination,
-    markets_for_entity,
+    market_artifact_map, markets_for_entity,
     market_windows, render_dossier_html, render_html, render_markdown, run_correlation,
     save_candidates, username_aliases, wallet_exchange_paths, wallet_trace_report,
 )
@@ -965,6 +967,84 @@ def test_counterparty_addresses_never_join_the_cluster(tmp_path):
         assert rel["rtype"] == "TRANSACTED_WITH"
 
 
+def _cospend_pair(store, *, quoted: bool):
+    """Two markets sharing only a favicon, plus a co-spend between an address
+    each holds. `quoted` decides whether market A published its address as its
+    own or merely reproduced somebody else's.
+
+    The favicon is what makes them a pair at all (_candidate_pairs needs one
+    literal shared entity) and it is categorically non-attributive, so whatever
+    the pair concludes, the co-spend is what concluded it.
+    """
+    a_extra = {"artifact_evidence": {BTC_VALID: {"section": "quoted"}}} if quoted else {}
+    ingest(_result(ONION_A, seen=JAN, bitcoin_addresses=[BTC_VALID],
+                   favicon={"favicon_mmh3": 12345}, **a_extra), store)
+    ingest(_result(ONION_B, seen=JAN, bitcoin_addresses=[BTC_OTHER],
+                   favicon={"favicon_mmh3": 12345}), store)
+    addr_a = store.find_entity("BTC_ADDRESS", BTC_VALID)
+    target = store.upsert_target("btc:" + BTC_VALID)
+    sid = store.insert_snapshot(target, {}, "bitcoin")
+    enrich_bitcoin(store, sid, addr_a,
+                   {"address": BTC_VALID, "cospend_addresses": [BTC_OTHER]}, "bitcoin")
+    return detect_successors(store, min_score=0.5)
+
+
+def test_a_quoted_address_cospending_is_not_shared_control(tmp_path):
+    """Co-spend proves ONE party signed for both addresses. It does not prove
+    either market is that party — so a market that merely quoted an address has
+    demonstrated no more control of it than of any other number on its page,
+    and the transaction cannot supply what the page did not.
+
+    shared_cluster was the one entry in SUCCESSOR_SIGNALS exempt from all three
+    of rarity, context and evidence: the SHARED_ARTIFACTS loop applies them, and
+    the cluster branch appended after it never adopted them. Measured before the
+    fix: this exact store asserted LINKED_TO at 0.994 on a signal citing zero
+    observations, off a pair whose only literal shared artifact is a favicon
+    NON_ATTRIBUTIVE_SIGNALS refuses to let conclude anything.
+    """
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        pairs = _cospend_pair(store, quoted=True)
+        assert pairs, "still worth ranking — an analyst may want to see the sweep"
+        pair = pairs[0]
+        assert pair["relation"] is None
+        assert pair["suppressed"] == "BELOW_THRESHOLD"
+
+        cluster = next(s for s in pair["signals_detail"] if s["signal"] == "shared_cluster")
+        assert cluster["weight"] == UNJOINED_CONTEXT, \
+            "a quoted address floors at the MENTIONS weight, like any reference"
+
+        results = run_correlation(store)
+        assert all(s["relation"] is None for s in results["successors"])
+
+
+def test_two_published_addresses_that_cospend_still_link_and_cite_the_cospend(tmp_path):
+    """The positive control for the gate above: when BOTH markets publish the
+    address they hold, co-spend is exactly the evidence it claims to be and the
+    pair must still be asserted — a gate that refuses the real case too is not a
+    gate, it is a deletion.
+
+    It must also be walkable. The claim is "these addresses co-spend", so the
+    market-side sightings alone would leave its central fact uncitable; the
+    PART_OF_CLUSTER observations are what say the two were signed for together.
+    """
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        pairs = _cospend_pair(store, quoted=False)
+        assert len(pairs) == 1
+        pair = pairs[0]
+        assert pair["relation"] == "LINKED_TO"
+        assert pair["suppressed"] is None
+
+        cluster = next(s for s in pair["signals_detail"] if s["signal"] == "shared_cluster")
+        assert cluster["weight"] == SUCCESSOR_SIGNALS["shared_cluster"], \
+            "full weight when both sides published what co-spent"
+
+        chain = evidence_chain(store, pair["evidence_ids"])
+        methods = {e["extraction_method"] for e in chain}
+        assert any(m.endswith(":cospend") for m in methods), \
+            "the co-spend itself has to be citable, not just the two sightings"
+        assert all(e["sha256"] for e in chain), "every cited id resolves to a hashed snapshot"
+
+
 def test_exchange_consolidation_cospend_does_not_link_two_unrelated_markets(tmp_path):
     """crypto_clusters' own occam note admits the risk this reproduces: a
     service consolidating many customers' deposit addresses into one input set
@@ -973,14 +1053,18 @@ def test_exchange_consolidation_cospend_does_not_link_two_unrelated_markets(tmp_
     nothing real -- only an exchange's internal housekeeping. This is the
     scenario, run through the actual pipeline rather than assumed safe.
 
-    It survives on two mechanisms neither of which lives in bitcoin_module or
-    touches SUCCESSOR_SIGNALS: _candidate_pairs (correlate.py) only compares
-    markets that already share one literal entity_id, and a market's edge to a
-    cluster-mate it never itself published floors at UNJOINED_CONTEXT (0.15,
-    MENTIONS-equivalent -- see _edge_context), never DEFAULT_CONTEXT's 1.0. So
-    the swept-in address scores as a bare reference, not control, and never as
-    the full-weight dedicated shared_cluster signal (that path is skipped once
-    shared_btc already covers the pair -- see _pair_signals).
+    It survives on _candidate_pairs (correlate.py): only markets that already
+    share one literal entity_id are ever compared, and these two published
+    different addresses. The co-spend component is real and stays visible in
+    crypto_clusters; what it does NOT do is manufacture a market pair.
+
+    This assertion used to read "the pair is still worth ranking as a lead",
+    and the pair it was passing on was market A against `btc:<address>` -- the
+    `targets` row the address lookup itself writes. Enrichment seeds counted as
+    markets everywhere correlate.py enumerated them, so the store held three
+    "markets" here instead of two and the lead was a site paired with its own
+    Bitcoin lookup. See _IS_MARKET, and the INFRA leak the same row caused in
+    test_two_standalone_lookups_are_not_two_markets.
     """
     exchange_hot_wallet = "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
     with EvidenceStore(str(tmp_path / "e.db")) as store:
@@ -1003,17 +1087,13 @@ def test_exchange_consolidation_cospend_does_not_link_two_unrelated_markets(tmp_
         assert crypto_clusters(store)[addr_a] == crypto_clusters(store)[addr_b], \
             "the two addresses really are one co-spend component -- that part is real"
 
-        # Worth surfacing as a lead (score clears LEAD_FLOOR) -- an analyst may
-        # still want to see "these two swept through one exchange" -- but the
-        # MENTIONS-floor context keeps it a reference, never a claim: no edge,
-        # same REFERENCES_ONLY refusal shared_ip gets in
-        # test_two_strangers_on_one_shared_host_are_not_linked.
-        pairs = detect_successors(store, min_score=0.0)
-        assert pairs, "the pair is still worth ranking as a lead"
-        pair = pairs[0]
-        assert pair["score"] >= LEAD_FLOOR       # visible...
-        assert pair["relation"] is None          # ...but never asserted
-        assert pair["suppressed"] == "REFERENCES_ONLY"
+        # Only the two onions are markets; the address lookup is not a site.
+        assert len(market_artifact_map(store)) == 2
+
+        # Nothing literal is shared between them, so there is no pair to rank
+        # at all -- not a lead, not an edge, and nothing naming a `btc:` row as
+        # one half of a market relationship.
+        assert detect_successors(store, min_score=0.0) == []
 
         results = run_correlation(store)
         assert all(s["relation"] is None for s in results["successors"])
@@ -1222,6 +1302,53 @@ def test_wallet_trace_report_with_no_metadata_and_no_path_is_still_honest(tmp_pa
         assert report["path"] == [BTC_VALID]
         assert report["exchange"] is None
         assert report["flags"] == []
+
+
+def test_two_standalone_lookups_are_not_two_markets(tmp_path):
+    """An analyst looking up two IPs is not two markets sharing a host.
+
+    `cybertrace search <ip|email|btc>` is a supported seed, and ingest() routes
+    it down the enrichment branch specifically so it does not "mint a MARKET
+    entity for an address and put a fake storefront in every correlation". It
+    still writes a `targets` row, though, and every market enumeration in
+    correlate.py used to count one — so two IP lookups, with no dark-web site
+    anywhere in the case, produced two INFRA candidates at 0.405 whose own
+    docstring calls them "infrastructure shared by 2+ markets, the handoff
+    points worth a warrant". The only thing the ASN and the hosting provider
+    were shared by was the analyst's choice of what to look up.
+
+    OPERATOR was never reachable this way (candidate_operators additionally
+    demands _market_uses, and an enrichment row has no edge asserting control),
+    which is why this surfaced as an INFRA/IP claim rather than an attribution
+    — a weaker failure, and still a claim about markets that do not exist.
+    """
+    def lookup(target, ttype, summary):
+        return {"target": target, "target_type": ttype, "module": ttype,
+                "timestamp": JAN.isoformat(), "summary": summary, "sources": {}}
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        for ip in ("1.2.3.4", "5.6.7.8"):
+            ingest(lookup(ip, "ip", {"ip": ip, "asn": "AS12345",
+                                     "org": "Shared Hosting Ltd"}), store)
+
+        assert store._all("SELECT target_id FROM targets"), "the rows are still written"
+        assert market_artifact_map(store) == {}, "none of them is a market"
+
+        asn = store.find_entity("ASN", "AS12345")
+        assert asn is not None                      # the entity is real evidence...
+        assert markets_for_entity(store, asn) == []  # ...about no market
+
+        results = run_correlation(store)
+        assert results["infra"] == []
+        assert results["ips"] == []
+        assert results["operators"] == []
+
+        # And an artifact a real market DOES publish is unaffected: the same
+        # store, plus one onion, still yields that onion as the one market.
+        ingest(_result(ONION_A, seen=JAN, emails=['op@proton.me']), store)
+        assert len(market_artifact_map(store)) == 1
+        email = store.find_entity("EMAIL", "op@proton.me")
+        assert len(markets_for_entity(store, email)) == 1
 
 
 def test_two_strangers_on_one_shared_host_are_not_linked(tmp_path):
@@ -1600,6 +1727,27 @@ def test_dossier_html_is_self_contained_and_leads_with_objections(tmp_path):
     assert page.index("Contradictions") < page.index("<h2>Candidates</h2>")
     assert "not calibrated probabilities" in page
 
+    # ...and each one names the finding row it can be walked back to. Leading
+    # with the objections is only worth doing if the reader can then check them;
+    # rendered as bare prose they were the least checkable claims on the page.
+    for c in results["contradictions"]:
+        anchor = contradiction_anchor(c)
+        if anchor:
+            assert anchor in page
+    assert any(contradiction_anchor(c) for c in results["contradictions"]), \
+        "the clone finding carries its observations, so it must have an anchor"
+
+
+def test_contradiction_anchor_never_invents_a_reference():
+    """A blank anchor reads as 'nothing to walk here'. A fabricated one reads as
+    evidence, which is the failure mode this whole line of fixes exists to stop."""
+    assert contradiction_anchor({"rule": "r", "detail": "d"}) == ""
+    assert contradiction_anchor({"finding_id": "", "evidence_ids": ["o1"]}) == ""
+    assert contradiction_anchor({"finding_id": "find_x", "evidence_ids": []}) \
+        == "find_x · 0 observations"
+    assert contradiction_anchor({"finding_id": "find_x", "evidence_ids": ["o1"]}) \
+        == "find_x · 1 observation"
+
 
 # --- monitoring --------------------------------------------------------------
 
@@ -1651,6 +1799,15 @@ def test_save_candidates_retires_a_dropped_candidate_but_keeps_feedback(tmp_path
     analyst_feedback.candidate_id REFERENCES candidates with no ON DELETE, by
     design, so deleting it would either crash the pass or (if cascaded) erase
     a recorded verdict -- neither acceptable.
+
+    Surviving is not the same as still standing, though, and that was the half
+    this originally got wrong: the kept row held its last confidence and its
+    last band forever. An analyst recording REJECTED damps the entity through
+    feedback_discrimination until the candidate stops clearing min_conf, so the
+    rejection's own consequence left a rejected candidate reading "MEDIUM, 0.91"
+    to every direct reader of `candidates` -- and candidate_deltas, comparing
+    that unchanged row, reported no movement at all. It is retired in place now:
+    the row and the verdict survive, the score does not.
     """
     with EvidenceStore(str(tmp_path / "e.db")) as store:
         def dossier(cid, entity_id, score):
@@ -1675,15 +1832,40 @@ def test_save_candidates_retires_a_dropped_candidate_but_keeps_feedback(tmp_path
         save_candidates(store, [dossier("OP-kept", e_kept, 0.9)])
 
         ids = {r["candidate_id"] for r in store._all("SELECT candidate_id FROM candidates")}
-        assert ids == {"OP-kept", "OP-fed"}   # OP-bare retired, OP-fed kept for its verdict
+        assert ids == {"OP-kept", "OP-fed"}   # OP-bare deleted, OP-fed kept for its verdict
 
-        deltas = candidate_deltas(
-            [{"candidate_id": "OP-kept", "confidence": 0.9, "assessment": "x"},
-             {"candidate_id": "OP-fed", "confidence": 0.7, "assessment": "y"},
-             {"candidate_id": "OP-bare", "confidence": 0.6, "assessment": "y"}],
-            [dict(r) for r in store._all(
-                "SELECT candidate_id, confidence, assessment FROM candidates")])
-        assert {d["candidate_id"]: d["change"] for d in deltas} == {"OP-bare": "GONE"}
+        fed = store._one("SELECT confidence, assessment, updated_at FROM candidates "
+                         "WHERE candidate_id='OP-fed'")
+        assert fed["confidence"] == 0.0
+        assert fed["assessment"] == RETIRED_ASSESSMENT
+        assert store.feedback_for("OP-fed"), "the verdict itself is untouched"
+
+        before = [{"candidate_id": "OP-kept", "confidence": 0.9, "assessment": "x"},
+                  {"candidate_id": "OP-fed", "confidence": 0.7, "assessment": "y"},
+                  {"candidate_id": "OP-bare", "confidence": 0.6, "assessment": "y"}]
+        current = lambda: [dict(r) for r in store._all(
+            "SELECT candidate_id, confidence, assessment FROM candidates")]
+        deltas = {d["candidate_id"]: d["change"] for d in candidate_deltas(before, current())}
+        assert deltas == {"OP-bare": "GONE", "OP-fed": "MOVED"}, \
+            "a candidate that stopped scoring is news whether or not it was kept"
+
+        # Retiring is written once, not on every pass: updated_at keeps meaning
+        # "when this row last changed", and the delta is not re-reported.
+        stamp = fed["updated_at"]
+        settled = current()
+        save_candidates(store, [dossier("OP-kept", e_kept, 0.9)])
+        assert candidate_deltas(settled, current()) == []
+        assert store._one("SELECT updated_at FROM candidates WHERE candidate_id='OP-fed'"
+                          )["updated_at"] == stamp
+
+        # And it heals: if the evidence scores it again, the normal upsert path
+        # overwrites the retirement rather than leaving it stuck at 0.0.
+        save_candidates(store, [dossier("OP-kept", e_kept, 0.9),
+                                dossier("OP-fed", e_fed, 0.7)])
+        revived = store._one("SELECT confidence, assessment FROM candidates "
+                             "WHERE candidate_id='OP-fed'")
+        assert revived["confidence"] == 0.7
+        assert revived["assessment"] != RETIRED_ASSESSMENT
 
 
 # --- index discovery ---------------------------------------------------------

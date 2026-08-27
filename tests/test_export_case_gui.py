@@ -49,6 +49,44 @@ def test_tortaxi_export_matches_gui_shape():
     assert case["notes"] == []  # no analyst notes recorded on this fresh store
 
 
+def test_gui_candidates_keep_the_provenance_the_dossier_already_has():
+    """The GUI must not be the layer where a cited claim becomes prose.
+
+    Two losses, both in the mapper rather than the engine: `supporting` was
+    truncated to `key_evidence[:1]` and carried neither the observation id nor
+    the snapshot hash, and `contradicting`/`objections` dropped the finding id
+    and the evidence ids the findings fix put there. On this case that meant the
+    analyst saw one unattributed line of support for a 0.91 candidate, and the
+    contradiction that caps its band -- the entire point of the case -- with
+    nothing to walk it back to.
+    """
+    case = build(CAPTURES, "CASE-TEST", "tor.taxi mirror pair")
+
+    for c in case["candidates"]:
+        assert len(c["supporting"]) >= 2, \
+            "a candidate asserted across 2 onions must show both sightings"
+        assert {s["url"] for s in c["supporting"]} == set(c["markets"]), \
+            "and they must be the sightings on the markets it claims"
+        for s in c["supporting"]:
+            assert s["observation_id"] and s["sha256"]
+            assert s["observation_id"] in s["anchor"]
+            assert s["sha256"][:8] in s["anchor"]
+
+        # Every objection resolves to the finding row that recorded it, and
+        # says how many observations stand behind it.
+        assert c["objections"], "this case has a standing clone objection"
+        for o in c["objections"]:
+            assert o["finding_id"] and o["finding_id"] in o["anchor"]
+            assert o["evidence_ids"], "the objection cites its own observations"
+        assert all(x["anchor"] for x in c["contradicting"])
+
+    # An objection with no finding behind it gets a blank anchor, never a
+    # manufactured one -- the reader has to be able to tell the difference.
+    from tools.export_case_gui import _anchor
+    assert _anchor({"rule": "r", "detail": "d"}) == ""
+    assert _anchor({"finding_id": "find_x", "evidence_ids": ["o1"]}) == "find_x · 1 observation"
+
+
 def test_case_notes_reach_the_gui_payload():
     with EvidenceStore(":memory:") as store:
         for p in CAPTURES:

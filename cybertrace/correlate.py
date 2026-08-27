@@ -103,7 +103,32 @@ DERIVED_TARGET = "m5.correlate.local"
 # evidence.py's own comment on ANALYST_TARGET ("excluded from
 # entity_timeline/market enumeration the same way"). Kept as one tuple so
 # every query site stays in sync instead of drifting one at a time.
+#
+# Used now only by entity_timeline, which is a DISPLAY query: an analyst
+# reading where an address was seen should see the enrichment that looked it
+# up. Everything that decides what counts as a MARKET uses _IS_MARKET below.
 _PSEUDO_TARGETS = (DERIVED_TARGET, ANALYST_TARGET)
+
+# What makes a target a market: ingest() minted a MARKET entity for it. That is
+# the same line ingest() already draws -- its enrichment branch returns before
+# the market path precisely so a module run against an address does not "mint a
+# MARKET entity for an address and put a fake storefront in every correlation".
+#
+# Naming the exceptions instead was always going to drift, because the set is
+# open: `cybertrace search <ip|email|btc>` writes a `targets` row per seed, and
+# those rows counted as markets everywhere this predicate now stands. Measured,
+# not hypothetical -- two IPs looked up standalone, no dark-web site anywhere in
+# the case, produced two INFRA candidates whose own docstring calls them
+# "infrastructure shared by 2+ markets, the handoff points worth a warrant".
+# The shared ASN was the analyst's choice of what to look up.
+#
+# OPERATOR was never reachable this way (candidate_operators additionally
+# requires _market_uses, and an enrichment target has no edge to assert control
+# with), so this closes an INFRA/IP-only leak. Verified to change nothing on the
+# corpus or the demo case: m5.correlate.local is the only target either store
+# holds without a MARKET entity, which is exactly what _PSEUDO_TARGETS excluded.
+_IS_MARKET = ("EXISTS (SELECT 1 FROM entities me WHERE me.etype='MARKET' "
+              "AND me.normalized_value = t.url)")
 
 SUCCESSOR_SIGNALS["shared_cluster"] = 1.0   # two wallets proven one by co-spend
 SUCCESSOR_SIGNALS["shared_favicon"] = 0.4   # same icon served — see NON_ATTRIBUTIVE_SIGNALS
@@ -270,13 +295,13 @@ def entity_discrimination(store: EvidenceStore) -> Dict[str, float]:
     across 28 targets of this corpus, `dnmx.cc` across exactly the pair that
     owns it. Measured, not listed: no platform has to be named in advance.
     """
-    n_targets = (store._one("SELECT COUNT(*) AS n FROM targets WHERE url NOT IN (?,?)",
-                            _PSEUDO_TARGETS) or {"n": 0})["n"]
+    n_targets = (store._one(f"SELECT COUNT(*) AS n FROM targets t WHERE {_IS_MARKET}")
+                 or {"n": 0})["n"]
     rows = store._all(
         "SELECT o.entity_id, COUNT(DISTINCT s.target_id) AS df FROM observations o "
         "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
         "JOIN targets t ON t.target_id = s.target_id "
-        "WHERE t.url NOT IN (?,?) AND s.status='OK' GROUP BY o.entity_id", _PSEUDO_TARGETS)
+        f"WHERE {_IS_MARKET} AND s.status='OK' GROUP BY o.entity_id")
     if n_targets < 3:
         return {r["entity_id"]: 1.0 for r in rows}
     scale = math.log(n_targets)
@@ -295,8 +320,8 @@ def entity_discrimination(store: EvidenceStore) -> Dict[str, float]:
         "JOIN observations o ON o.entity_id = e.entity_id "
         "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
         "JOIN targets t ON t.target_id = s.target_id "
-        "WHERE e.etype IN ('EMAIL','DOMAIN') AND t.url NOT IN (?,?) AND s.status='OK' "
-        "GROUP BY e.entity_id", _PSEUDO_TARGETS)
+        f"WHERE e.etype IN ('EMAIL','DOMAIN') AND {_IS_MARKET} AND s.status='OK' "
+        "GROUP BY e.entity_id")
     reach: Dict[str, int] = {}
     for row in hosts:
         domain = _registrable(row["value"].rsplit("@", 1)[-1])
@@ -380,8 +405,7 @@ def markets_for_entity(store: EvidenceStore, entity_id: str) -> List[str]:
         "SELECT DISTINCT s.target_id FROM observations o "
         "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
         "JOIN targets t ON t.target_id = s.target_id "
-        "WHERE o.entity_id=? AND t.url NOT IN (?,?) AND s.status='OK'",
-        (entity_id, *_PSEUDO_TARGETS))
+        f"WHERE o.entity_id=? AND {_IS_MARKET} AND s.status='OK'", (entity_id,))
     return sorted(r["target_id"] for r in rows)
 
 
@@ -794,7 +818,7 @@ def market_artifact_map(store: EvidenceStore) -> Dict[str, Dict[str, Set[str]]]:
             "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
             "JOIN entities e ON e.entity_id = o.entity_id "
             "JOIN targets t ON t.target_id = s.target_id "
-            "WHERE t.url NOT IN (?,?) AND s.status='OK'", _PSEUDO_TARGETS):
+            f"WHERE {_IS_MARKET} AND s.status='OK'"):
         out[r["target_id"]][r["etype"]].add(r["entity_id"])
     return out
 
@@ -812,8 +836,8 @@ def market_windows(store: EvidenceStore) -> Dict[str, dict]:
         "SELECT t.target_id, t.url, MIN(s.observed_at) AS first_seen, "
         "       MAX(s.observed_at) AS last_seen "
         "FROM targets t JOIN snapshots s ON s.target_id = t.target_id "
-        f"WHERE t.url NOT IN (?,?) AND s.collector NOT IN ({marks}) AND s.status='OK' "
-        "GROUP BY t.target_id", (*_PSEUDO_TARGETS, *sorted(_INDEX_SOURCES)))
+        f"WHERE {_IS_MARKET} AND s.collector NOT IN ({marks}) AND s.status='OK' "
+        "GROUP BY t.target_id", tuple(sorted(_INDEX_SOURCES)))
     down = store.down_windows()
     return {r["target_id"]: {
         "url": r["url"],
@@ -902,6 +926,32 @@ def _observations_of(store: EvidenceStore, target_id: str, entity_id: str) -> Li
         "SELECT o.observation_id FROM observations o "
         "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
         "WHERE s.target_id=? AND o.entity_id=?", (target_id, entity_id))]
+
+
+def _cluster_evidence(store: EvidenceStore, a_id: str, b_id: str,
+                      mine_a: Set[str], mine_b: Set[str],
+                      clusters: Dict[str, str], label: str) -> List[str]:
+    """Observations behind one co-spend claim, in both halves it actually rests on.
+
+    Each market's own sighting of its address says who showed what; the
+    PART_OF_CLUSTER edges within the component are the only thing that says the
+    two addresses were signed for together. Citing only the first half would
+    leave the central fact — the co-spend — unwalkable, which is the shape
+    `add_finding` was fixed for one release ago.
+    """
+    ids = [o for e in sorted(mine_a) for o in _observations_of(store, a_id, e)]
+    ids += [o for e in sorted(mine_b) for o in _observations_of(store, b_id, e)]
+    members = sorted(e for e, l in clusters.items() if l == label)
+    if members:
+        marks = ",".join("?" * len(members))
+        for r in store._all(
+                "SELECT ev.observation_ids FROM relationships r "
+                "JOIN evidence ev ON ev.relationship_id = r.rel_id "
+                "WHERE r.rtype='PART_OF_CLUSTER' AND r.status='ACTIVE' "
+                f"AND r.source_entity_id IN ({marks}) AND r.target_entity_id IN ({marks})",
+                (*members, *members)):
+            ids += json.loads(r["observation_ids"] or "[]")
+    return list(dict.fromkeys(ids))
 
 
 def _pair_signals(store: EvidenceStore, artifacts: dict, windows: dict,
@@ -1044,14 +1094,41 @@ def _pair_signals(store: EvidenceStore, artifacts: dict, windows: dict,
     if clusters:
         for etype in ("BTC_ADDRESS", "XMR_ADDRESS", "ETH_ADDRESS"):
             shared = a.get(etype, set()) & b.get(etype, set())
-            in_a = {clusters[e] for e in a.get(etype, set()) if e in clusters}
-            in_b = {clusters[e] for e in b.get(etype, set()) if e in clusters}
-            for label in (in_a & in_b):
+            side_a: Dict[str, Set[str]] = defaultdict(set)
+            side_b: Dict[str, Set[str]] = defaultdict(set)
+            for side, holdings in ((side_a, a), (side_b, b)):
+                for e in holdings.get(etype, set()):
+                    if e in clusters:
+                        side[clusters[e]].add(e)
+            for label in sorted(set(side_a) & set(side_b)):
                 if any(clusters.get(e) == label for e in shared):
                     continue                # already scored as a shared address
+                mine_a, mine_b = side_a[label], side_b[label]
+                # The same contract the shared-artifact loop above applies, and
+                # for the same reason. Co-spend proves ONE party signed for both
+                # addresses; it says nothing about whether either market IS that
+                # party, so a market that merely quoted an address has still
+                # demonstrated no control of it and the transaction cannot
+                # supply what the page did not.
+                #
+                # This was the only signal in the table exempt from all three of
+                # rarity, context and evidence, and the exemption was reachable:
+                # two markets sharing nothing but a favicon (categorically
+                # non-attributive, REFERENCES_ONLY on its own), one of them only
+                # QUOTING an address that co-spent with the other's, asserted
+                # LINKED_TO at 0.994 on a signal citing zero observations.
+                # Measured, not hypothetical -- see the named test.
+                context = min(max(_edge_context(store, market_a, e) for e in mine_a),
+                              max(_edge_context(store, market_b, e) for e in mine_b))
+                rarity = min(discrimination.get(e, 1.0) for e in mine_a | mine_b)
                 signals.append({
-                    "signal": "shared_cluster", "weight": SUCCESSOR_SIGNALS["shared_cluster"],
-                    "direction": None, "evidence": [],
+                    "signal": "shared_cluster",
+                    "weight": SUCCESSOR_SIGNALS["shared_cluster"] * rarity * context,
+                    "direction": None, "discrimination": round(rarity, 3),
+                    "context": round(context, 3),
+                    "attributive": context >= DEFAULT_CONTEXT,
+                    "evidence": _cluster_evidence(store, a_id, b_id, mine_a, mine_b,
+                                                  clusters, label),
                     "detail": f"addresses on both sides co-spend into {label}"})
 
     # Pairs arrive ordered by target_id, which is a hash — so which market is
@@ -1462,6 +1539,28 @@ def contradictions_from_key_temporal(store: EvidenceStore, pairs: List[dict]) ->
 
 # --- dossiers ----------------------------------------------------------------
 
+def contradiction_anchor(contradiction: dict) -> str:
+    """Where an objection can be checked: its finding row, and how many
+    observations stand behind it.
+
+    One definition, because every layer that shows an objection has to show the
+    same thing -- the dossier HTML, the GUI mapper, and anything after them.
+    Both were rendering contradictions as bare prose while the finding_id and
+    (since findings started carrying evidence_ids) the observations sat unused
+    in the same dict, which left the objections the least checkable claims on
+    the page in a system whose whole safety property is that they constrain
+    attribution.
+
+    Empty rather than invented when a rule has no finding behind it: a blank
+    anchor reads as "nothing to walk here", a fabricated one reads as evidence.
+    """
+    fid = contradiction.get("finding_id") or ""
+    if not fid:
+        return ""
+    n = len(contradiction.get("evidence_ids") or [])
+    return f"{fid} · {n} observation{'' if n == 1 else 's'}"
+
+
 def evidence_chain(store: EvidenceStore, observation_ids) -> List[dict]:
     """Expand observation ids into records a reader can check independently."""
     out, seen = [], set()
@@ -1621,6 +1720,14 @@ def build_dossier(store: EvidenceStore, cand: dict, aliases: List[dict],
     }
 
 
+# What a candidate row says once the engine has stopped supporting it but the
+# row itself cannot be deleted. Read by save_candidates and asserted by name in
+# tests; the wording is the claim, so it lives next to the constant.
+RETIRED_ASSESSMENT = (
+    "RETIRED — the current evidence no longer scores this candidate; "
+    "the row is kept because an analyst recorded a verdict against it")
+
+
 def save_candidates(store: EvidenceStore, dossiers: List[dict]) -> None:
     """Persist to the `candidates` table, supporting and contradicting kept apart
     so a later run cannot quietly drop the objections to a candidate.
@@ -1655,6 +1762,27 @@ def save_candidates(store: EvidenceStore, dossiers: List[dict]) -> None:
              if r["candidate_id"] not in current_ids]
     for cid in stale:
         if store._one("SELECT 1 FROM analyst_feedback WHERE candidate_id=? LIMIT 1", (cid,)):
+            # Kept for the verdict -- but retired in place, not left standing.
+            #
+            # The two rules collide here and preservation used to win silently.
+            # An analyst who records REJECTED damps the entity through
+            # feedback_discrimination, the candidate stops clearing min_conf,
+            # and the row survived at whatever it last scored: a candidate an
+            # analyst had explicitly rejected still read "MEDIUM, 0.91" -- the
+            # exact number that made it look attributable -- to everything that
+            # queries `candidates` directly, monitor.candidate_deltas included,
+            # which therefore reported no movement at all.
+            #
+            # Deleting it is not the alternative: analyst_feedback.candidate_id
+            # REFERENCES this row with no ON DELETE, by design, because a
+            # verdict has to survive a re-correlate. So the row stays and says
+            # what is true about it. Written once rather than every pass, so
+            # updated_at still means "when this row last changed" and the delta
+            # is reported exactly once.
+            store.conn.execute(
+                "UPDATE candidates SET confidence=0.0, assessment=?, updated_at=? "
+                "WHERE candidate_id=? AND assessment IS NOT ?",
+                (RETIRED_ASSESSMENT, utcnow(), cid, RETIRED_ASSESSMENT))
             continue
         store.conn.execute("DELETE FROM candidates WHERE candidate_id=?", (cid,))
     store.conn.commit()
@@ -1917,7 +2045,10 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
             out.append(f"<div class=note><span class='tag {_esc(c['severity'])}'>"
                        f"{_esc(c['severity'])}</span> <b>{_esc(c['rule'])}</b><br>"
                        f"<span class=dim>{_esc(' ~ '.join(c['markets']))}</span><br>"
-                       f"{_esc(c['detail'])}</div>")
+                       f"{_esc(c['detail'])}"
+                       + (f"<br><span class='mono dim'>{_esc(contradiction_anchor(c))}"
+                          f"</span>" if contradiction_anchor(c) else "")
+                       + "</div>")
 
     if live_successors:
         out.append("<h2>Market relationships</h2><table><tr><th>relation</th>"
@@ -1964,7 +2095,11 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
         out.append("<ul>" + "".join(f"<li class=mono>{_esc(m)}</li>"
                                     for m in c["markets"]) + "</ul>")
         if contra:
-            out.append("".join(f"<div class=note>{_esc(x['detail'])}</div>" for x in contra))
+            out.append("".join(
+                f"<div class=note>{_esc(x['detail'])}"
+                + (f"<br><span class='mono dim'>{_esc(contradiction_anchor(x))}</span>"
+                   if contradiction_anchor(x) else "")
+                + "</div>" for x in contra))
         if c.get("timeline"):
             out.append("<b>Timeline</b><table><tr><th>observed</th><th>market</th>"
                        "<th>section</th><th>snapshot</th></tr>")

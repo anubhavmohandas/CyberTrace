@@ -23,7 +23,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from cybertrace.correlate import DERIVED_TARGET, render_markdown, run_correlation, entity_timeline
+from cybertrace.correlate import (DERIVED_TARGET, contradiction_anchor as _anchor,
+                                 render_markdown, run_correlation, entity_timeline)
 from cybertrace.evidence import ANALYST_TARGET, EvidenceStore, ingest
 
 BAND_COLOR = {"HIGH": "#63c48b", "MEDIUM": "#2fb4e8", "LOW": "#7c878c"}
@@ -73,13 +74,34 @@ def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
         ent = d["entity"]
         key = ent["entity_id"]
         band = d["confidence_level"]
+        # Every key_evidence row, each carrying the anchor that makes it
+        # checkable. `[:1]` truncated a candidate's support to one line for
+        # layout, and neither the observation id nor the snapshot hash was
+        # mapped at all -- so the column an analyst reads beside a 0.91
+        # candidate was prose, while the same facts sat in the dossier with
+        # full provenance. Truncating for convenience is exactly what destroys
+        # explainability here: the second and third observations are what make
+        # "across 2 onions" more than an assertion.
         supporting = [{
             "label": f"{ke['extraction_method'].split(':')[-1].replace('_', ' ').title()} — {short(ent['value'], 40)}",
             "strength": "DIRECT",
             "color": "#63c48b",
-        } for ke in d["key_evidence"][:1]] or [{
-            "label": short(ent["value"], 40), "strength": "DIRECT", "color": "#63c48b"}]
-        contradicting = [{"label": c["detail"]} for c in d["contradictions"]] or [{"label": "None recorded"}]
+            "anchor": f"{ke['observation_id']} · sha256 {ke['sha256'][:8]}… · {short(ke['url'], 30)}",
+            "observation_id": ke["observation_id"], "sha256": ke["sha256"],
+            "url": ke["url"], "observed_at": ke["observed_at"],
+        } for ke in d["key_evidence"]] or [{
+            "label": short(ent["value"], 40), "strength": "DIRECT", "color": "#63c48b",
+            "anchor": ""}]
+        # An objection has to be as walkable as the support it argues against.
+        # contradictions carry finding_id, and evidence_ids since the findings
+        # fix -- both were dropped here, so a case whose entire point is that a
+        # contradiction caps the band rendered that contradiction as the one
+        # unattributed sentence on the page.
+        contradicting = [{
+            "label": c["detail"], "anchor": _anchor(c),
+            "finding_id": c.get("finding_id") or "",
+            "evidence_ids": c.get("evidence_ids") or [],
+        } for c in d["contradictions"]] or [{"label": "None recorded", "anchor": ""}]
 
         feedback_rows = store.feedback_for_entity(key)
         verdict = None
@@ -97,7 +119,10 @@ def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
                 f"{len(d['markets'])} onion(s): " + ", ".join(short(m, 24) for m in d["markets"]) + "."
             ),
             "supporting": supporting, "contradicting": contradicting,
-            "objections": [{"text": c["detail"], "rule": c["rule"].upper()}
+            "objections": [{"text": c["detail"], "rule": c["rule"].upper(),
+                            "anchor": _anchor(c),
+                            "finding_id": c.get("finding_id") or "",
+                            "evidence_ids": c.get("evidence_ids") or []}
                            for c in d["contradictions"]],
             "recommended_actions": d["recommended_actions"],
             "limitations": d["limitations"],
