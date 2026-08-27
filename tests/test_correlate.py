@@ -15,7 +15,7 @@ from cybertrace.correlate import (
     crypto_clusters, detect_successors,
     entity_discrimination, entity_funnel_profile, feedback_discrimination, markets_for_entity,
     market_windows, render_dossier_html, render_html, render_markdown, run_correlation,
-    username_aliases, wallet_exchange_paths, wallet_trace_report,
+    save_candidates, username_aliases, wallet_exchange_paths, wallet_trace_report,
 )
 from cybertrace.evidence import EvidenceStore, enrich_bitcoin, enrich_email, ingest, label_exchange
 from cybertrace.modules.base import ModuleResult, SourceResult
@@ -1612,6 +1612,76 @@ def test_candidate_deltas_report_only_movement():
     # A candidate that stopped clearing the bar is news too, in the other direction.
     reverse = {d["candidate_id"]: d["change"] for d in candidate_deltas(after, before)}
     assert reverse == {"OP-2": "MOVED", "OP-3": "GONE"}
+
+
+def test_label_exchange_does_not_zero_a_small_cases_operators(tmp_path):
+    """LOOP7 gap 1: labeling an exchange on a two-market case must not flip
+    entity_discrimination's "too small to judge" floor to "corpus-sized" and
+    erase both real operator candidates as a side effect.
+
+    label_exchange writes a real row into `targets` (ANALYST_TARGET) so the
+    assertion is provenance-tracked -- but the <3-real-targets floor has to
+    keep seeing this as two markets, not three, or an unrelated CLI action
+    (labeling a wallet) silently deletes attribution evidence that nothing
+    actually invalidated.
+    """
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        _two_markets(store, clone=False)
+        before = run_correlation(store)
+        assert before["operators"]           # the shared PGP key scores as one
+
+        label_exchange(store, BTC_VALID, "TestExchange", analyst="you")
+        assert set(entity_discrimination(store).values()) == {1.0}
+
+        after = run_correlation(store)
+        assert {c["entity_id"] for c in after["operators"]} == \
+               {c["entity_id"] for c in before["operators"]}
+
+
+def test_save_candidates_retires_a_dropped_candidate_but_keeps_feedback(tmp_path):
+    """LOOP7 gap 1's compounding effect: save_candidates only ever upserted
+    rows present in the current pass's dossiers, so a candidate that stopped
+    scoring was left behind at its old confidence forever -- which also broke
+    monitor.candidate_deltas's GONE detection, since that reads the same
+    never-pruned table by absence. A row with no analyst_feedback against it
+    must be removed when it drops out of a fresh pass. A row an analyst
+    already recorded feedback against must survive instead:
+    analyst_feedback.candidate_id REFERENCES candidates with no ON DELETE, by
+    design, so deleting it would either crash the pass or (if cascaded) erase
+    a recorded verdict -- neither acceptable.
+    """
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        def dossier(cid, entity_id, score):
+            return {"candidate_id": cid, "role": "OPERATOR",
+                    "entity": {"entity_id": entity_id, "etype": "EMAIL", "value": "x@y.com"},
+                    "score": score, "confidence_level": "MEDIUM", "markets": ["a", "b"],
+                    "key_evidence": [], "contradictions": []}
+
+        e_kept = store.upsert_entity("EMAIL", "kept@y.com")
+        e_fed = store.upsert_entity("EMAIL", "feedback@y.com")
+        e_bare = store.upsert_entity("EMAIL", "bare@y.com")
+
+        save_candidates(store, [dossier("OP-kept", e_kept, 0.9),
+                                dossier("OP-fed", e_fed, 0.7),
+                                dossier("OP-bare", e_bare, 0.6)])
+        store.conn.execute(
+            "INSERT INTO analyst_feedback (feedback_id, candidate_id, outcome, recorded_at) "
+            "VALUES ('fb-1','OP-fed','CONFIRMED','2026-08-26T00:00:00Z')")
+        store.conn.commit()
+
+        # OP-fed and OP-bare both stop scoring on the next pass.
+        save_candidates(store, [dossier("OP-kept", e_kept, 0.9)])
+
+        ids = {r["candidate_id"] for r in store._all("SELECT candidate_id FROM candidates")}
+        assert ids == {"OP-kept", "OP-fed"}   # OP-bare retired, OP-fed kept for its verdict
+
+        deltas = candidate_deltas(
+            [{"candidate_id": "OP-kept", "confidence": 0.9, "assessment": "x"},
+             {"candidate_id": "OP-fed", "confidence": 0.7, "assessment": "y"},
+             {"candidate_id": "OP-bare", "confidence": 0.6, "assessment": "y"}],
+            [dict(r) for r in store._all(
+                "SELECT candidate_id, confidence, assessment FROM candidates")])
+        assert {d["candidate_id"]: d["change"] for d in deltas} == {"OP-bare": "GONE"}
 
 
 # --- index discovery ---------------------------------------------------------

@@ -1,7 +1,7 @@
 """Bitcoin and cryptocurrency OSINT module."""
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import aiohttp
@@ -48,6 +48,7 @@ class BitcoinModule(BaseModule):
             sources = [
                 ('blockchair_eth', self._check_blockchair(target, 'ethereum')),
                 ('ethplorer', self._check_ethplorer(target)),
+                ('etherscan_transactions', self._check_etherscan_transactions(target)),
                 ('chainabuse', self._check_chainabuse(target, 'ETH')),
                 ('exchange_tags', self._check_exchange_tags(target, 'ETH')),
             ]
@@ -468,6 +469,70 @@ class BitcoinModule(BaseModule):
             data=parsed,
         )
     
+    async def _check_etherscan_transactions(self, address: str) -> SourceResult:
+        """Recent transactions via Etherscan's txlist endpoint, for counterparty
+        extraction. Ethereum is account-based like TRON -- no UTXO/co-spend
+        signal here, only TRANSACTED_WITH reachability (see
+        tron_module._check_trongrid_transactions and this module's own
+        _check_blockchain_com). Without this source an ETH address never gets
+        counterparty evidence, since blockchair/ethplorer above only report
+        balance/token holdings.
+
+        Requires an Etherscan API key (free tier, 5 req/sec) -- degrades the
+        same way chainabuse does without one.
+        """
+        key = self.config.api_keys.get('etherscan')
+        if not key:
+            return SourceResult(
+                source='etherscan_transactions',
+                success=False,
+                error='no Etherscan API key configured (set ETHERSCAN_API_KEY)',
+            )
+
+        data = await self.fetch_json(
+            'https://api.etherscan.io/api',
+            params={
+                'module': 'account',
+                'action': 'txlist',
+                'address': address,
+                'startblock': 0,
+                'endblock': 99999999,
+                'page': 1,
+                'offset': 20,
+                'sort': 'desc',
+                'apikey': key,
+            },
+        )
+        if not data or data.get('status') != '1' or not isinstance(data.get('result'), list):
+            return SourceResult(
+                source='etherscan_transactions', success=False,
+                error='No data returned',
+            )
+
+        txs = data['result']
+        counterparties: set = set()
+        first_seen = last_seen = None
+        for tx in txs:
+            ts = tx.get('timeStamp')
+            if ts:
+                iso = datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+                first_seen = iso if first_seen is None else min(first_seen, iso)
+                last_seen = iso if last_seen is None else max(last_seen, iso)
+            for peer in (tx.get('from'), tx.get('to')):
+                if peer and peer.lower() != address.lower():
+                    counterparties.add(peer.lower())
+
+        peers = sorted(counterparties)[:20]
+        return SourceResult(
+            source='etherscan_transactions', success=True, data={
+                'tx_count': len(txs),
+                'first_seen': first_seen,
+                'last_seen': last_seen,
+                'counterparty_addresses': peers,
+                'connected_addresses': peers,
+            },
+        )
+
     def _build_summary(self, result: ModuleResult) -> Dict[str, Any]:
         """Build summary from all source results."""
         summary = {

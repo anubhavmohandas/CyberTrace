@@ -138,6 +138,63 @@ class TestBitcoinModuleChainabuse:
             module.config.api_keys.chainabuse = None
 
 
+class TestBitcoinModuleEtherscan:
+    """Ethereum counterparty extraction -- ETH is account-based like TRON, so
+    this mirrors TestTronModule's trongrid_transactions coverage rather than
+    _check_blockchain_com's cospend/counterparty split, which needs UTXO
+    inputs ETH doesn't have."""
+
+    ETH_ADDR = "0x742d35Cc6634C0532925a3b844Bc9e7595f12345"
+
+    def test_no_key_configured_degrades_gracefully(self):
+        import asyncio
+        module = BitcoinModule()
+        module.config.api_keys.etherscan = None
+        result = asyncio.run(module._check_etherscan_transactions(self.ETH_ADDR))
+        assert result.success is False
+        assert 'ETHERSCAN_API_KEY' in result.error
+
+    def test_transactions_yield_counterparties_and_connected_addresses(self):
+        import asyncio
+        module = BitcoinModule()
+        module.config.api_keys.etherscan = 'testkey'
+        peer = "0x0000000000000000000000000000000000dead"
+        try:
+            async def fake_fetch_json(url, **kwargs):
+                assert url == 'https://api.etherscan.io/api'
+                assert kwargs['params']['action'] == 'txlist'
+                return {
+                    'status': '1',
+                    'result': [
+                        {'from': self.ETH_ADDR, 'to': peer, 'timeStamp': '1700000000'},
+                    ],
+                }
+            module.fetch_json = fake_fetch_json
+            result = asyncio.run(module._check_etherscan_transactions(self.ETH_ADDR))
+            assert result.success is True
+            assert result.data['counterparty_addresses'] == [peer]
+            assert result.data['connected_addresses'] == [peer]
+            assert result.data['tx_count'] == 1
+        finally:
+            module.config.api_keys.etherscan = None
+
+    def test_counterparty_addresses_reach_the_summary_and_related(self):
+        """Same generic _build_summary path bitcoin/tron already rely on --
+        this pins that an ETH source's counterparties actually surface as
+        related targets, not just evidence-graph metadata."""
+        module = BitcoinModule()
+        result = ModuleResult(target=self.ETH_ADDR, target_type='ethereum', module='bitcoin')
+        peer = "0x0000000000000000000000000000000000beef"
+        result.sources['etherscan_transactions'] = SourceResult(
+            source='etherscan_transactions', success=True,
+            data={'tx_count': 1, 'first_seen': None, 'last_seen': None,
+                 'counterparty_addresses': [peer], 'connected_addresses': [peer]})
+        summary = module._build_summary(result)
+        assert summary['counterparty_addresses'] == [peer]
+        assert summary['connected_addresses'] == [peer]
+        assert peer in result.related
+
+
 class TestBitcoinModuleEllipticpp:
     """Local-index lookup, no network -- degrades the same way chainabuse does
     without a key, but on dataset/index availability instead of a config key.

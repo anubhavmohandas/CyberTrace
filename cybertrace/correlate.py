@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Set
 
-from .evidence import _INDEX_SOURCES, EvidenceStore, detect_clones, utcnow
+from .evidence import ANALYST_TARGET, _INDEX_SOURCES, EvidenceStore, detect_clones, utcnow
 from .normalize import _registrable
 
 # Which edges count as which funnel. Keyed on the relationship types `ingest()`
@@ -96,6 +96,14 @@ SUCCESSOR_SIGNALS = {
 # enumerated: left in, a second pass would see its MARKET observations as a
 # market sharing artifacts with every real one and invent successor pairs.
 DERIVED_TARGET = "m5.correlate.local"
+
+# Both pseudo-targets (M5's own derived claims, and an analyst's asserted
+# facts via evidence.label_exchange) are excluded everywhere real targets are
+# counted or enumerated -- same reason as the comment above, and per
+# evidence.py's own comment on ANALYST_TARGET ("excluded from
+# entity_timeline/market enumeration the same way"). Kept as one tuple so
+# every query site stays in sync instead of drifting one at a time.
+_PSEUDO_TARGETS = (DERIVED_TARGET, ANALYST_TARGET)
 
 SUCCESSOR_SIGNALS["shared_cluster"] = 1.0   # two wallets proven one by co-spend
 SUCCESSOR_SIGNALS["shared_favicon"] = 0.4   # same icon served — see NON_ATTRIBUTIVE_SIGNALS
@@ -262,13 +270,13 @@ def entity_discrimination(store: EvidenceStore) -> Dict[str, float]:
     across 28 targets of this corpus, `dnmx.cc` across exactly the pair that
     owns it. Measured, not listed: no platform has to be named in advance.
     """
-    n_targets = (store._one("SELECT COUNT(*) AS n FROM targets WHERE url != ?",
-                            (DERIVED_TARGET,)) or {"n": 0})["n"]
+    n_targets = (store._one("SELECT COUNT(*) AS n FROM targets WHERE url NOT IN (?,?)",
+                            _PSEUDO_TARGETS) or {"n": 0})["n"]
     rows = store._all(
         "SELECT o.entity_id, COUNT(DISTINCT s.target_id) AS df FROM observations o "
         "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
         "JOIN targets t ON t.target_id = s.target_id "
-        "WHERE t.url != ? AND s.status='OK' GROUP BY o.entity_id", (DERIVED_TARGET,))
+        "WHERE t.url NOT IN (?,?) AND s.status='OK' GROUP BY o.entity_id", _PSEUDO_TARGETS)
     if n_targets < 3:
         return {r["entity_id"]: 1.0 for r in rows}
     scale = math.log(n_targets)
@@ -287,8 +295,8 @@ def entity_discrimination(store: EvidenceStore) -> Dict[str, float]:
         "JOIN observations o ON o.entity_id = e.entity_id "
         "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
         "JOIN targets t ON t.target_id = s.target_id "
-        "WHERE e.etype IN ('EMAIL','DOMAIN') AND t.url != ? AND s.status='OK' "
-        "GROUP BY e.entity_id", (DERIVED_TARGET,))
+        "WHERE e.etype IN ('EMAIL','DOMAIN') AND t.url NOT IN (?,?) AND s.status='OK' "
+        "GROUP BY e.entity_id", _PSEUDO_TARGETS)
     reach: Dict[str, int] = {}
     for row in hosts:
         domain = _registrable(row["value"].rsplit("@", 1)[-1])
@@ -372,8 +380,8 @@ def markets_for_entity(store: EvidenceStore, entity_id: str) -> List[str]:
         "SELECT DISTINCT s.target_id FROM observations o "
         "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
         "JOIN targets t ON t.target_id = s.target_id "
-        "WHERE o.entity_id=? AND t.url != ? AND s.status='OK'",
-        (entity_id, DERIVED_TARGET))
+        "WHERE o.entity_id=? AND t.url NOT IN (?,?) AND s.status='OK'",
+        (entity_id, *_PSEUDO_TARGETS))
     return sorted(r["target_id"] for r in rows)
 
 
@@ -786,7 +794,7 @@ def market_artifact_map(store: EvidenceStore) -> Dict[str, Dict[str, Set[str]]]:
             "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
             "JOIN entities e ON e.entity_id = o.entity_id "
             "JOIN targets t ON t.target_id = s.target_id "
-            "WHERE t.url != ? AND s.status='OK'", (DERIVED_TARGET,)):
+            "WHERE t.url NOT IN (?,?) AND s.status='OK'", _PSEUDO_TARGETS):
         out[r["target_id"]][r["etype"]].add(r["entity_id"])
     return out
 
@@ -804,8 +812,8 @@ def market_windows(store: EvidenceStore) -> Dict[str, dict]:
         "SELECT t.target_id, t.url, MIN(s.observed_at) AS first_seen, "
         "       MAX(s.observed_at) AS last_seen "
         "FROM targets t JOIN snapshots s ON s.target_id = t.target_id "
-        f"WHERE t.url != ? AND s.collector NOT IN ({marks}) AND s.status='OK' "
-        "GROUP BY t.target_id", (DERIVED_TARGET, *sorted(_INDEX_SOURCES)))
+        f"WHERE t.url NOT IN (?,?) AND s.collector NOT IN ({marks}) AND s.status='OK' "
+        "GROUP BY t.target_id", (*_PSEUDO_TARGETS, *sorted(_INDEX_SOURCES)))
     down = store.down_windows()
     return {r["target_id"]: {
         "url": r["url"],
@@ -1494,8 +1502,8 @@ def entity_timeline(store: EvidenceStore, entity_id: str, limit: int = 40) -> Li
         "       s.sha256, t.url FROM observations o "
         "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
         "JOIN targets t ON t.target_id = s.target_id "
-        "WHERE o.entity_id=? AND t.url != ? ORDER BY o.observed_at LIMIT ?",
-        (entity_id, DERIVED_TARGET, limit))]
+        "WHERE o.entity_id=? AND t.url NOT IN (?,?) ORDER BY o.observed_at LIMIT ?",
+        (entity_id, *_PSEUDO_TARGETS, limit))]
 
 
 def recommended_actions(role: str, etype: str, value: str, markets: List[str],
@@ -1604,7 +1612,21 @@ def build_dossier(store: EvidenceStore, cand: dict, aliases: List[dict],
 
 def save_candidates(store: EvidenceStore, dossiers: List[dict]) -> None:
     """Persist to the `candidates` table, supporting and contradicting kept apart
-    so a later run cannot quietly drop the objections to a candidate."""
+    so a later run cannot quietly drop the objections to a candidate.
+
+    `dossiers` is the complete, authoritative set for this pass (every
+    OPERATOR/INFRA/IP that still scores), so any existing row not in it has
+    stopped scoring and is retired here -- otherwise it sits at its old
+    confidence forever (`ON CONFLICT` only ever touches rows still present)
+    and both a direct `candidates` read and monitor.candidate_deltas's GONE
+    detection (which relies on the row actually disappearing) show a
+    candidate the engine no longer supports. A row an analyst has recorded
+    feedback against is left in place instead of deleted: analyst_feedback.
+    candidate_id REFERENCES candidates(candidate_id) with no ON DELETE
+    clause, by design (see that table's own comment) -- a verdict must
+    survive a re-correlate, so its candidate row has to survive too.
+    """
+    current_ids = {d["candidate_id"] for d in dossiers}
     for d in dossiers:
         store.conn.execute(
             "INSERT INTO candidates (candidate_id, ctype, entity_id, confidence, "
@@ -1618,6 +1640,12 @@ def save_candidates(store: EvidenceStore, dossiers: List[dict]) -> None:
              f"across {len(d['markets'])} market(s)",
              json.dumps([e["observation_id"] for e in d["key_evidence"]]),
              json.dumps([c["finding_id"] for c in d["contradictions"]]), utcnow()))
+    stale = [r["candidate_id"] for r in store._all("SELECT candidate_id FROM candidates")
+             if r["candidate_id"] not in current_ids]
+    for cid in stale:
+        if store._one("SELECT 1 FROM analyst_feedback WHERE candidate_id=? LIMIT 1", (cid,)):
+            continue
+        store.conn.execute("DELETE FROM candidates WHERE candidate_id=?", (cid,))
     store.conn.commit()
 
 

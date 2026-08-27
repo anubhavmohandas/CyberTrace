@@ -64,6 +64,11 @@ data/
 # only a loader — it reads os.getenv and stores nothing.
 api_keys.py
 
+# Loop audit reports (LOOP7_AUDIT.md, ...) -- generated scratch findings from
+# an audit/validation pass, not maintained project documentation, so they stay
+# out of git the same way runs/* does.
+docs/LOOP*.md
+
 # OSINT output files. Scratch run output stays out of the repo.
 # evidence/ and runs/ are NOT tracked today — the negation below is deliberately
 # left off, so nothing scraped off a market gets published by an absent-minded
