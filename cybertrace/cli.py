@@ -180,7 +180,7 @@ async def _run_search(module, target: str, **options):
 
 
 @cli.command()
-@click.argument('result_files', nargs=-1, required=True,
+@click.argument('result_files', nargs=-1, required=False,
                 type=click.Path(exists=True, dir_okay=False))
 @click.option('--output', '-o', 'output_format', default='table',
               type=click.Choice(['table', 'json']), help='Output format')
@@ -208,10 +208,14 @@ def correlate(result_files, output_format: str, db_path: Optional[str],
       cybertrace search "b.onion" --save b.json
       cybertrace correlate a.json b.json
       cybertrace correlate a.json b.json --db case.db --html case.html
+      cybertrace correlate --db case.db --dossier case.html
     """
     if (html_path or dossier_path) and not db_path:
         raise click.UsageError(
             "--html/--dossier need --db: both are rendered from the store")
+    if not result_files and not db_path:
+        raise click.UsageError(
+            "need RESULT_FILES, or --db to re-render an existing store")
     _correlate_store(result_files, output_format, db_path or ':memory:', html_path, dossier_path)
 
 

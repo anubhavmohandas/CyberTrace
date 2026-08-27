@@ -102,6 +102,31 @@ def test_quoted_artifact_never_attributes_with_db(tmp_path):
                    for d in data['dossiers'])
 
 
+def test_correlate_db_only_rerenders_without_result_files(tmp_path):
+    """LOOP7 gap 2 / LOOP9 P2: an analyst who only wants to re-render the
+    current case state must not be forced to pass dummy JSON files or
+    re-crawl live via `watch`. A prior `correlate ... --db` pass already
+    ingested a.json/b.json into the store; a later `correlate --db` call
+    with no positional args re-runs the engine over what is already there.
+    """
+    a, b = _shared_key_pair(tmp_path)
+    db = str(tmp_path / 'case.db')
+    first = CliRunner().invoke(cli, ['correlate', a, b, '--db', db, '--output', 'json'])
+    assert first.exit_code == 0, first.output
+
+    result = CliRunner().invoke(cli, ['correlate', '--db', db, '--output', 'json'])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert any(set(d.get('markets', [])) >= {ONION_X, ONION_Y}
+               for d in data['dossiers'])
+
+
+def test_correlate_with_neither_files_nor_db_errors(tmp_path):
+    result = CliRunner().invoke(cli, ['correlate'])
+    assert result.exit_code != 0
+    assert 'RESULT_FILES' in result.output or '--db' in result.output
+
+
 # --- label-exchange -----------------------------------------------------------
 
 def test_label_exchange_then_correlate_reports_the_wallet_path(tmp_path):
