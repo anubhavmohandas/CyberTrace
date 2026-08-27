@@ -90,6 +90,7 @@ def build_context(store: EvidenceStore, candidate_id: Optional[str] = None) -> d
         "source_url": s["source_url"], "target_url": s["target_url"],
         "relation": s["relation"], "suppressed": s["suppressed"], "score": s["score"],
         "why": s["signals_detail"][0]["detail"] if s["signals_detail"] else "",
+        "evidence_ids": s.get("evidence_ids") or [],
     } for s in results["successors"] if s["suppressed"]]
 
     markets = sorted({r["url"] for r in store._all("SELECT url FROM targets")})
@@ -103,6 +104,16 @@ def build_context(store: EvidenceStore, candidate_id: Optional[str] = None) -> d
         }
 
     finding_ids = {c["finding_id"] for c in results["contradictions"] if c.get("finding_id")}
+
+    # A contradiction's own observations, registered like any other evidence so
+    # an objection can be cited and walked back instead of read on faith.
+    for c in list(results["contradictions"]) + suppressed_relationships:
+        for e in evidence_chain(store, c.get("evidence_ids") or []):
+            evidence_by_id[e["observation_id"]] = {
+                "id": e["observation_id"], "extraction_method": e["extraction_method"],
+                "url": e["url"], "sha256": e["sha256"], "observed_at": e["observed_at"],
+                "confidence": e["confidence"],
+            }
 
     # Wallet reachability is its own report, not a candidate (see
     # correlate.wallet_exchange_paths) -- pulled in here only so an answer can
@@ -158,10 +169,16 @@ def _suppressed(ctx: dict) -> dict:
     claims = [{
         "text": f"{(s['suppressed'] or s['relation'] or 'relationship').replace('_', ' ')} between "
                 f"{_short(s['source_url'], 28)} and {_short(s['target_url'], 28)}: {s['why']}",
-        "kind": "SUPPRESSED", "evidence_ids": [], "candidate_ids": [], "finding_ids": [],
+        "kind": "SUPPRESSED",
+        "evidence_ids": [i for i in (s.get("evidence_ids") or [])
+                         if i in ctx["known_ids"]["evidence_ids"]],
+        "candidate_ids": [], "finding_ids": [],
     } for s in ctx["suppressed_relationships"]]
     claims += [{
-        "text": c["detail"], "kind": "SUPPRESSED", "evidence_ids": [], "candidate_ids": [],
+        "text": c["detail"], "kind": "SUPPRESSED",
+        "evidence_ids": [i for i in (c.get("evidence_ids") or [])
+                         if i in ctx["known_ids"]["evidence_ids"]],
+        "candidate_ids": [],
         "finding_ids": [c["finding_id"]] if c.get("finding_id") else [],
     } for c in ctx["contradictions"]]
     if not claims:
@@ -247,9 +264,52 @@ def _wallet_exchange(ctx: dict) -> dict:
                             "Hop distance is reachability, not proof of an intentional transfer."]}
 
 
+def _boundary(ctx: dict) -> dict:
+    """"Does this prove the same operator?" — the one question the attribution
+    boundary exists to answer, and the one an analyst carries into a warrant.
+
+    Answered from what the engine already decided: the band it assigned, the
+    objections standing against it, and its own limitations. Nothing is
+    recomputed and no verdict is offered, because there isn't one to offer --
+    the honest answer is what the evidence reaches and where it stops.
+    """
+    if not ctx["candidates"]:
+        return _insufficient("No candidates are recorded for this case yet.")
+    best = max(ctx["candidates"], key=lambda c: c["score"])
+    contradicted = [c for c in ctx["candidates"] if c["contradictions"]]
+    claims = [{
+        "text": f"{c['assessment']} Scored {c['score']:.2f}, band {c['confidence_level']} — "
+                f"a rank against others in this case, not a probability.",
+        "kind": "OBSERVED", "evidence_ids": [e["observation_id"] for e in c["key_evidence"]],
+        "candidate_ids": [c["candidate_id"]], "finding_ids": [],
+    } for c in ctx["candidates"]]
+    claims += [{
+        "text": contra["detail"], "kind": "SUPPRESSED",
+        "evidence_ids": [i for i in (contra.get("evidence_ids") or [])
+                         if i in ctx["known_ids"]["evidence_ids"]],
+        "candidate_ids": [c["candidate_id"]],
+        "finding_ids": [contra["finding_id"]] if contra.get("finding_id") else [],
+    } for c in contradicted for contra in c["contradictions"]]
+    answer = (f"No. The strongest candidate is {best['entity']['etype'].replace('_', ' ').lower()} "
+              f"`{_short(best['entity']['value'], 32)}` at {best['score']:.2f} ({best['confidence_level']}), "
+              f"which is shared-artifact evidence, not proof of common control.")
+    if contradicted:
+        answer += (f" {len(contradicted)} candidate(s) additionally have a standing objection "
+                   f"that has not been resolved.")
+    answer += " Attribution is a human judgement on the evidence below."
+    return {"answer": answer, "claims": claims,
+            "limitations": sorted({lim for c in ctx["candidates"] for lim in c["limitations"]})}
+
+
 _INTENTS = [
-    (("connect", "related", "linked"), _connected),
-    (("reject", "suppress", "why not", "didn't"), _suppressed),
+    # Ordered: the boundary question is matched before the looser keyword sets
+    # below, so "does this prove they are connected?" gets the bounded answer
+    # rather than the connection list it also mentions.
+    (("prove", "proof", "certain", "same operator", "same person", "who controls",
+      "uncertain", "how sure", "confident"), _boundary),
+    (("connect", "related", "linked", "support", "evidence for"), _connected),
+    (("reject", "suppress", "why not", "didn't", "contradict", "objection",
+      "against"), _suppressed),
     (("strongest",), _strongest),
     (("why is this here", "why here", "why is it here"), _why_here),
     (("changed", "different", "update", "since"), _changed),
@@ -299,7 +359,9 @@ def _validate(raw: dict, ctx: dict) -> dict:
             continue
         for contra in cand["contradictions"]:
             claims.append({
-                "text": contra["detail"], "kind": "SUPPRESSED", "evidence_ids": [],
+                "text": contra["detail"], "kind": "SUPPRESSED",
+                "evidence_ids": [i for i in (contra.get("evidence_ids") or [])
+                                 if i in known["evidence_ids"]],
                 "candidate_ids": [cand["candidate_id"]],
                 "finding_ids": [contra["finding_id"]] if contra.get("finding_id") in known["finding_ids"] else [],
             })

@@ -5,6 +5,7 @@ under test is the same path a real crawl takes.
 """
 
 import base64
+import json
 from datetime import datetime, timezone
 
 from cybertrace.correlate import (
@@ -13,7 +14,8 @@ from cybertrace.correlate import (
     canonical_entity_key, candidate_infra, candidate_ips, candidate_operators,
     confidence_level, contradictions_from_identity, contradictions_from_key_temporal,
     crypto_clusters, detect_successors,
-    entity_discrimination, entity_funnel_profile, feedback_discrimination, markets_for_entity,
+    entity_discrimination, entity_funnel_profile, evidence_chain, feedback_discrimination,
+    markets_for_entity,
     market_windows, render_dossier_html, render_html, render_markdown, run_correlation,
     save_candidates, username_aliases, wallet_exchange_paths, wallet_trace_report,
 )
@@ -2262,3 +2264,34 @@ def test_feedback_never_manufactures_a_candidate_that_did_not_exist(tmp_path):
         # No candidate exists yet, so there is nothing to attach feedback to --
         # record_feedback itself refuses an unknown candidate_id (test_evidence.py).
         assert feedback_discrimination(store) == {}
+
+
+def test_a_refused_pair_cites_the_captures_it_was_refused_on(tmp_path):
+    """Declining to draw an edge is not a reason to stop citing evidence.
+
+    The asserted branch of detect_successors always carried its observation
+    ids; both suppressed branches used to emit an empty list, so the CLONE
+    verdict and every lead below threshold reached the analyst as prose with
+    nothing to check them against — the objections that hold a shared key back
+    from becoming a shared operator were the least walkable claims in the case.
+    """
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        _two_markets(store, clone=True)
+        results = run_correlation(store)
+
+        pair = results["successors"][0]
+        assert pair["suppressed"] == "CLONE_SUSPECT"
+        assert pair["evidence_ids"], "a refused pair must still cite its captures"
+        # Each id resolves to a real observation on a hashed snapshot.
+        chain = evidence_chain(store, pair["evidence_ids"])
+        assert len(chain) == len(pair["evidence_ids"])
+        assert all(e["sha256"] and e["url"] for e in chain)
+
+        # The CLONE_SUSPECT finding itself, not just the pair, is walkable.
+        flag = results["contradictions"][0]
+        assert flag["evidence_ids"], "a contradiction must cite what it rests on"
+        stored = json.loads(store._one(
+            "SELECT evidence_ids FROM findings WHERE finding_id=?",
+            (flag["finding_id"],))["evidence_ids"])
+        assert stored == flag["evidence_ids"]
+        assert all(e["sha256"] for e in evidence_chain(store, stored))

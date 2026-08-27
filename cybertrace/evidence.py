@@ -801,7 +801,8 @@ class EvidenceStore:
             "INSERT INTO findings (finding_id, ftype, description, severity, confidence, "
             "evidence_ids, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?) "
             "ON CONFLICT(finding_id) DO UPDATE SET confidence=excluded.confidence, "
-            "severity=excluded.severity, updated_at=excluded.updated_at",
+            "severity=excluded.severity, evidence_ids=excluded.evidence_ids, "
+            "updated_at=excluded.updated_at",
             (fid, ftype, description, severity, confidence,
              _canon_json(evidence_ids or []), now, now),
         )
@@ -1779,9 +1780,21 @@ def _record_clone(store: EvidenceStore, first, later, shared: dict,
         f"({first['first_seen']}) on an otherwise dissimilar site (similarity {sim:.2f})"
     )
     confidence = round(min(0.95, sim), 2) if clone else 0.6
-    fid = store.add_finding(ftype, description, severity="HIGH", confidence=confidence)
+    # The two USES_PGP/SIGNS_WITH edges this verdict is built on are already in
+    # hand; walk each back to the observations that captured the key so the
+    # objection is checkable against a snapshot hash, exactly like the support
+    # it argues against. A contradiction nobody can walk back is a contradiction
+    # an analyst has to take on faith -- and this one is what holds a shared key
+    # from becoming a shared operator, so it is the last claim in the system
+    # that should be unsourced.
+    evidence_ids = [o["observation_id"]
+                    for rel in (first["rel_id"], later["rel_id"])
+                    for o in store.provenance(rel)]
+    fid = store.add_finding(ftype, description, severity="HIGH", confidence=confidence,
+                            evidence_ids=evidence_ids)
     return {
         "finding_id": fid, "ftype": ftype, "confidence": confidence,
         "shared_key": key, "earlier": first["market"], "later": later["market"],
         "similarity": round(sim, 3), "description": description,
+        "evidence_ids": evidence_ids,
     }

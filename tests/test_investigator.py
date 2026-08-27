@@ -197,3 +197,50 @@ def test_live_mode_strips_fabricated_wallet_evidence_id(store, monkeypatch):
     monkeypatch.setattr(llm_provider, "get_provider", lambda: fake)
     result = investigator.answer(store, "tortaxi", "nearest exchange question")
     assert result["claims"][0]["evidence_ids"] == []
+
+
+def test_does_this_prove_the_same_operator_refuses_while_citing_evidence(store):
+    """The one question that decides whether a case becomes a warrant.
+
+    It used to fall through every intent to "CyberTrace does not have enough
+    observed evidence to establish that" — misleading in a case holding a 0.91
+    candidate, and an analyst could read it as an empty case. The bounded
+    answer has to do three things at once: refuse the attribution, cite the
+    evidence that does exist, and say the judgement is a human's.
+    """
+    result = investigator.answer(store, "tortaxi", "does this prove the same operator?")
+    assert result["mode"] == "deterministic"
+    assert "does not have enough observed evidence" not in result["answer"]
+    assert result["answer"].startswith("No.")
+    assert "not proof of common control" in result["answer"]
+    assert "human judgement" in result["answer"]
+
+    # Refusing is not hand-waving: the support it declines to promote is cited,
+    # and every cited id resolves to evidence the caller is handed.
+    observed = [c for c in result["claims"] if c["kind"] == "OBSERVED"]
+    assert observed and all(c["evidence_ids"] for c in observed)
+    known = {e["id"] for e in result["evidence"]}
+    for claim in result["claims"]:
+        for eid in claim["evidence_ids"]:
+            assert eid in known
+    assert any("never a proven identity" in l for l in result["limitations"])
+
+
+def test_a_standing_objection_is_as_walkable_as_the_support_it_argues_against(store):
+    """Supporting ids resolved to observations while contradicting ids resolved
+    to a finding whose own evidence list was empty — so 'what supports this'
+    was checkable and 'what contradicts this' was not. For a tool whose safety
+    property is that contradictions constrain attribution, that asymmetry ran
+    the wrong way."""
+    ctx = investigator.build_context(store)
+    contradictions = [c for c in ctx["contradictions"] if c.get("evidence_ids")]
+    assert contradictions, "expected at least one evidence-backed contradiction"
+    for c in contradictions:
+        for eid in c["evidence_ids"]:
+            assert eid in ctx["known_ids"]["evidence_ids"]
+            assert eid in ctx["_evidence_by_id"]
+            assert ctx["_evidence_by_id"][eid]["sha256"]
+
+    result = investigator.answer(store, "tortaxi", "what contradicts the attribution?")
+    suppressed = [c for c in result["claims"] if c["kind"] == "SUPPRESSED"]
+    assert suppressed and any(c["evidence_ids"] for c in suppressed)

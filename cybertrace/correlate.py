@@ -1195,7 +1195,8 @@ def detect_successors(store: EvidenceStore, min_score: float = 0.5,
                                   else "REFERENCES_ONLY",
                     "relation": None,
                     "signals": [s["signal"] for s in signals],
-                    "signals_detail": _signal_summary(signals), "evidence_ids": []})
+                    "signals_detail": _signal_summary(signals),
+                    "evidence_ids": _signal_evidence(signals)})
             continue
 
         urls = frozenset({(windows.get(a_id) or {}).get("url"),
@@ -1208,7 +1209,7 @@ def detect_successors(store: EvidenceStore, min_score: float = 0.5,
                             "relation": None,
                             "signals": [s["signal"] for s in signals],
                             "signals_detail": _signal_summary(signals),
-                            "evidence_ids": []})
+                            "evidence_ids": _signal_evidence(signals)})
             continue
         overlap = any(s.get("contradicts") for s in signals)
 
@@ -1243,8 +1244,7 @@ def detect_successors(store: EvidenceStore, min_score: float = 0.5,
         obs = store.insert_observation(
             snapshot, dst_entity, method=f"m5:{relation.lower()}", section=relation,
             context="; ".join(s["detail"] for s in signals), confidence=score)
-        evidence = list(dict.fromkeys(
-            [o for s in signals for o in s["evidence"]] + [obs]))
+        evidence = list(dict.fromkeys(_signal_evidence(signals) + [obs]))
         rel = store.upsert_relationship(src_entity, dst_entity, relation,
                                         source_label="m5:correlate", weight=score)
         store.add_evidence(rel, evidence, note=f"{relation} score {score}")
@@ -1257,6 +1257,16 @@ def detect_successors(store: EvidenceStore, min_score: float = 0.5,
                         "signals_detail": _signal_summary(signals),
                         "evidence_ids": evidence})
     return sorted(results, key=lambda r: -r["score"])
+
+
+def _signal_evidence(signals: List[dict]) -> List[str]:
+    """Observation ids the signals for one pair already rest on, deduped.
+
+    Used by every branch, including the ones that refuse the pair: declining to
+    draw an edge is not a reason to stop citing what was observed, and a lead an
+    analyst cannot walk back is a lead they have to take on faith.
+    """
+    return list(dict.fromkeys(o for s in signals for o in s["evidence"]))
 
 
 def _signal_summary(signals: List[dict]) -> List[dict]:
@@ -1287,6 +1297,7 @@ def contradictions_from_clones(store: EvidenceStore, clones: List[dict]) -> List
             "rule": "shared_artifacts_explained_by_cloning", "severity": "HIGH",
             "markets": [f["earlier"], f["later"]], "shared_key": f["shared_key"],
             "similarity": f["similarity"], "finding_id": f["finding_id"],
+            "evidence_ids": f.get("evidence_ids") or [],
             "detail": (f"{f['later']} copied {f['earlier']} (page similarity "
                        f"{f['similarity']:.2f}); shared artifacts do not evidence "
                        f"shared control")})
