@@ -68,6 +68,7 @@ api_keys.py
 # an audit/validation pass, not maintained project documentation, so they stay
 # out of git the same way runs/* does.
 docs/LOOP*.md
+docs/LOOP*.html
 
 # OSINT output files. Scratch run output stays out of the repo.
 # evidence/ and runs/ are NOT tracked today — the negation below is deliberately

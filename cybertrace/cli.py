@@ -7,7 +7,7 @@ from typing import Optional
 import click
 
 from .config import config
-from .detector import detect_input_type, normalize_input
+from .detector import chain_caveat, detect_input_type, normalize_input
 from .modules import get_module, list_modules, resolve_module_for_target, TYPE_TO_MODULE
 from .output import print_result, save_result
 from .safety import is_blocked_query
@@ -144,8 +144,18 @@ def search(target: str, input_type: str, output_format: str, save_path: Optional
     if normalized != target and not quiet:
         click.echo(f"[*] Normalized: {target} → {normalized}", err=True)
     if not module:
-        click.echo(f"[!] No module available for type: {module_type}", err=True)
-        click.echo(f"[!] Available modules: {', '.join(list_modules().keys())}", err=True)
+        # An unsupported chain is refused BY NAME. It used to fall through to
+        # `username` and be swept across 3000+ social sites, then report
+        # nothing found -- which reads as a cleared wallet instead of a wallet
+        # nobody looked at.
+        caveat = chain_caveat(specific_type)
+        if caveat:
+            click.echo(f"[!] {caveat}", err=True)
+            click.echo("[!] Supported chains: Bitcoin, Ethereum, TRON. Re-run with "
+                       "--type username only if this really is a username.", err=True)
+        else:
+            click.echo(f"[!] No module available for type: {module_type}", err=True)
+            click.echo(f"[!] Available modules: {', '.join(list_modules().keys())}", err=True)
         sys.exit(1)
 
     module.show_progress = not quiet

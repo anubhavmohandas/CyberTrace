@@ -1598,7 +1598,14 @@ def label_exchange(store: EvidenceStore, address: str, exchange_name: str,
     its detected chain (the same "no artifact" contract as upsert_entity).
     """
     from .detector import detect_input_type
-    _, chain = detect_input_type(address)
+    specific, chain = detect_input_type(address)
+    if chain == "unsupported_chain":
+        # A Litecoin or Bitcoin Cash address is base58 like Bitcoin's, so the
+        # old `.get(chain, "BTC_ADDRESS")` default stored it as a BTC_ADDRESS
+        # and the analyst's label then pointed at an address that does not
+        # exist on Bitcoin. Refusing is the same "no artifact" contract
+        # upsert_entity already has for a value that fails normalization.
+        return None
     etype = {"bitcoin": "BTC_ADDRESS", "ethereum": "ETH_ADDRESS",
             "tron": "TRX_ADDRESS"}.get(chain, "BTC_ADDRESS")
     addr_id = store.upsert_entity(etype, address, observed_at=observed_at)

@@ -2603,3 +2603,117 @@ def test_a_refused_pair_cites_the_captures_it_was_refused_on(tmp_path):
             (flag["finding_id"],))["evidence_ids"])
         assert stored == flag["evidence_ids"]
         assert all(e["sha256"] for e in evidence_chain(store, stored))
+
+
+# --- Loop 12: VASP-path boundaries pinned against real-world failure shapes ---
+#
+# Every address below is a real, publicly checkable mainnet address: the
+# suspects are OFAC-designated (SDN publication 2026-08-26), the endpoint is
+# Binance's primary hot wallet. Only the *store plumbing* is constructed; no
+# synthetic address, label or ground truth is asserted as evidence of anything.
+
+# OFAC SDN 2026-08-26, SUEX OTC S.R.O. (first VASP ever designated, 2021-09-21).
+OFAC_SUEX = "1LrxsRd7zNuxPJcL5rttnoeJFy1y4AffYY"
+# OFAC SDN 2026-08-26, Yevgeniy Igorevich POLYANIN (REvil/Sodinokibi ransomware).
+OFAC_POLYANIN = "158treVZBGMBThoaympxccPdZPtqUfYrT9"
+# Binance hot wallet, GraphSense-tagged binance.com; 1,191,656 txs on 2026-08-28.
+BINANCE_HOT = "1NDyJtNTjmwk5xPNhjgAMu4HDHigtobu1s"
+
+
+def _traced(store, suspect, summary_extra):
+    """Ingest one address the way the real collector reports it and return its
+    entity id. _check_blockchain_com always emits counterparty_addresses
+    ALONGSIDE the directional lists, so the fixture does too — a fixture that
+    omits the parallel edge tests a shape production never produces."""
+    addr = store.upsert_entity("BTC_ADDRESS", suspect)
+    sid = store.insert_snapshot(store.upsert_target("btc:" + suspect), {}, "bitcoin")
+    enrich_bitcoin(store, sid, addr, {"address": suspect, **summary_extra}, "bitcoin")
+    return addr
+
+
+def test_direction_does_not_depend_on_the_sqlite_query_planner(tmp_path):
+    """The regression this pins is not hypothetical: TRANSACTED_WITH and
+    SENT_FUNDS_TO are written for the SAME peer by enrich_bitcoin, and the BFS
+    used to take whichever parallel edge the planner returned first. With
+    idx_rel_type chosen it saw SENT_FUNDS_TO and said TO_VASP; after a plain
+    ANALYZE the planner switched to a rowid scan, TRANSACTED_WITH came first,
+    and the identical deposit silently reported UNKNOWN.
+
+    A routine database maintenance command must not change what the evidence
+    says about which way the money went."""
+    def direction_after(analyze):
+        with EvidenceStore(str(tmp_path / f"a{int(analyze)}.db")) as store:
+            addr = _traced(store, OFAC_SUEX,
+                           {"counterparty_addresses": [BINANCE_HOT],
+                            "sent_to_addresses": [BINANCE_HOT]})
+            label_exchange(store, BINANCE_HOT, "binance.com", analyst="jdoe")
+            if analyze:
+                store.conn.execute("ANALYZE")
+            return next(w for w in wallet_exchange_paths(store)
+                        if w["entity_id"] == addr)["direction"]
+
+    assert direction_after(False) == "TO_VASP"
+    assert direction_after(True) == "TO_VASP"
+
+
+def test_a_two_way_exchange_relationship_is_never_reported_as_a_deposit(tmp_path):
+    """An address that both deposited into and was paid by the same VASP is the
+    ordinary shape once a wallet has any history with an exchange — measured on
+    real chain data, SUEX and Chatex addresses do exactly this with the Binance
+    hot wallet. Collapsing it to 'consistent with a deposit' would state a
+    one-way fact the evidence contradicts."""
+    with EvidenceStore(str(tmp_path / "both.db")) as store:
+        addr = _traced(store, OFAC_SUEX,
+                       {"counterparty_addresses": [BINANCE_HOT],
+                        "sent_to_addresses": [BINANCE_HOT],
+                        "received_from_addresses": [BINANCE_HOT]})
+        label_exchange(store, BINANCE_HOT, "binance.com", analyst="jdoe")
+        hit = next(w for w in wallet_exchange_paths(store) if w["entity_id"] == addr)
+        assert hit["direction"] == "BOTH_WAYS"
+        text = " ".join(wallet_path_flags(store, hit))
+        assert "BOTH ways" in text
+        assert "consistent with a deposit" not in text
+        assert "never recorded" not in text     # direction WAS recorded, twice
+
+
+def test_a_shared_omnibus_endpoint_is_flagged_rather_than_read_as_customer_evidence(tmp_path):
+    """Two unrelated OFAC-designated entities reaching one exchange hot wallet
+    is a fact about the hot wallet, not about either suspect. Measured live:
+    13 unrelated designated entities all reach 1NDyJtNT… (1.19M transactions).
+
+    entity_discrimination suppresses exactly this shape for dark-web artifacts;
+    the wallet path had no equivalent guard at all, so 'DIRECT / TO_VASP /
+    Binance' read as though the suspect were Binance's customer."""
+    with EvidenceStore(str(tmp_path / "hub.db")) as store:
+        a = _traced(store, OFAC_SUEX, {"counterparty_addresses": [BINANCE_HOT],
+                                       "sent_to_addresses": [BINANCE_HOT]})
+        b = _traced(store, OFAC_POLYANIN, {"counterparty_addresses": [BINANCE_HOT],
+                                           "sent_to_addresses": [BINANCE_HOT]})
+        label_exchange(store, BINANCE_HOT, "binance.com", analyst="jdoe")
+        paths = {w["entity_id"]: w for w in wallet_exchange_paths(store)}
+        assert paths[a]["endpoint_shared_by"] == 2
+        assert paths[b]["endpoint_shared_by"] == 2
+        text = " ".join(wallet_path_flags(store, paths[a]))
+        assert "omnibus/hot wallet" in text
+        assert "not evidence this address is that VASP's customer" in text
+
+        # Reported, never suppressed and never scored: reaching a hot wallet is
+        # still a real observation, and it still must not touch attribution.
+        assert paths[a]["proximity"] == "DIRECT"
+        assert run_correlation(store)["operators"] == []
+
+
+def test_the_two_suspects_sharing_a_hot_wallet_are_not_linked_to_each_other(tmp_path):
+    """The adversarial half of the above. Two unrelated designated entities
+    depositing into the same exchange must never become one operator — this is
+    scenario 8 (same exchange -> same actor) on real addresses."""
+    with EvidenceStore(str(tmp_path / "nolink.db")) as store:
+        a = _traced(store, OFAC_SUEX, {"counterparty_addresses": [BINANCE_HOT],
+                                       "sent_to_addresses": [BINANCE_HOT]})
+        b = _traced(store, OFAC_POLYANIN, {"counterparty_addresses": [BINANCE_HOT],
+                                           "sent_to_addresses": [BINANCE_HOT]})
+        assert crypto_clusters(store) == {}          # no co-spend, no wallet
+        joined = {(r["source_entity_id"], r["target_entity_id"]) for r in store._all(
+            "SELECT source_entity_id, target_entity_id FROM relationships "
+            "WHERE status='ACTIVE'")}
+        assert (a, b) not in joined and (b, a) not in joined

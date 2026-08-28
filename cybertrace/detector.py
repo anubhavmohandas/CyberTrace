@@ -22,7 +22,31 @@ PATTERNS = {
     'btc_bech32': re.compile(r'^bc1[a-z0-9]{39,59}$'),
     'ethereum': re.compile(r'^0x[a-fA-F0-9]{40}$'),
     'tron': re.compile(r'^T[a-km-zA-HJ-NP-Z1-9]{33}$'),
-    
+
+    # Cryptocurrency on chains CyberTrace has NO collector for. Matched on
+    # purpose so they can be REFUSED by name instead of falling through to the
+    # `username` catch-all, which handed them to a 3000+ social-site sweep and
+    # then reported "no VASP path" -- a false negative that reads to an
+    # investigator exactly like a cleared wallet.
+    #
+    # Measured against the OFAC SDN publication of 2026-08-26: of 1,007 real
+    # designated digital-currency addresses, 50 (5.0%) landed in `username`.
+    # Every pattern below is anchored to a format a supported chain cannot
+    # produce, and all of them are checked AFTER btc/eth/tron so a supported
+    # chain always wins.
+    'monero': re.compile(r'^[48][0-9AB][1-9A-HJ-NP-Za-km-z]{93}$'),
+    'litecoin': re.compile(r'^(?:ltc1[a-z0-9]{39,59}|[LM][a-km-zA-HJ-NP-Z1-9]{26,34})$'),
+    'bitcoin_cash': re.compile(r'^(?:bitcoincash:)?[qp][a-z0-9]{41}$'),
+    'dogecoin': re.compile(r'^D[5-9A-HJ-NP-U][1-9A-HJ-NP-Za-km-z]{32}$'),
+    'dash': re.compile(r'^X[1-9A-HJ-NP-Za-km-z]{33}$'),
+    'zcash': re.compile(r'^(?:t1[a-km-zA-HJ-NP-Z1-9]{33}|zs1[a-z0-9]{75})$'),
+    'ripple': re.compile(r'^r[1-9A-HJ-NP-Za-km-z]{24,34}$'),
+    # Solana is base58 with no distinguishing prefix, so it is pinned to the
+    # 43-44 characters an ed25519 pubkey actually encodes to. Narrow on
+    # purpose: a shorter base58 string is far more likely to be a username.
+    'solana': re.compile(r'^[1-9A-HJ-NP-Za-km-z]{43,44}$'),
+
+
     # Domains & URLs
     # Onion — bare host, or the full URL users actually paste (scheme/subdomain/
     # port/path). The subdomain group is what lets www.<addr>.onion reach the
@@ -68,6 +92,15 @@ DETECTION_ORDER = [
     ('btc_legacy', 'bitcoin'),
     ('ethereum', 'ethereum'),
     ('tron', 'tron'),
+    # Recognized, and refused by name -- see UNSUPPORTED_CHAINS.
+    ('monero', 'unsupported_chain'),
+    ('litecoin', 'unsupported_chain'),
+    ('bitcoin_cash', 'unsupported_chain'),
+    ('dogecoin', 'unsupported_chain'),
+    ('dash', 'unsupported_chain'),
+    ('zcash', 'unsupported_chain'),
+    ('ripple', 'unsupported_chain'),
+    ('solana', 'unsupported_chain'),
     ('onion', 'darkweb'),
     ('gstin', 'indian'),
     ('pan_indian', 'indian'),
@@ -78,6 +111,51 @@ DETECTION_ORDER = [
     ('url', 'domain'),
     ('domain', 'domain'),
 ]
+
+
+# specific_type -> the chain it really is, for the ones nothing here can trace.
+# Kept as data rather than prose so a caller can name the chain in a refusal.
+UNSUPPORTED_CHAINS = {
+    'monero': 'Monero', 'litecoin': 'Litecoin', 'bitcoin_cash': 'Bitcoin Cash',
+    'dogecoin': 'Dogecoin', 'dash': 'Dash', 'zcash': 'Zcash',
+    'ripple': 'XRP Ledger', 'solana': 'Solana',
+}
+
+
+def chain_caveat(specific_type: str) -> str:
+    """The limitation that must travel with a detection, or '' if there is none.
+
+    Two different failures, one entry point, because every consumer -- module
+    dispatch, evidence.label_exchange, correlate.wallet_trace_report -- already
+    routes through detect_input_type and each was silently papering over one of
+    them:
+
+    unsupported chain   there is no collector, so "no VASP path" would mean
+                        "never looked", and the two must not read alike.
+    EVM ambiguity       a 0x address is valid on Ethereum, BNB Chain, Polygon,
+                        Arbitrum and every other EVM network, and the string
+                        cannot say which. The same key controls all of them, so
+                        this is not a false ownership claim -- but activity is
+                        queried against Ethereum mainnet ONLY, so a BNB or
+                        Polygon suspect reports no counterparties and no VASP
+                        path, which reads as a cleared wallet.
+
+    Both are real, not hypothetical: OFAC's SDN publication of 2026-08-26 lists
+    0x4f47bc496083c727c5fbe3ce9cdf2b0f6496270c under BOTH Arbitrum and BNB
+    Chain, and 50 of its 1,007 digital-currency addresses are on chains in
+    UNSUPPORTED_CHAINS.
+    """
+    if specific_type in UNSUPPORTED_CHAINS:
+        return (f"{UNSUPPORTED_CHAINS[specific_type]} is not a supported chain: "
+                f"CyberTrace has no collector for it, so no transaction, "
+                f"counterparty or VASP conclusion can be drawn — this is "
+                f"'not looked at', not 'nothing found'.")
+    if specific_type == 'ethereum':
+        return ("0x addresses are queried against Ethereum mainnet only. The "
+                "same address is valid on BNB Chain, Polygon, Arbitrum and "
+                "other EVM networks, and activity there is NOT searched — "
+                "absence of a VASP path is not evidence of absence.")
+    return ""
 
 
 def detect_input_type(input_str: str) -> Tuple[str, str]:

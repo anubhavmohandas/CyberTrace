@@ -1563,3 +1563,25 @@ def test_label_exchange_detects_chain_from_address_shape(tmp_path):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_label_exchange_refuses_an_unsupported_chain_address(tmp_path):
+    """Litecoin and Bitcoin Cash are base58 exactly like Bitcoin, so the old
+    `.get(chain, "BTC_ADDRESS")` default silently filed a Litecoin exchange
+    address as a BTC_ADDRESS — an analyst-asserted label pointing at an address
+    that does not exist on the chain it was filed under.
+
+    Refusing is the same "no artifact" contract upsert_entity already has."""
+    from cybertrace.evidence import label_exchange
+
+    with EvidenceStore(str(tmp_path / "lx.db")) as store:
+        # Real Litecoin bech32 address; real Monero address (OFAC SDN 2026-08-26).
+        for address in ("ltc1qsl9wyhaqfnq7d0zdgdqf6dcv3drxvtq6c0hnvz",
+                        "44dZUJ7w1T3fKAvFW8XyXUVoAGSbFvXef2wcbnsjNKGWYo6ZgLwSC"
+                        "JvfeFRHWLnKQMcVUwWLZLQHQvXbNjMWfjXm1LKgWFN"):
+            assert label_exchange(store, address, "SomeExchange", analyst="jdoe") is None
+        assert store._all("SELECT * FROM relationships WHERE rtype='EXCHANGE_DEPOSIT'") == []
+        assert store._all("SELECT * FROM entities WHERE etype='BTC_ADDRESS'") == []
+
+        # The supported chains are untouched by the guard.
+        assert label_exchange(store, BTC_VALID, "binance.com", analyst="jdoe") is not None

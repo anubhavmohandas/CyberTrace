@@ -26,7 +26,7 @@ import html
 import json
 import math
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Set
@@ -644,6 +644,13 @@ AT_VASP, DIRECT, INDIRECT = "AT_VASP", "DIRECT", "INDIRECT"
 # transaction" actually supports, and calling that a deposit would be the
 # payment-is-not-control error one level up.
 TO_VASP, FROM_VASP, DIRECTION_UNKNOWN = "TO_VASP", "FROM_VASP", "UNKNOWN"
+# Value was observed moving BOTH ways across the final hop. Distinct from
+# UNKNOWN, which means no collector ever recorded a direction: here two
+# directions were recorded, and collapsing that to "deposit" would state as a
+# one-way fact something the evidence says is two-way. Measured on real chain
+# data: OFAC-designated addresses that reach a VASP commonly both deposit into
+# and are paid by the same endpoint.
+BOTH_WAYS = "BOTH_WAYS"
 
 
 def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, dict]:
@@ -726,10 +733,22 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
     # not the `evidence` table's own primary key -- so investigator._finalize
     # can resolve every id here the same way it resolves any other claim.
     #
-    # Each adjacency entry carries the flow marker for that hop: True when the
-    # stored edge points the way we are walking (following the value), False
-    # when we are walking against it, None when the edge never knew.
-    adjacency: Dict[str, List[tuple]] = defaultdict(list)
+    # One entry per (node, peer) carrying the SET of flow markers observed for
+    # that pair: True when a stored edge points the way we are walking
+    # (following the value), False when we are walking against it, None when
+    # the edge never knew.
+    #
+    # Aggregated rather than appended once per edge, because parallel edges
+    # between one pair are the normal case, not the exception: enrich_bitcoin
+    # writes TRANSACTED_WITH *and* SENT_FUNDS_TO for the same peer by
+    # construction. Taking the first edge the BFS happened to reach made the
+    # reported direction a function of SQLite's query plan -- with idx_rel_type
+    # chosen it saw SENT_FUNDS_TO first and reported TO_VASP; after a plain
+    # ANALYZE the planner switches to a rowid scan, TRANSACTED_WITH comes first
+    # and the same deposit silently reported UNKNOWN. Peers are also walked in
+    # sorted order so which endpoint wins a hop-distance tie stops depending on
+    # the plan too.
+    adjacency: Dict[str, Dict[str, tuple]] = defaultdict(dict)
     for r in store._all(
             "SELECT r.source_entity_id AS a, r.target_entity_id AS b, r.rtype, "
             "       ev.observation_ids FROM relationships r "
@@ -738,8 +757,10 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
             "AND r.status='ACTIVE'"):
         obs_ids = json.loads(r["observation_ids"] or "[]")
         directed = r["rtype"] == "SENT_FUNDS_TO"
-        adjacency[r["a"]].append((r["b"], obs_ids, True if directed else None))
-        adjacency[r["b"]].append((r["a"], obs_ids, False if directed else None))
+        for src, dst, flow in ((r["a"], r["b"], True if directed else None),
+                               (r["b"], r["a"], False if directed else None)):
+            prev_obs, flows = adjacency[src].get(dst, ([], set()))
+            adjacency[src][dst] = (prev_obs + obs_ids, flows | {flow})
 
     # raw_value, not normalized_value. upsert_entity lowercases the index key
     # (`key = norm.lower()`), which is correct for dedup and destroys a base58
@@ -755,10 +776,23 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
 
     exchange_of = _vasp_endpoints(store, values)
 
-    def _direction(flow: Optional[bool]) -> str:
-        if flow is None:
-            return DIRECTION_UNKNOWN
-        return TO_VASP if flow else FROM_VASP
+    def _direction(flows: set) -> str:
+        """Direction of the final hop, from every flow marker observed for that
+        pair -- not from whichever parallel edge was reached first.
+
+        A pair that both deposited into and was paid by the VASP is the common
+        real shape once an address has any history with an exchange, and
+        reporting it as a flat deposit is the "an incoming transfer must not be
+        described as a deposit" error with one extra step. BOTH_WAYS says what
+        was actually observed."""
+        seen = flows - {None}
+        if seen == {True}:
+            return TO_VASP
+        if seen == {False}:
+            return FROM_VASP
+        if seen == {True, False}:
+            return BOTH_WAYS
+        return DIRECTION_UNKNOWN
 
     out = []
     for start in values:
@@ -778,7 +812,7 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
         for hop in range(1, max_hops + 1):
             next_frontier = []
             for node, path, ev_ids in frontier:
-                for peer, hop_obs, flow in adjacency.get(node, []):
+                for peer, (hop_obs, flows) in sorted(adjacency.get(node, {}).items()):
                     if peer in visited:
                         continue
                     visited.add(peer)
@@ -794,7 +828,7 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
                                  "attribution": end["attribution"],
                                  "attribution_source": end["attribution_source"],
                                  "proximity": DIRECT if hop == 1 else INDIRECT,
-                                 "direction": _direction(flow)}
+                                 "direction": _direction(flows)}
                         break
                     next_frontier.append((peer, new_path, new_ev))
                 if found:
@@ -804,6 +838,38 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
             frontier = next_frontier
         if found:
             out.append(found)
+
+    # How many DISTINCT traced addresses in this store terminate on the same
+    # VASP address. This is entity_discrimination's idea (a shared artifact
+    # discriminates nothing) applied to the one path that never had it: a
+    # tag-attested endpoint is frequently an exchange's omnibus hot wallet, and
+    # "transacted directly with Binance" is then true of a large share of all
+    # addresses on the chain rather than evidence about this suspect.
+    #
+    # Measured on real data, not supposed: of 54 OFAC-designated BTC addresses
+    # traced live against the shipped tagpack corpus, 13 unrelated designated
+    # entities (SUEX, Chatex, Karasavidi, Potekhin, Polyanin) all reached ONE
+    # address -- 1NDyJtNTjmwk5xPNhjgAMu4HDHigtobu1s, tagged binance.com, with
+    # 1,191,656 transactions. Reported, not suppressed: reaching a hot wallet
+    # is still a real observation and still the right disclosure request. What
+    # it is not is evidence that this suspect is that VASP's customer.
+    # Counted over DISTINCT last-hop predecessors (path[-2]), not over paths.
+    # Counting paths conflates "many addresses transacted with this endpoint"
+    # with "many addresses funnelled through one intermediary that did" -- on a
+    # real trace of one OFAC address that inflated 1 relationship into 38.
+    # Under-counting is the right failure direction here: with a single suspect
+    # this case holds no evidence the endpoint is shared, and saying so would be
+    # inventing one.
+    #
+    # hops > 0 only: an AT_VASP row is the endpoint address itself, and counting
+    # it would report the VASP as one of its own visitors.
+    direct_reachers: Dict[str, set] = defaultdict(set)
+    for w in out:
+        if w["hops"]:
+            direct_reachers[w["path"][-1]].add(w["path"][-2])
+    for w in out:
+        w["endpoint_shared_by"] = (len(direct_reachers[w["path"][-1]])
+                                   if w["hops"] else 0)
 
     return sorted(out, key=lambda w: (w["hops"], w["entity_id"]))
 
@@ -870,9 +936,19 @@ def wallet_path_flags(store: EvidenceStore, hit: Optional[dict],
                      f"— consistent with a deposit",
             FROM_VASP: f"value moved FROM {hit['exchange']} on the final hop "
                        f"— a payout, not a deposit",
+            BOTH_WAYS: f"value moved BOTH ways with {hit['exchange']} on the final "
+                       f"hop — deposits and payouts are both present, so this is "
+                       f"not a one-way deposit",
             DIRECTION_UNKNOWN: "fund-flow direction on the final hop was never "
                                "recorded — this is reachability, not a deposit",
         }[hit["direction"]])
+        shared = hit.get("endpoint_shared_by", 1)
+        if shared > 1:
+            flags.append(
+                f"{shared} different addresses in this case transacted directly "
+                f"with the endpoint attributed to {hit['exchange']} — consistent "
+                f"with an omnibus/hot wallet, so proximity is not evidence this "
+                f"address is that VASP's customer")
     return flags
 
 
@@ -900,8 +976,13 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4) -
 
     Returns None if `address` was never searched into this store at all.
     """
-    from .detector import detect_input_type
-    _, chain = detect_input_type(address)
+    from .detector import chain_caveat, detect_input_type
+    specific, chain = detect_input_type(address)
+    if chain == "unsupported_chain":
+        # Previously defaulted to BTC_ADDRESS, found nothing, and returned None
+        # -- indistinguishable from "this wallet was never searched" and one
+        # step from "no VASP path". Say which it is.
+        return None
     etype = _TRACE_CHAIN_ETYPES.get(chain, "BTC_ADDRESS")
     start_id = store.find_entity(etype, address)
     if start_id is None:
@@ -911,6 +992,9 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4) -
                if w["entity_id"] == start_id), None)
     path_ids = hit["path"] if hit else [start_id]
     flags = wallet_path_flags(store, hit, fallback_path_ids=path_ids)
+    caveat = chain_caveat(specific)
+    if caveat:
+        flags.append(caveat)
 
     marks = ",".join("?" * len(path_ids))
     by_id = {r["entity_id"]: r for r in store._all(
