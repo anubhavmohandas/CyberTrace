@@ -634,10 +634,15 @@ _TAG_CURRENCY = {"BTC_ADDRESS": "BTC", "ETH_ADDRESS": "ETH", "TRX_ADDRESS": "TRX
 # different things a reader has to check differently, and rank in the fixed
 # order below (highest first) wherever more than one source names the same
 # address: an analyst is accountable for their own citation; a government
-# designation is the strongest unattended source this project has; a
-# community tagpack is the weakest. See _vasp_endpoints.
+# designation is the strongest unattended source this project has; a VASP's
+# own publication of its own address outranks a third party's guess about
+# it, but not a government designation or an analyst's own citation -- a
+# company disclosing a wallet is not the same accountability as being
+# legally designated or personally cited; a community tagpack is the
+# weakest. See _vasp_endpoints.
 ANALYST_ASSERTED = "ANALYST_ASSERTED"           # evidence.label_exchange: a human's cited claim
 REGULATORY_ATTESTED = "REGULATORY_ATTESTED"     # OFAC SDN digital-currency-address record
+VASP_DISCLOSED = "VASP_DISCLOSED"               # the VASP's own verified published wallet list
 TAG_ATTESTED = "TAG_ATTESTED"                   # a third party's public tagpack entry
 
 # How far the suspect address is from the VASP-attributed address. Named rather
@@ -664,7 +669,7 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
     """entity_id -> the VASP (or, for REGULATORY_ATTESTED, OFAC-designated
     entity) attributed to that address, and how.
 
-    Three independent sources, never merged into one score -- one dict slot
+    Four independent sources, never merged into one score -- one dict slot
     per address, so a source found by more than one of them still reports
     once, at its highest-ranked source (see below), not as two findings:
 
@@ -677,22 +682,35 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
                            cited by profile ID. Some designated parties are
                            not VASPs (Hydra Market, Blender.io); this source
                            names the entity OFAC designated, not a VASP claim.
+      VASP_DISCLOSED       this address is on a VASP's own published wallet
+                           list, and that publication was independently
+                           corroborated (docs/LOOP16.md Phase 2) -- currently
+                           only Bitfinex's GitHub proof-of-reserves repo and
+                           BitMEX's November 2022 proof-of-reserves snapshot;
+                           see exchange_tags._VASP_DISCLOSED_SOURCES. This
+                           names an address the VASP itself published, not
+                           every address that later transacts with it -- see
+                           wallet_exchange_paths' vasp_shared_by guard.
       TAG_ATTESTED         the local GraphSense TagPacks corpus tags this
                            address category='exchange'. A third party's public
                            claim, read offline, cited by pack name.
 
-    Neither REGULATORY_ATTESTED nor TAG_ATTESTED is ever written back as an
-    EXCHANGE_DEPOSIT edge -- the engine asserting an ownership label it did
-    not verify is the exact move label_exchange exists to prevent, and that
-    holds just as much for a government designation of ONE address as for a
-    community tag: it is still not proof this address's other counterparties
-    share the designation, or that the designated party is this address's
-    customer. Processed lowest-precedence first so a later block's plain
-    dict assignment is the one that wins when a source is present:
-    TAG_ATTESTED, then REGULATORY_ATTESTED, then ANALYST_ASSERTED -- the
-    analyst is the one who has to stand behind their own citation, so an
-    analyst assertion outranks even a government designation of the same
-    address; a government designation outranks an unattributed community tag.
+    Neither REGULATORY_ATTESTED, VASP_DISCLOSED, nor TAG_ATTESTED is ever
+    written back as an EXCHANGE_DEPOSIT edge -- the engine asserting an
+    ownership label it did not verify is the exact move label_exchange exists
+    to prevent, and that holds just as much for a VASP's own disclosure of
+    ONE address (or a government designation of one, or a community tag) as
+    for any of the others: it is still not proof this address's other
+    counterparties are that VASP's customers. Processed lowest-precedence
+    first so a later block's plain dict assignment is the one that wins when
+    a source is present: TAG_ATTESTED, then VASP_DISCLOSED, then
+    REGULATORY_ATTESTED, then ANALYST_ASSERTED -- the analyst is the one who
+    has to stand behind their own citation, so an analyst assertion outranks
+    even a government designation of the same address; a government
+    designation outranks a VASP's own disclosure of its own address (a legal
+    determination is stronger than a company's self-report); a VASP's own
+    verified disclosure outranks an unattributed community tag guessing at
+    the same thing.
     """
     out: Dict[str, dict] = {}
 
@@ -706,7 +724,7 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
         if currency:
             by_currency[currency].append(value)
     if by_currency:
-        from .integrations.exchange_tags import exchange_labels
+        from .integrations.exchange_tags import exchange_labels, vasp_disclosed_labels
         tagged = exchange_labels(dict(by_currency))
         for entity_id, (value, _etype) in raw.items():
             hit = tagged.get(value)
@@ -714,6 +732,19 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
                 out[entity_id] = {"exchange": hit["label"], "evidence_ids": [],
                                   "attribution": TAG_ATTESTED,
                                   "attribution_source": f"GraphSense tagpack: {hit['pack']}"}
+
+        disclosed = vasp_disclosed_labels(dict(by_currency))
+        for entity_id, (value, _etype) in raw.items():
+            hit = disclosed.get(value)
+            if hit:
+                # "exchange" holds the brand for this tier -- reused as the
+                # vasp_shared_by grouping key in wallet_exchange_paths rather
+                # than carrying a second, redundant brand field.
+                out[entity_id] = {"exchange": hit["brand"], "evidence_ids": [],
+                                  "attribution": VASP_DISCLOSED,
+                                  "attribution_source":
+                                      f"{hit['brand']} self-disclosure ({hit['role']}): "
+                                      f"{hit['source']}"}
 
         from .integrations.ofac import ofac_labels
         designated = ofac_labels(dict(by_currency))
@@ -904,6 +935,26 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
         w["endpoint_shared_by"] = (len(direct_reachers[w["path"][-1]])
                                    if w["hops"] else 0)
 
+    # docs/LOOP16.md Phase 4's gap: endpoint_shared_by is address-level, but a
+    # VASP_DISCLOSED source can be a whole disclosed SET (BitMEX: 336,208
+    # addresses). Three suspects each reaching a DIFFERENT address in that set
+    # each show endpoint_shared_by == 1 -- individually true, and collectively
+    # exactly the omnibus shape the address-level guard was built to catch.
+    # Grouped by "exchange" (the brand -- see the VASP_DISCLOSED write above,
+    # which reuses that field rather than adding a redundant one), never by
+    # the specific address, and only for VASP_DISCLOSED rows: this is not a
+    # generic cross-address scoring model, only the one guard docs/LOOP16.md
+    # identified as a real prerequisite. hops > 0 only, same reasoning as
+    # endpoint_shared_by above.
+    brand_reachers: Dict[str, set] = defaultdict(set)
+    for w in out:
+        if w["hops"] and w["attribution"] == VASP_DISCLOSED:
+            brand_reachers[w["exchange"]].add(w["path"][-2])
+    for w in out:
+        if w["attribution"] == VASP_DISCLOSED:
+            w["vasp_shared_by"] = (len(brand_reachers[w["exchange"]])
+                                   if w["hops"] else 0)
+
     return sorted(out, key=lambda w: (w["hops"], w["entity_id"]))
 
 
@@ -966,6 +1017,9 @@ def wallet_path_flags(store: EvidenceStore, hit: Optional[dict],
         source = {ANALYST_ASSERTED: "analyst-asserted",
                   REGULATORY_ATTESTED: "an OFAC SDN designation, a government "
                                         "determination -- not this engine's own finding",
+                  VASP_DISCLOSED: "the VASP's own published wallet disclosure, "
+                                  "independently corroborated -- not proof this "
+                                  "address's other counterparties are its customers",
                   TAG_ATTESTED: "third-party tag, not verified by CyberTrace"}[hit["attribution"]]
         flags.append(f"{hit['proximity']}: {proximity} {hit['exchange']} "
                      f"({hit['hops']} hop(s), reachability confidence "
@@ -989,6 +1043,14 @@ def wallet_path_flags(store: EvidenceStore, hit: Optional[dict],
                 f"with the endpoint attributed to {hit['exchange']} — consistent "
                 f"with an omnibus/hot wallet, so proximity is not evidence this "
                 f"address is that {endpoint_kind}'s customer")
+        vasp_shared = hit.get("vasp_shared_by", 0)
+        if vasp_shared > 1:
+            flags.append(
+                f"{vasp_shared} different addresses in this case each transacted "
+                f"directly with a (not necessarily the same) address {hit['exchange']} "
+                f"itself disclosed — a shared/omnibus disclosed wallet SET, not one "
+                f"shared address, so this is not evidence this address is "
+                f"{hit['exchange']}'s customer")
     return flags
 
 
@@ -2341,7 +2403,8 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
                    "<p class=dim>Reachability over transaction edges. The endpoint is "
                    "an analyst's cited claim (ANALYST_ASSERTED), an OFAC SDN designation "
                    "(REGULATORY_ATTESTED — not always a VASP; some designated parties are "
-                   "a market or a mixer), or a third party's public tagpack entry "
+                   "a market or a mixer), the VASP's own verified published wallet list "
+                   "(VASP_DISCLOSED), or a third party's public tagpack entry "
                    "(TAG_ATTESTED) — never this engine's own finding, and never written as "
                    "a relationship. Confidence is hop decay, not a probability. Flow UNKNOWN "
                    "means the capture recorded that a transaction happened and not which way "

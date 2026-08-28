@@ -13,7 +13,7 @@ import pytest
 from cybertrace.correlate import (
     FUNNELS, SHARED_ARTIFACTS,
     COMMON_ARTIFACT_FLOOR, EXCHANGE_HOP_DECAY, LEAD_FLOOR, REGULATORY_ATTESTED,
-    RETIRED_ASSESSMENT,
+    RETIRED_ASSESSMENT, VASP_DISCLOSED,
     SUCCESSOR_SIGNALS, UNJOINED_CONTEXT,
     canonical_entity_key, candidate_infra, candidate_ips, candidate_operators,
     confidence_level, contradiction_anchor, contradictions_from_identity,
@@ -1331,6 +1331,164 @@ def test_ofac_designation_outranks_a_third_party_tag_on_one_address(tmp_path):
         assert len(hits) == 1
         assert hits[0]["attribution"] == REGULATORY_ATTESTED
         assert "OFAC SDN" in hits[0]["attribution_source"]
+
+
+# --- Loop 17: VASP_DISCLOSED (docs/LOOP17.md) --------------------------------
+#
+# Real addresses from the two sources docs/LOOP16.md Phase 2 independently
+# verified live -- Bitfinex's own GitHub proof-of-reserves repo and BitMEX's
+# November 2022 proof-of-reserves snapshot -- not fixtures. See
+# cybertrace.integrations.exchange_tags._VASP_DISCLOSED_SOURCES.
+BITFINEX_COLD = "3JZq4atUahhuA9rLhXLMhhTo133J9rF97j"    # bitfinex BTC cold wallet
+BITMEX_RESERVE = "3BMEXbSSrK2K7cRgqxrtqUWfxowBBrW1BE"    # bitmex reserve wallet
+
+
+def test_a_real_bitfinex_disclosed_address_is_vasp_disclosed_not_an_edge(tmp_path):
+    """Phase 6/11 item 6: a real address from Bitfinex's own published
+    wallets.txt reaches VASP_DISCLOSED attribution, and the same boundary
+    REGULATORY_ATTESTED/TAG_ATTESTED already hold applies unchanged: no
+    EXCHANGE_DEPOSIT edge, no EXCHANGE entity, no operator claim."""
+    from cybertrace.integrations import exchange_tags
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        sid = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": BTC_VALID, "sent_to_addresses": [BITFINEX_COLD]}, "bitcoin")
+
+        hit = next(w for w in wallet_exchange_paths(store) if w["entity_id"] == addr)
+        assert hit["attribution"] == VASP_DISCLOSED
+        assert hit["exchange"] == "Bitfinex"
+        assert "github.com/bitfinexcom" in hit["attribution_source"]
+
+        flags = wallet_path_flags(store, hit)
+        assert any("own published wallet disclosure" in f for f in flags)
+
+        assert store._all("SELECT 1 FROM relationships WHERE rtype='EXCHANGE_DEPOSIT'") == []
+        assert store._all("SELECT 1 FROM entities WHERE etype='EXCHANGE'") == []
+        assert run_correlation(store)["operators"] == []
+
+
+def test_a_real_bitmex_disclosed_address_is_vasp_disclosed(tmp_path):
+    """Phase 6/11 item 7: same check against the BitMEX proof-of-reserves
+    population (336,208 addresses, docs/LOOP16.md Phase 2) rather than
+    Bitfinex's much smaller set -- the two verified sources are read through
+    the same code path, so both must attribute identically."""
+    from cybertrace.integrations import exchange_tags
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        sid = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": BTC_VALID, "sent_to_addresses": [BITMEX_RESERVE]}, "bitcoin")
+
+        hit = next(w for w in wallet_exchange_paths(store) if w["entity_id"] == addr)
+        assert hit["attribution"] == VASP_DISCLOSED
+        assert hit["exchange"] == "BitMEX"
+        assert "public.bitmex.com" in hit["attribution_source"]
+        assert store._all("SELECT 1 FROM relationships WHERE rtype='EXCHANGE_DEPOSIT'") == []
+
+
+def test_vasp_disclosed_outranks_a_third_party_tag_on_the_same_address(tmp_path):
+    """The Bitfinex cold wallet above is tagged BOTH ways in the local
+    corpus -- category='exchange' under GraphSense's own
+    exchange-wallets-bitfinexcom pack (TAG_ATTESTED) AND under the verified
+    github.com/bitfinexcom source (VASP_DISCLOSED) -- because both entries
+    describe the very same first-party disclosure, not two independent
+    claims. It must surface once, at VASP_DISCLOSED, never as two findings."""
+    from cybertrace.integrations import exchange_tags
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+    # Confirms the fixture is still the real collision, not a stale address.
+    assert exchange_tags.exchange_labels({"BTC": [BITFINEX_COLD]})
+    assert exchange_tags.vasp_disclosed_labels({"BTC": [BITFINEX_COLD]})
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        sid = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": BTC_VALID, "sent_to_addresses": [BITFINEX_COLD]}, "bitcoin")
+
+        hits = [w for w in wallet_exchange_paths(store) if w["entity_id"] == addr]
+        assert len(hits) == 1
+        assert hits[0]["attribution"] == VASP_DISCLOSED
+
+
+def test_an_analyst_label_outranks_a_vasp_disclosure_on_one_address(tmp_path):
+    """Same precedence rule as the GraphSense/OFAC cases: the analyst is the
+    one who has to stand behind their own citation, so it outranks even a
+    verified first-party VASP disclosure of the same address."""
+    from cybertrace.integrations import exchange_tags
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        sid = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": BTC_VALID, "sent_to_addresses": [BITFINEX_COLD]}, "bitcoin")
+        label_exchange(store, BITFINEX_COLD, "Bitfinex (analyst-confirmed)",
+                       analyst="jdoe", note="court filing")
+
+        hits = [w for w in wallet_exchange_paths(store) if w["entity_id"] == addr]
+        assert len(hits) == 1
+        assert hits[0]["attribution"] == "ANALYST_ASSERTED"
+        assert "jdoe" in hits[0]["attribution_source"]
+
+
+def test_ofac_designation_outranks_a_vasp_disclosure_on_one_address(tmp_path, monkeypatch):
+    """Mechanism fixture, not ground-truth validation (docs/LOOP17.md Phase
+    11): checked directly against both local indexes, zero real addresses are
+    both OFAC-designated and in either verified VASP_DISCLOSED source set, so
+    there is no real address to pin this collision on. This pins the write
+    order _vasp_endpoints actually encodes -- REGULATORY_ATTESTED is written
+    after, and so overwrites, VASP_DISCLOSED -- using the real Blender.io OFAC
+    fixture with vasp_disclosed_labels patched to also (hypothetically) claim
+    that same real address."""
+    from cybertrace.integrations import ofac
+    if not (ofac.available() and ofac.index_available()):
+        pytest.skip("OFAC SDN not downloaded/indexed in this checkout")
+    blender = "3NDzzVxiLBUs1WPvVGRfCYDTAD2Ua2PvW4"
+    monkeypatch.setattr(
+        "cybertrace.integrations.exchange_tags.vasp_disclosed_labels",
+        lambda addresses: {blender: {"brand": "TestVASP", "role": "test wallet",
+                                      "source": "https://example.test/disclosure"}})
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        sid = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": BTC_VALID, "sent_to_addresses": [blender]}, "bitcoin")
+
+        hits = [w for w in wallet_exchange_paths(store) if w["entity_id"] == addr]
+        assert len(hits) == 1
+        assert hits[0]["attribution"] == REGULATORY_ATTESTED
+
+
+def test_vasp_disclosed_direction_is_independent_of_attribution_source(tmp_path):
+    """Phase 7/11 item 9: TO_VASP / FROM_VASP / BOTH_WAYS derive purely from
+    the transaction graph (correlate._direction), unchanged by which tier
+    named the endpoint -- exercised here against a real VASP_DISCLOSED
+    endpoint the same way docs/LOOP16.md Phase 5 confirmed it for
+    REGULATORY_ATTESTED/TAG_ATTESTED by reading, not by new code."""
+    from cybertrace.integrations import exchange_tags
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+
+    def direction_for(suffix, extra):
+        with EvidenceStore(str(tmp_path / f"{suffix}.db")) as store:
+            addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+            sid = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
+            enrich_bitcoin(store, sid, addr, {"address": BTC_VALID, **extra}, "bitcoin")
+            hit = next(w for w in wallet_exchange_paths(store) if w["entity_id"] == addr)
+            assert hit["attribution"] == VASP_DISCLOSED
+            return hit["direction"]
+
+    assert direction_for("to", {"sent_to_addresses": [BITFINEX_COLD]}) == "TO_VASP"
+    assert direction_for("from", {"received_from_addresses": [BITFINEX_COLD]}) == "FROM_VASP"
+    assert direction_for("both", {"sent_to_addresses": [BITFINEX_COLD],
+                                  "received_from_addresses": [BITFINEX_COLD]}) == "BOTH_WAYS"
+    # counterparty-only, no directional list recorded at all
+    assert direction_for("unknown", {"counterparty_addresses": [BITFINEX_COLD]}) == "UNKNOWN"
 
 
 # --- wallet -> exchange reachability ------------------------------------------
@@ -2830,3 +2988,64 @@ def test_the_two_suspects_sharing_a_hot_wallet_are_not_linked_to_each_other(tmp_
             "SELECT source_entity_id, target_entity_id FROM relationships "
             "WHERE status='ACTIVE'")}
         assert (a, b) not in joined and (b, a) not in joined
+
+
+# --- Loop 17: brand-level (VASP_DISCLOSED) omnibus sharing (docs/LOOP17.md) --
+#
+# Real addresses from BitMEX's actual verified proof-of-reserves population
+# (docs/LOOP16.md Phase 2, 336,208 addresses) -- the loop's own stress case,
+# not a fabricated fixture: three DIFFERENT disclosed reserve addresses, so
+# the address-level endpoint_shared_by guard (which counts predecessors of
+# ONE address) cannot catch the sharing on its own.
+BITMEX_RESERVE_1 = "3BMEXbSSrK2K7cRgqxrtqUWfxowBBrW1BE"
+BITMEX_RESERVE_2 = "3BMEX95VgAacEZRJksocYrPzJ328pcSFXG"
+BITMEX_RESERVE_3 = "3BMEXZXWZ2cZ7yS7UBkPNf1dRFRqPzV1xw"
+# Clean of both local corpora (checked directly against both indexes) --
+# UNDESIGNATED_SUSPECT above is the first; these two fill out three unrelated
+# suspects without reusing an OFAC-designated fixture address as a "suspect".
+CLEAN_SUSPECT_2 = "12c6DSiU4Rq3P4ZxziKxzrL5LmMBrzjrJX"
+CLEAN_SUSPECT_3 = "1FeexV6bAHb8ybZjqQMjJrcCrHGW9sb6uF"
+
+
+def test_a_disclosed_wallet_set_shared_across_suspects_is_flagged_even_though_no_single_address_is(tmp_path):
+    """docs/LOOP16.md Phase 4's defect, closed: BitMEX's disclosure is not one
+    address, it is a SET of 336,208. Three unrelated suspects each reaching a
+    DIFFERENT address in that set show endpoint_shared_by == 1 individually --
+    true, and exactly the shape that would silently evade the existing
+    per-address omnibus guard. vasp_shared_by groups by brand instead of by
+    address and must catch this; the report must say so, and this must not be
+    read as proof any of the three is BitMEX's customer."""
+    from cybertrace.integrations import exchange_tags
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+    with EvidenceStore(str(tmp_path / "vaspshare.db")) as store:
+        a = _traced(store, UNDESIGNATED_SUSPECT,
+                   {"counterparty_addresses": [BITMEX_RESERVE_1],
+                    "sent_to_addresses": [BITMEX_RESERVE_1]})
+        b = _traced(store, CLEAN_SUSPECT_2,
+                   {"counterparty_addresses": [BITMEX_RESERVE_2],
+                    "sent_to_addresses": [BITMEX_RESERVE_2]})
+        c = _traced(store, CLEAN_SUSPECT_3,
+                   {"counterparty_addresses": [BITMEX_RESERVE_3],
+                    "sent_to_addresses": [BITMEX_RESERVE_3]})
+        paths = {w["entity_id"]: w for w in wallet_exchange_paths(store)}
+
+        # The address-level guard sees no sharing at all -- each suspect hit a
+        # different address, so this is genuinely 1 for every one of them.
+        assert paths[a]["endpoint_shared_by"] == 1
+        assert paths[b]["endpoint_shared_by"] == 1
+        assert paths[c]["endpoint_shared_by"] == 1
+
+        # The brand-level guard must catch what the address-level one cannot.
+        assert paths[a]["vasp_shared_by"] == 3
+        assert paths[b]["vasp_shared_by"] == 3
+        assert paths[c]["vasp_shared_by"] == 3
+
+        text = " ".join(wallet_path_flags(store, paths[a]))
+        assert "shared/omnibus disclosed wallet SET" in text
+        assert "not evidence this address is BitMEX's customer" in text
+
+        # Reported, never suppressed and never scored, same as the
+        # address-level omnibus guard's own contract.
+        assert paths[a]["proximity"] == "DIRECT"
+        assert run_correlation(store)["operators"] == []

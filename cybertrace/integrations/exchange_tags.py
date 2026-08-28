@@ -161,6 +161,23 @@ def lookup_address(address: str, currency: str) -> List[Dict[str, Any]]:
              "source": r[4], "pack": r[5]} for r in rows]
 
 
+def _canon_index(addresses: Dict[str, List[str]]) -> Dict[str, str]:
+    """canonical bare address -> the raw value the caller passed in, for every
+    (currency, address) pair this project has a normalizer for. Shared by
+    exchange_labels and vasp_disclosed_labels -- both batch the same way, and
+    both read against the same tags table connecting to the same index."""
+    by_canon: Dict[str, str] = {}
+    for currency, values in addresses.items():
+        norm_fn = _NORMALIZERS.get(currency.upper())
+        if norm_fn is None:
+            continue
+        for raw in values:
+            canon = norm_fn(raw)
+            if canon is not None:
+                by_canon.setdefault(canon.split(":", 1)[1], raw)
+    return by_canon
+
+
 def exchange_labels(addresses: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]]:
     """{raw address -> {"label", "pack"}} for every input this corpus tags
     category='exchange'. `addresses` is {"BTC": [...], "ETH": [...], ...}.
@@ -184,15 +201,7 @@ def exchange_labels(addresses: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]
     """
     if not (available() and index_available()):
         return {}
-    by_canon: Dict[str, str] = {}
-    for currency, values in addresses.items():
-        norm_fn = _NORMALIZERS.get(currency.upper())
-        if norm_fn is None:
-            continue
-        for raw in values:
-            canon = norm_fn(raw)
-            if canon is not None:
-                by_canon.setdefault(canon.split(":", 1)[1], raw)
+    by_canon = _canon_index(addresses)
     if not by_canon:
         return {}
 
@@ -212,6 +221,69 @@ def exchange_labels(addresses: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]
                 # index returns them -- a second tagpack naming the same
                 # exchange adds no information worth a merge policy here.
                 out.setdefault(raw, {"label": label, "pack": pack})
+    finally:
+        conn.close()
+    return out
+
+
+# docs/LOOP16.md Phase 2/3: of this corpus's 21 distinct `source` domains for
+# category='exchange' tags, these two are the ones independently verified
+# live that loop -- not merely domain-plausible, but cross-checked against a
+# second, independent record: Bitfinex's own verified X/Twitter account
+# linking this exact GitHub repo, and contemporaneous news coverage (CoinDesk
+# and others) of BitMEX's November 2022 proof-of-reserves publication.
+# Binance/Huobi/KuCoin/Deribit/Bybit/OKX are real-looking by domain pattern
+# alone and were explicitly left unverified (docs/LOOP16.md Phase 9) --
+# adding them here on domain-plausibility would be exactly the unearned
+# precision this project's REGULATORY_ATTESTED/TAG_ATTESTED split already
+# refuses. Extend this dict only after independently corroborating a new
+# source the way Phase 2 corroborated these two -- not on domain pattern alone.
+_VASP_DISCLOSED_SOURCES: Dict[str, str] = {
+    "https://github.com/bitfinexcom/pub/blob/main/wallets.txt": "Bitfinex",
+    "https://s3-eu-west-1.amazonaws.com/public.bitmex.com/data/porl/"
+    "20221115-reserves-763269-20221115D113036434534000.yaml": "BitMEX",
+}
+
+
+def vasp_disclosed_labels(addresses: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]]:
+    """{raw address -> {"brand", "role", "source"}} for every input tagged
+    under a `source` this project has independently verified (see
+    _VASP_DISCLOSED_SOURCES, docs/LOOP16.md Phase 2) as the VASP's OWN
+    publication of the address -- not a third party's guess about which VASP
+    an address belongs to.
+
+    `role` is this corpus's `label` text (e.g. "bitfinex BTC cold wallet",
+    "bitmex reserve wallet") -- the disclosure's own description of what kind
+    of wallet this is, not this project's inference.
+
+    Same batching, degradation, and safety contract as exchange_labels:
+    returns {} when the archive/index is absent, and a VASP disclosing an
+    address is still not proof it owns every address that transacts with it
+    -- the caller must never write this as an EXCHANGE_DEPOSIT edge either.
+    """
+    if not (available() and index_available()):
+        return {}
+    by_canon = _canon_index(addresses)
+    if not by_canon:
+        return {}
+
+    out: Dict[str, Dict[str, Any]] = {}
+    conn = sqlite3.connect(f"file:{INDEX_PATH}?mode=ro", uri=True)
+    try:
+        keys = list(by_canon)
+        sources = list(_VASP_DISCLOSED_SOURCES)
+        source_marks = ",".join("?" * len(sources))
+        for i in range(0, len(keys), 400):        # SQLITE_MAX_VARIABLE_NUMBER
+            chunk = keys[i:i + 400]
+            marks = ",".join("?" * len(chunk))
+            for addr, label, source in conn.execute(
+                    f"SELECT address, label, source FROM tags "
+                    f"WHERE address IN ({marks}) AND lower(category)='exchange' "
+                    f"AND source IN ({source_marks})",
+                    tuple(chunk) + tuple(sources)):
+                raw = by_canon[addr]
+                out.setdefault(raw, {"brand": _VASP_DISCLOSED_SOURCES[source],
+                                     "role": label, "source": source})
     finally:
         conn.close()
     return out

@@ -265,9 +265,10 @@ def _wallet_exchange(ctx: dict) -> dict:
             "limitations": [
                 "ANALYST_ASSERTED endpoints are a human's cited claim; REGULATORY_ATTESTED "
                 "endpoints are an OFAC SDN designation of that address (not always a VASP -- "
-                "some designated parties are a market or a mixer); TAG_ATTESTED endpoints are "
-                "a third party's public tagpack entry. None is CyberTrace's own finding, and "
-                "none is written as an edge.",
+                "some designated parties are a market or a mixer); VASP_DISCLOSED endpoints "
+                "are on the VASP's own verified published wallet list; TAG_ATTESTED endpoints "
+                "are a third party's public tagpack entry. None is CyberTrace's own finding, "
+                "and none is written as an edge.",
                 "Hop distance is reachability, not proof of an intentional transfer.",
                 "Direction UNKNOWN means the capture never recorded which way value "
                 "moved — it is not evidence of a deposit."]}
