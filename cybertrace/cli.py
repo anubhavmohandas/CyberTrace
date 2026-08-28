@@ -341,8 +341,10 @@ def watch(db_path: str, targets, discover: bool, output_format: str,
                 for row in report['discovered'][:20]:
                     click.echo(f"    {row['service'][:28]:<30} {row['onion']}")
             for w in wallet_exchange_paths(store):
-                click.echo(f"\n  [WALLET] {w['value']} -> {w['hops']} hop(s) -> "
-                           f"{w['exchange']} (confidence {w['confidence']:.2f})")
+                click.echo(f"\n  [WALLET] {w['value']} -> {w['proximity']} "
+                           f"({w['hops']} hop(s), flow {w['direction']}) -> "
+                           f"{w['exchange']} [{w['attribution']}] "
+                           f"(reachability {w['confidence']:.2f})")
 
         if dossier_path:
             from .correlate import render_dossier_html, run_correlation
@@ -435,8 +437,15 @@ def label_exchange_cmd(address: str, exchange: str, db_path: str,
 def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: str):
     """
     Trace a wallet already searched into this case: its path (if any) to the
-    nearest analyst-labeled exchange, and every third-party flag already on
+    nearest VASP-attributed address, and every third-party flag already on
     record for each address along that path.
+
+    The endpoint is attributed either ANALYST_ASSERTED (label-exchange, a
+    human's cited claim) or TAG_ATTESTED (a public GraphSense tagpack entry
+    read offline, never verified by CyberTrace and never written as an
+    EXCHANGE_DEPOSIT edge). Proximity is AT_VASP / DIRECT / INDIRECT and fund
+    flow is TO_VASP / FROM_VASP / UNKNOWN — UNKNOWN means the capture recorded
+    that a transaction happened, not which way value moved.
 
     Reports findings only — no risk score. Each flag names the address and
     the evidence it came from; label-exchange and search results feed this,
@@ -464,12 +473,15 @@ def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: s
     if len(report['path']) > 1:
         click.echo("Path: " + " -> ".join(report['path']))
     if report['exchange']:
-        click.echo(f"Nearest labeled exchange: {report['exchange']} "
-                  f"({report['hops']} hop(s), reachability confidence "
-                  f"{report['exchange_confidence']:.2f})")
+        click.echo(f"Nearest VASP: {report['exchange']}")
+        click.echo(f"  proximity:   {report['proximity']} ({report['hops']} hop(s))")
+        click.echo(f"  attribution: {report['attribution']} "
+                  f"({report['attribution_source']})")
+        click.echo(f"  fund flow:   {report['direction']}")
+        click.echo(f"  reachability confidence: {report['exchange_confidence']:.2f} "
+                  f"(hop decay, not a probability)")
     else:
-        click.echo("Nearest labeled exchange: none found within "
-                  f"{max_hops} hop(s)")
+        click.echo(f"Nearest VASP: none found within {max_hops} hop(s)")
     if report['flags']:
         click.echo("Flags:")
         for flag in report['flags']:

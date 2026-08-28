@@ -203,7 +203,13 @@ def test_trace_wallet_reports_path_and_flags(tmp_path):
     assert report['hops'] == 1
     assert any('reported for abuse' in f and 'PHISHING' in f for f in report['flags'])
     assert any('ransomware' in f for f in report['flags'])
-    assert any('layering' in f for f in report['flags'])
+    # See test_correlate.test_wallet_trace_report_surfaces_flags_from_metadata_
+    # already_on_record: "layering" named a typology the engine cannot detect.
+    # What the CLI has to carry instead is proximity, who attributed the VASP,
+    # and whether value actually moved toward it.
+    assert report['proximity'] == 'DIRECT'
+    assert report['attribution'] == 'ANALYST_ASSERTED'
+    assert report['direction'] == 'UNKNOWN'
 
 
 def test_trace_wallet_unsearched_address_fails_loudly(tmp_path):

@@ -195,6 +195,71 @@ class TestBitcoinModuleEtherscan:
         assert peer in result.related
 
 
+class TestBitcoinModuleFundFlowDirection:
+    """Which SIDE of a transaction the address was on. A deposit into a VASP
+    and a payout from one are the same counterparty edge and opposite
+    investigative facts, so the collectors that can tell them apart must, and
+    `counterparty_addresses` must keep its original direction-blind value --
+    every saved capture and every corpus run was scored on that field."""
+
+    BTC = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+    PAYEE = "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+    PAYER = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+
+    def _run(self, txs):
+        import asyncio
+        module = BitcoinModule()
+
+        async def fake_fetch_json(url, **kwargs):
+            return {'address': self.BTC, 'final_balance': 0, 'total_received': 0,
+                    'total_sent': 0, 'n_tx': len(txs), 'txs': txs}
+        module.fetch_json = fake_fetch_json
+        return asyncio.run(module._check_blockchain_com(self.BTC)).data
+
+    def test_spending_from_the_address_makes_every_output_a_sent_to(self):
+        data = self._run([{
+            'time': 1700000000,
+            'inputs': [{'prev_out': {'addr': self.BTC}}],
+            'out': [{'addr': self.PAYEE}],
+        }])
+        assert data['sent_to_addresses'] == [self.PAYEE]
+        assert data['received_from_addresses'] == []
+
+    def test_being_paid_makes_every_input_a_received_from(self):
+        data = self._run([{
+            'time': 1700000000,
+            'inputs': [{'prev_out': {'addr': self.PAYER}}],
+            'out': [{'addr': self.BTC}],
+        }])
+        assert data['received_from_addresses'] == [self.PAYER]
+        assert data['sent_to_addresses'] == []
+
+    def test_counterparty_addresses_keep_their_original_direction_blind_value(self):
+        """The regression that matters: adding direction must not silently
+        re-scope the field the whole corpus was scored on."""
+        data = self._run([
+            {'time': 1700000000,
+             'inputs': [{'prev_out': {'addr': self.BTC}}],
+             'out': [{'addr': self.PAYEE}]},
+            {'time': 1700000001,
+             'inputs': [{'prev_out': {'addr': self.PAYER}}],
+             'out': [{'addr': self.BTC}]},
+        ])
+        assert data['counterparty_addresses'] == sorted([self.PAYEE, self.PAYER])
+
+    def test_a_cospend_is_never_reported_as_a_direction(self):
+        """Co-spend is a control claim and travels its own path; it must not
+        also arrive as a flow edge, or one transaction would evidence both."""
+        data = self._run([{
+            'time': 1700000000,
+            'inputs': [{'prev_out': {'addr': self.BTC}}, {'prev_out': {'addr': self.PAYER}}],
+            'out': [{'addr': self.PAYEE}],
+        }])
+        assert data['cospend_addresses'] == [self.PAYER]
+        assert self.PAYER not in data['sent_to_addresses']
+        assert self.PAYER not in data['received_from_addresses']
+
+
 class TestBitcoinModuleEllipticpp:
     """Local-index lookup, no network -- degrades the same way chainabuse does
     without a key, but on dataset/index availability instead of a config key.

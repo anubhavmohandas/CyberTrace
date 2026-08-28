@@ -8,8 +8,10 @@ import base64
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 from cybertrace.correlate import (
-    FUNNELS,
+    FUNNELS, SHARED_ARTIFACTS,
     COMMON_ARTIFACT_FLOOR, EXCHANGE_HOP_DECAY, LEAD_FLOOR, RETIRED_ASSESSMENT,
     SUCCESSOR_SIGNALS, UNJOINED_CONTEXT,
     canonical_entity_key, candidate_infra, candidate_ips, candidate_operators,
@@ -19,7 +21,8 @@ from cybertrace.correlate import (
     entity_discrimination, entity_funnel_profile, evidence_chain, feedback_discrimination,
     market_artifact_map, markets_for_entity,
     market_windows, render_dossier_html, render_html, render_markdown, run_correlation,
-    save_candidates, username_aliases, wallet_exchange_paths, wallet_trace_report,
+    save_candidates, username_aliases, wallet_exchange_paths, wallet_path_flags,
+    wallet_trace_report,
 )
 from cybertrace.evidence import EvidenceStore, enrich_bitcoin, enrich_email, ingest, label_exchange
 from cybertrace.modules.base import ModuleResult, SourceResult
@@ -1134,11 +1137,119 @@ def test_transacted_with_never_links_two_unrelated_markets(tmp_path):
 def test_transacted_with_and_exchange_deposit_are_in_no_funnel():
     """Structural non-attribution, not a runtime gate: unlike shared_domain/
     shared_favicon/shared_ip (NON_ATTRIBUTIVE_SIGNALS, checked at scoring
-    time), these two relationship types are simply never assigned to a funnel
+    time), these relationship types are simply never assigned to a funnel
     at all -- the same mechanism DISCOVERED_VIA and HAS_FINGERPRINT rely on."""
     funnelled = {rtype for rtypes in FUNNELS.values() for rtype in rtypes}
     assert "TRANSACTED_WITH" not in funnelled
     assert "EXCHANGE_DEPOSIT" not in funnelled
+    # Knowing WHICH WAY you were paid is not knowing who controls the address:
+    # SENT_FUNDS_TO is TRANSACTED_WITH with one more fact on it, not a
+    # stronger evidence class, so it travels exactly as far -- nowhere.
+    assert "SENT_FUNDS_TO" not in funnelled
+    assert "SENT_FUNDS_TO" not in dict(SHARED_ARTIFACTS).values()
+
+
+def test_sent_funds_to_never_links_two_unrelated_markets(tmp_path):
+    """Two markets that both paid the same third address -- an exchange
+    deposit, a hosting bill, a shared supplier. Recording the DIRECTION of
+    those payments must not turn a non-signal into one."""
+    payee = "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, seen=JAN, bitcoin_addresses=[BTC_VALID]), store)
+        ingest(_result(ONION_B, seen=JAN, bitcoin_addresses=[BTC_OTHER]), store)
+
+        for value in (BTC_VALID, BTC_OTHER):
+            addr = store.find_entity("BTC_ADDRESS", value)
+            target = store.upsert_target("btc:" + value)
+            sid = store.insert_snapshot(target, {}, "bitcoin")
+            enrich_bitcoin(store, sid, addr,
+                           {"address": value, "sent_to_addresses": [payee]}, "bitcoin")
+
+        payee_id = store.find_entity("BTC_ADDRESS", payee)
+        assert entity_funnel_profile(store, payee_id)["total_conf"] == 0.0
+
+        results = run_correlation(store)
+        assert all(s["relation"] is None for s in results["successors"])
+        assert results["operators"] == []
+
+
+def test_direction_is_reported_from_the_edge_not_assumed(tmp_path):
+    """The distinction the whole VASP report turns on. Same two addresses,
+    same single hop, opposite facts -- one is a deposit an LEA can ask the
+    exchange about, the other is the exchange paying the suspect."""
+    with EvidenceStore(str(tmp_path / "out.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        sid = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": BTC_VALID, "sent_to_addresses": [BTC_OTHER]}, "bitcoin")
+        label_exchange(store, BTC_OTHER, "Test Exchange")
+        hit = next(w for w in wallet_exchange_paths(store) if w["entity_id"] == addr)
+        assert hit["direction"] == "TO_VASP"
+        assert hit["proximity"] == "DIRECT"
+
+    with EvidenceStore(str(tmp_path / "in.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        sid = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": BTC_VALID, "received_from_addresses": [BTC_OTHER]}, "bitcoin")
+        label_exchange(store, BTC_OTHER, "Test Exchange")
+        hit = next(w for w in wallet_exchange_paths(store) if w["entity_id"] == addr)
+        assert hit["direction"] == "FROM_VASP"
+        assert "not a deposit" in " ".join(wallet_path_flags(store, hit))
+
+
+def test_a_tag_attested_vasp_is_reachable_but_never_becomes_an_edge(tmp_path):
+    """Automatic VASP identification, and the line it must not cross.
+
+    The shipped GraphSense corpus names this address as Binance's, so the
+    trace must reach it -- refusing to would leave a shipped dataset unread
+    and the central requirement unmet. But the engine must NOT write the
+    EXCHANGE_DEPOSIT edge label_exchange exists to gate: a third party's
+    public claim is a lead to check, not CyberTrace's own finding, and the
+    two must stay separable in the output an analyst reads.
+    """
+    from cybertrace.integrations import exchange_tags
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+    binance = "34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo"     # tagged category=exchange
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        sid = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": BTC_VALID, "sent_to_addresses": [binance]}, "bitcoin")
+
+        hit = next(w for w in wallet_exchange_paths(store) if w["entity_id"] == addr)
+        assert hit["attribution"] == "TAG_ATTESTED"
+        assert "GraphSense" in hit["attribution_source"]
+        assert hit["proximity"] == "DIRECT"
+        assert hit["direction"] == "TO_VASP"
+
+        # The boundary: no edge, and no EXCHANGE entity minted by the engine.
+        assert store._all("SELECT 1 FROM relationships WHERE rtype='EXCHANGE_DEPOSIT'") == []
+        assert store._all("SELECT 1 FROM entities WHERE etype='EXCHANGE'") == []
+
+        # And it still cannot score anybody.
+        assert run_correlation(store)["operators"] == []
+
+
+def test_an_analyst_label_outranks_a_third_party_tag_on_one_address(tmp_path):
+    """Both sources naming the same address must not read as two findings, and
+    the analyst -- the one who has to stand behind it -- is the one cited."""
+    from cybertrace.integrations import exchange_tags
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+    binance = "34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo"
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        sid = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": BTC_VALID, "sent_to_addresses": [binance]}, "bitcoin")
+        label_exchange(store, binance, "Binance", analyst="jdoe", note="court filing")
+
+        hits = [w for w in wallet_exchange_paths(store) if w["entity_id"] == addr]
+        assert len(hits) == 1
+        assert hits[0]["attribution"] == "ANALYST_ASSERTED"
+        assert "jdoe" in hits[0]["attribution_source"]
 
 
 # --- wallet -> exchange reachability ------------------------------------------
@@ -1167,9 +1278,14 @@ def test_wallet_exchange_paths_direct_hit_tron(tmp_path):
 
         paths = wallet_exchange_paths(store)
         assert len(paths) == 1
-        # "value" is entities.normalized_value throughout correlate.py (see
-        # build_dossier) -- the lowercase, prefixed dedup key, not raw_value.
-        assert paths[0]["value"] == f"trx:{TRX_VALID.lower()}"
+        # The address, not its index key. `value` used to be
+        # entities.normalized_value -- lowercase and prefixed, per upsert_entity's
+        # `key = norm.lower()` -- which dedups correctly and is not a base58
+        # address anyone can paste into an explorer or attach to a disclosure
+        # request. This field is what the CLI, investigator, markdown brief and
+        # GUI export all print, so it has to be the real thing.
+        assert paths[0]["value"] == TRX_VALID
+        assert paths[0]["value"] != f"trx:{TRX_VALID.lower()}"
         assert paths[0]["hops"] == 0
 
 
@@ -1287,9 +1403,19 @@ def test_wallet_trace_report_surfaces_flags_from_metadata_already_on_record(tmp_
         assert report["exchange_confidence"] == round(EXCHANGE_HOP_DECAY ** 1, 4)
         assert any(BTC_VALID in f and "PHISHING" in f for f in report["flags"])
         assert any(BTC_VALID in f and "ransomware" in f and "ofac" in f for f in report["flags"])
-        assert any("1 hop(s) of layering" in f for f in report["flags"])
         assert any("test exchange" in f for f in report["flags"])
         assert report["evidence_ids"]
+
+        # One hop is one hop. The flag used to call it "1 hop(s) of layering",
+        # which names a laundering typology this engine does not detect -- and
+        # said nothing about the two facts an LEA request actually turns on.
+        assert not any("layering" in f for f in report["flags"])
+        assert report["proximity"] == "DIRECT"
+        assert report["attribution"] == "ANALYST_ASSERTED"
+        # A counterparty capture recorded that a transaction happened, never
+        # which way value moved, so this must not read as a deposit.
+        assert report["direction"] == "UNKNOWN"
+        assert any("not a deposit" in f for f in report["flags"])
 
 
 def test_wallet_trace_report_with_no_metadata_and_no_path_is_still_honest(tmp_path):

@@ -117,18 +117,35 @@ class BitcoinModule(BaseModule):
             # 'connected' bag) would cluster every customer of a market into the
             # operator's wallet. `connected_addresses` stays for callers that
             # only want "addresses seen nearby", now flagged as the weak set.
+            # direction: which SIDE of the transaction this address was on.
+            # A UTXO spend needs the address's own key, so an address in the
+            # inputs PAID and every output is somewhere its value went; an
+            # address only in the outputs was PAID and the inputs are where the
+            # value came from. `counterparty_addresses` deliberately keeps its
+            # original direction-blind computation -- every saved capture and
+            # every corpus run was scored on it -- and the two directed sets
+            # are added beside it. See evidence.enrich_bitcoin: the undirected
+            # set stays TRANSACTED_WITH, these become SENT_FUNDS_TO.
             cospend, counterparty = set(), set()
+            sent_to, received_from = set(), set()
             for tx in txs[:10]:
                 inputs = {inp.get('prev_out', {}).get('addr') for inp in tx.get('inputs', [])}
                 inputs.discard(None)
+                outs = {o.get('addr') for o in tx.get('out', [])
+                        if o.get('addr') and o.get('addr') != address}
                 if address in inputs and len(inputs) > 1:
                     cospend |= inputs - {address}
                 else:
                     counterparty |= inputs - {address}
-                counterparty |= {o.get('addr') for o in tx.get('out', [])
-                                 if o.get('addr') and o.get('addr') != address}
+                counterparty |= outs
+                if address in inputs:
+                    sent_to |= outs
+                else:
+                    received_from |= inputs - {address}
             parsed['cospend_addresses'] = sorted(cospend)[:20]
             parsed['counterparty_addresses'] = sorted(counterparty - cospend)[:20]
+            parsed['sent_to_addresses'] = sorted(sent_to - cospend)[:20]
+            parsed['received_from_addresses'] = sorted(received_from - cospend)[:20]
             parsed['connected_addresses'] = sorted(cospend | counterparty)[:20]
         
         return SourceResult(
@@ -511,6 +528,13 @@ class BitcoinModule(BaseModule):
 
         txs = data['result']
         counterparties: set = set()
+        # Account-based, so direction is explicit in the transaction itself:
+        # from/to are the payer and the payee. Kept beside the direction-blind
+        # `counterparty_addresses` rather than replacing it -- see
+        # _check_blockchain_com's own note.
+        sent_to: set = set()
+        received_from: set = set()
+        me = address.lower()
         first_seen = last_seen = None
         for tx in txs:
             ts = tx.get('timeStamp')
@@ -518,8 +542,14 @@ class BitcoinModule(BaseModule):
                 iso = datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
                 first_seen = iso if first_seen is None else min(first_seen, iso)
                 last_seen = iso if last_seen is None else max(last_seen, iso)
+            frm = (tx.get('from') or '').lower()
+            to = (tx.get('to') or '').lower()
+            if frm == me and to and to != me:
+                sent_to.add(to)
+            elif to == me and frm and frm != me:
+                received_from.add(frm)
             for peer in (tx.get('from'), tx.get('to')):
-                if peer and peer.lower() != address.lower():
+                if peer and peer.lower() != me:
                     counterparties.add(peer.lower())
 
         peers = sorted(counterparties)[:20]
@@ -529,6 +559,8 @@ class BitcoinModule(BaseModule):
                 'first_seen': first_seen,
                 'last_seen': last_seen,
                 'counterparty_addresses': peers,
+                'sent_to_addresses': sorted(sent_to)[:20],
+                'received_from_addresses': sorted(received_from)[:20],
                 'connected_addresses': peers,
             },
         )
@@ -554,6 +586,13 @@ class BitcoinModule(BaseModule):
             # wallet toward a labeled exchange address (evidence.enrich_bitcoin
             # writes these as TRANSACTED_WITH, never PART_OF_CLUSTER).
             'counterparty_addresses': [],
+            # The same peers split by which way the value actually moved. A
+            # deposit into a VASP and a payout from one are the same
+            # counterparty edge and opposite investigative facts, so the two
+            # are carried apart rather than reconstructed later -- see
+            # evidence.enrich_bitcoin's SENT_FUNDS_TO branch.
+            'sent_to_addresses': [],
+            'received_from_addresses': [],
         }
         
         # Aggregate from sources
@@ -625,5 +664,9 @@ class BitcoinModule(BaseModule):
                 summary['cospend_addresses'] = data['cospend_addresses']
             if data.get('counterparty_addresses'):
                 summary['counterparty_addresses'] = data['counterparty_addresses']
+            if data.get('sent_to_addresses'):
+                summary['sent_to_addresses'] = data['sent_to_addresses']
+            if data.get('received_from_addresses'):
+                summary['received_from_addresses'] = data['received_from_addresses']
 
         return summary

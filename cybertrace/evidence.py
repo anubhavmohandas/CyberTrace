@@ -187,7 +187,7 @@ RELATIONSHIP_TYPES = {
     "USES_PGP", "USES_EMAIL", "USES_USERNAME", "USES_TELEGRAM", "USES_PHONE",
     "SIGNS_WITH", "ASSOCIATED_WITH",
     "USES_BTC", "USES_XMR", "USES_ETH", "USES_TRX", "PART_OF_CLUSTER",
-    "TRANSACTED_WITH", "EXCHANGE_DEPOSIT",
+    "TRANSACTED_WITH", "SENT_FUNDS_TO", "EXCHANGE_DEPOSIT",
     "HOSTED_ON", "RESOLVES_TO", "BELONGS_TO_ASN", "OWNED_BY",
     "USES_CERT", "USES_NS", "USES_ANALYTICS", "CANDIDATE_IP", "LINKS_TO",
     "HAS_FINGERPRINT",
@@ -215,6 +215,19 @@ RELATIONSHIP_TYPES = {
 #                   purpose: being paid proves a transaction happened, not
 #                   shared control -- see enrich_bitcoin. Reachability only;
 #                   never a funnel signal, never a successor signal.
+#   SENT_FUNDS_TO   payer -> payee. The SAME reachability class as
+#                   TRANSACTED_WITH -- paying an address is still not
+#                   controlling it, so this is in no funnel either -- with the
+#                   one fact TRANSACTED_WITH throws away: which way the value
+#                   moved. A deposit INTO a VASP and a payout FROM one are the
+#                   same counterparty edge and opposite investigative facts,
+#                   and only the first is a deposit an LEA can ask a VASP
+#                   about. Written only when the collector actually observed
+#                   the side the address was on (see bitcoin_module's
+#                   sent_to_addresses / received_from_addresses); a capture
+#                   that only ever knew "these two were in one transaction"
+#                   stays TRANSACTED_WITH and is reported as direction
+#                   UNKNOWN rather than guessed at.
 #   EXCHANGE_DEPOSIT address -> EXCHANGE. Asserted by an analyst (evidence.
 #                   label_exchange), never inferred by the engine -- an
 #                   exchange label is a citation, not a finding.
@@ -1527,6 +1540,32 @@ def enrich_bitcoin(store: EvidenceStore, snapshot_id: str, addr_id: str, summary
         rel = store.upsert_relationship(addr_id, peer_id, "TRANSACTED_WITH",
                                         source_label=collector, observed_at=observed_at)
         store.add_evidence(rel, [obs], note="counterparty in a shared transaction")
+
+    # The same peers again where the collector knew which way value moved,
+    # oriented payer -> payee. Deliberately additive: TRANSACTED_WITH above is
+    # left exactly as it was, so every saved capture and every corpus run keeps
+    # the meaning it was scored under, and a store that has both simply knows
+    # more about the same pair. Same weight class -- being paid is not control
+    # either way, and SENT_FUNDS_TO is in no funnel (see correlate.FUNNELS).
+    # What it buys is the one distinction "nearest VASP" cannot be honest
+    # without: whether the suspect DEPOSITED into the exchange or was PAID by
+    # it.
+    for key, subject_is_payer, note in (
+            ("sent_to_addresses", True, "value moved from this address to the peer"),
+            ("received_from_addresses", False, "value moved from the peer to this address")):
+        for peer in (summary.get(key) or [])[:20]:
+            peer_id = store.upsert_entity(etype, str(peer), observed_at=observed_at)
+            if not peer_id or peer_id == addr_id:
+                continue
+            payer, payee = ((addr_id, peer_id) if subject_is_payer
+                            else (peer_id, addr_id))
+            obs = store.insert_observation(
+                snapshot_id, peer_id, method=f"{collector}:flow", section="blockchain",
+                context=f"{note}, {summary.get('address') or ''}",
+                confidence=0.5, observed_at=observed_at)
+            rel = store.upsert_relationship(payer, payee, "SENT_FUNDS_TO",
+                                            source_label=collector, observed_at=observed_at)
+            store.add_evidence(rel, [obs], note=note)
 
 
 # Provenance pseudo-target for facts an analyst asserts directly (as opposed to

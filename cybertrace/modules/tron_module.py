@@ -88,6 +88,12 @@ class TronModule(BaseModule):
                                 error='No data returned')
 
         counterparties: set = set()
+        # owner_address is the party that signed the transfer, so it is the
+        # payer and the other side is the payee -- direction is on the contract
+        # itself. Kept beside the direction-blind `counterparty_addresses`
+        # rather than replacing it; see bitcoin_module._check_blockchain_com.
+        sent_to: set = set()
+        received_from: set = set()
         first_seen = last_seen = None
         for tx in data['data']:
             ts = tx.get('block_timestamp')
@@ -99,13 +105,23 @@ class TronModule(BaseModule):
                 ctype = contract.get('type')
                 value = contract.get('parameter', {}).get('value', {})
                 hex_peers: List[Optional[str]] = []
+                owner = to_addr = None
                 if ctype in ('TransferContract', 'TransferAssetContract'):
                     hex_peers = [value.get('owner_address'), value.get('to_address')]
+                    owner = tron_hex_to_address(value.get('owner_address') or '')
+                    to_addr = tron_hex_to_address(value.get('to_address') or '')
                 elif ctype == 'TriggerSmartContract':
                     hex_peers = [value.get('owner_address')]
+                    owner = tron_hex_to_address(value.get('owner_address') or '')
                     recipient = _decode_trc20_transfer_recipient(value.get('data') or '')
                     if recipient:
                         counterparties.add(recipient)
+                        to_addr = recipient
+                if owner and to_addr and owner != to_addr:
+                    if owner == address:
+                        sent_to.add(to_addr)
+                    elif to_addr == address:
+                        received_from.add(owner)
                 for hex_addr in hex_peers:
                     if not hex_addr:
                         continue
@@ -113,12 +129,16 @@ class TronModule(BaseModule):
                     if addr58:
                         counterparties.add(addr58)
         counterparties.discard(address)
+        sent_to.discard(address)
+        received_from.discard(address)
 
         return SourceResult(source='trongrid_transactions', success=True, data={
             'tx_count': len(data['data']),
             'first_seen': first_seen,
             'last_seen': last_seen,
             'counterparty_addresses': sorted(counterparties)[:20],
+            'sent_to_addresses': sorted(sent_to)[:20],
+            'received_from_addresses': sorted(received_from)[:20],
         })
 
     async def _check_exchange_tags(self, address: str) -> SourceResult:
@@ -162,6 +182,10 @@ class TronModule(BaseModule):
             # happened, not shared control, so this only ever becomes a
             # TRANSACTED_WITH edge, never a cluster/funnel signal.
             'counterparty_addresses': [],
+            # Direction-aware split of the same peers; see
+            # evidence.enrich_bitcoin's SENT_FUNDS_TO branch.
+            'sent_to_addresses': [],
+            'received_from_addresses': [],
             'connected_addresses': [],
         }
 
@@ -183,6 +207,10 @@ class TronModule(BaseModule):
                 summary['counterparty_addresses'] = data['counterparty_addresses']
                 summary['connected_addresses'] = data['counterparty_addresses']
                 result.related.extend(data['counterparty_addresses'][:5])
+            if data.get('sent_to_addresses'):
+                summary['sent_to_addresses'] = data['sent_to_addresses']
+            if data.get('received_from_addresses'):
+                summary['received_from_addresses'] = data['received_from_addresses']
 
             if source == 'exchange_tags' and data.get('tagged'):
                 summary['exchange_tag_categories'] = data.get('categories')

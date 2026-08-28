@@ -57,14 +57,17 @@ FUNNELS: Dict[str, Set[str]] = {
 # tests/test_correlate.py::test_every_evidence_class_travels_exactly_as_far_as_claimed
 # pins this, so wiring it becomes a deliberate edit rather than a quiet one.
 #
-# TRANSACTED_WITH and EXCHANGE_DEPOSIT are out for the same categorical reason
-# shared_ip/shared_domain are gated (NON_ATTRIBUTIVE_SIGNALS below), just
-# structural instead of runtime: being paid by an address is not control
-# (evidence.enrich_bitcoin), and an EXCHANGE_DEPOSIT edge is an analyst's own
-# citation (evidence.label_exchange), never the engine's finding. Neither can
-# score a funnel or a successor pair without a labelled corpus this tool does
-# not have — see wallet_exchange_paths, which reads both purely for
-# reachability and is never folded into entity_funnel_profile.
+# TRANSACTED_WITH, SENT_FUNDS_TO and EXCHANGE_DEPOSIT are out for the same
+# categorical reason shared_ip/shared_domain are gated (NON_ATTRIBUTIVE_SIGNALS
+# below), just structural instead of runtime: being paid by an address is not
+# control (evidence.enrich_bitcoin), knowing which WAY you were paid is not
+# control either — SENT_FUNDS_TO is the same reachability class as
+# TRANSACTED_WITH with one more fact on it, not a stronger one — and an
+# EXCHANGE_DEPOSIT edge is an analyst's own citation
+# (evidence.label_exchange), never the engine's finding. None can score a
+# funnel or a successor pair without a labelled corpus this tool does not have
+# — see wallet_exchange_paths, which reads all three purely for reachability
+# and is never folded into entity_funnel_profile.
 
 # Relative prior per funnel: a reused key is worth more than a referenced host.
 FUNNEL_WEIGHT = {"f1_contact": 1.0, "f2_pgp_reuse": 1.3, "f3_crypto": 1.2,
@@ -621,52 +624,152 @@ def crypto_clusters(store: EvidenceStore) -> Dict[str, str]:
 
 EXCHANGE_HOP_DECAY = 0.75  # prior, not calibrated -- see FUNNEL_WEIGHT's own comment
 
+# entity type -> the currency code the GraphSense tagpack corpus indexes it as.
+_TAG_CURRENCY = {"BTC_ADDRESS": "BTC", "ETH_ADDRESS": "ETH", "TRX_ADDRESS": "TRX"}
+
+# How an endpoint of a trace came to be called an exchange. Kept as two words
+# rather than one confidence number because they are not two points on one
+# scale -- they are two different things a reader has to check differently.
+ANALYST_ASSERTED = "ANALYST_ASSERTED"   # evidence.label_exchange: a human's cited claim
+TAG_ATTESTED = "TAG_ATTESTED"           # a third party's public tagpack entry
+
+# How far the suspect address is from the VASP-attributed address. Named rather
+# than left as a bare hop count because "direct" is the word a disclosure or
+# freezing request turns on, and 1 hop and 3 hops are not the same request.
+AT_VASP, DIRECT, INDIRECT = "AT_VASP", "DIRECT", "INDIRECT"
+
+# Which way value moved across the LAST hop -- the hop that decides whether
+# this is a deposit the VASP received or a payout it made. UNKNOWN is not a
+# hedge: it is what a capture that only recorded "these two were in one
+# transaction" actually supports, and calling that a deposit would be the
+# payment-is-not-control error one level up.
+TO_VASP, FROM_VASP, DIRECTION_UNKNOWN = "TO_VASP", "FROM_VASP", "UNKNOWN"
+
+
+def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, dict]:
+    """entity_id -> the VASP attributed to that address, and how.
+
+    Two independent sources, never merged into one score:
+
+      ANALYST_ASSERTED  an EXCHANGE_DEPOSIT edge, written only by
+                        evidence.label_exchange on an analyst's own cited
+                        say-so. Carries the observations behind the claim.
+      TAG_ATTESTED      the local GraphSense TagPacks corpus tags this address
+                        category='exchange'. A third party's public claim, read
+                        offline, cited by pack name -- and deliberately NOT
+                        written back as an EXCHANGE_DEPOSIT edge, because the
+                        engine asserting an ownership label it did not verify
+                        is the exact move label_exchange exists to prevent.
+
+    An analyst assertion outranks a tag on the same address: the analyst is
+    the one who has to stand behind it.
+    """
+    out: Dict[str, dict] = {}
+
+    raw = {r["entity_id"]: (r["raw_value"] or r["normalized_value"], r["etype"])
+           for r in store._all(
+               "SELECT entity_id, etype, raw_value, normalized_value FROM entities "
+               "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS','TRX_ADDRESS')")}
+    by_currency: Dict[str, List[str]] = defaultdict(list)
+    for entity_id, (value, etype) in raw.items():
+        currency = _TAG_CURRENCY.get(etype)
+        if currency:
+            by_currency[currency].append(value)
+    if by_currency:
+        from .integrations.exchange_tags import exchange_labels
+        tagged = exchange_labels(dict(by_currency))
+        for entity_id, (value, _etype) in raw.items():
+            hit = tagged.get(value)
+            if hit:
+                out[entity_id] = {"exchange": hit["label"], "evidence_ids": [],
+                                  "attribution": TAG_ATTESTED,
+                                  "attribution_source": f"GraphSense tagpack: {hit['pack']}"}
+
+    for r in store._all(
+            "SELECT r.source_entity_id AS addr, e.normalized_value AS exchange, "
+            "       r.source_label, ev.observation_ids FROM relationships r "
+            "JOIN entities e ON e.entity_id = r.target_entity_id "
+            "LEFT JOIN evidence ev ON ev.relationship_id = r.rel_id "
+            "WHERE r.rtype='EXCHANGE_DEPOSIT' AND r.status='ACTIVE'"):
+        out[r["addr"]] = {"exchange": r["exchange"],
+                          "evidence_ids": json.loads(r["observation_ids"] or "[]"),
+                          "attribution": ANALYST_ASSERTED,
+                          "attribution_source": r["source_label"] or "analyst"}
+    return out
+
 
 def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]:
-    """For every address with a path to an analyst-labeled exchange address,
-    over TRANSACTED_WITH + PART_OF_CLUSTER edges (undirected), the shortest hop
-    count, decayed confidence, and the evidence resolving each hop.
+    """For every address with a path to a VASP-attributed address, over
+    TRANSACTED_WITH + SENT_FUNDS_TO + PART_OF_CLUSTER edges (undirected for
+    reachability), the shortest hop count, decayed confidence, the evidence
+    resolving each hop, and three things a hop count alone does not say:
 
-    Never folded into entity_funnel_profile / candidate_operators: reachability
-    is not control, and a wallet must never out-rank an OPERATOR candidate
-    merely because a path to a labeled exchange exists. This is a report for an
-    analyst to act on (see evidence.label_exchange), not a claim the engine
-    makes on its own.
+      attribution  who called the endpoint an exchange -- an analyst's cited
+                   claim, or a third-party tagpack. See _vasp_endpoints.
+      proximity    AT_VASP / DIRECT / INDIRECT. The suspect address IS the
+                   exchange's, transacted with it, or reached it through
+                   intermediaries.
+      direction    TO_VASP / FROM_VASP / UNKNOWN, on the last hop. Depositing
+                   into an exchange and being paid by one are the same
+                   counterparty edge and opposite investigative facts; only
+                   SENT_FUNDS_TO records which, so a path whose last hop is a
+                   direction-blind TRANSACTED_WITH reports UNKNOWN rather than
+                   assuming the useful one.
+
+    Still never folded into entity_funnel_profile / candidate_operators:
+    reachability is not control, an address reaching an exchange is not the
+    exchange's customer, and a tagpack entry is not this engine's finding. This
+    is a report for an analyst to act on, not a claim the engine makes.
     """
     # "evidence_ids" throughout this module means observation ids (what a
     # relationship's evidence row resolves to, per entity_funnel_profile) --
     # not the `evidence` table's own primary key -- so investigator._finalize
     # can resolve every id here the same way it resolves any other claim.
+    #
+    # Each adjacency entry carries the flow marker for that hop: True when the
+    # stored edge points the way we are walking (following the value), False
+    # when we are walking against it, None when the edge never knew.
     adjacency: Dict[str, List[tuple]] = defaultdict(list)
     for r in store._all(
-            "SELECT r.source_entity_id AS a, r.target_entity_id AS b, "
+            "SELECT r.source_entity_id AS a, r.target_entity_id AS b, r.rtype, "
             "       ev.observation_ids FROM relationships r "
             "LEFT JOIN evidence ev ON ev.relationship_id = r.rel_id "
-            "WHERE r.rtype IN ('TRANSACTED_WITH','PART_OF_CLUSTER') AND r.status='ACTIVE'"):
+            "WHERE r.rtype IN ('TRANSACTED_WITH','PART_OF_CLUSTER','SENT_FUNDS_TO') "
+            "AND r.status='ACTIVE'"):
         obs_ids = json.loads(r["observation_ids"] or "[]")
-        adjacency[r["a"]].append((r["b"], obs_ids))
-        adjacency[r["b"]].append((r["a"], obs_ids))
+        directed = r["rtype"] == "SENT_FUNDS_TO"
+        adjacency[r["a"]].append((r["b"], obs_ids, True if directed else None))
+        adjacency[r["b"]].append((r["a"], obs_ids, False if directed else None))
 
-    exchange_of: Dict[str, tuple] = {}
-    for r in store._all(
-            "SELECT r.source_entity_id AS addr, e.normalized_value AS exchange, "
-            "       ev.observation_ids FROM relationships r "
-            "JOIN entities e ON e.entity_id = r.target_entity_id "
-            "LEFT JOIN evidence ev ON ev.relationship_id = r.rel_id "
-            "WHERE r.rtype='EXCHANGE_DEPOSIT' AND r.status='ACTIVE'"):
-        exchange_of[r["addr"]] = (r["exchange"], json.loads(r["observation_ids"] or "[]"))
-
-    values = {r["entity_id"]: r["normalized_value"] for r in store._all(
-        "SELECT entity_id, normalized_value FROM entities "
+    # raw_value, not normalized_value. upsert_entity lowercases the index key
+    # (`key = norm.lower()`), which is correct for dedup and destroys a base58
+    # address: `btc:1fycd8kp9ekittgdyhftzrgzr1qchv4i84` is not something an
+    # analyst can paste into a block explorer or attach to a disclosure
+    # request, and this value is what the CLI, the investigator, the markdown
+    # brief and the GUI export all print. wallet_trace_report already read
+    # raw_value; every other reader was getting the key.
+    values = {r["entity_id"]: (r["raw_value"] or r["normalized_value"])
+              for r in store._all(
+        "SELECT entity_id, normalized_value, raw_value FROM entities "
         "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS','TRX_ADDRESS')")}
+
+    exchange_of = _vasp_endpoints(store, values)
+
+    def _direction(flow: Optional[bool]) -> str:
+        if flow is None:
+            return DIRECTION_UNKNOWN
+        return TO_VASP if flow else FROM_VASP
 
     out = []
     for start in values:
         if start in exchange_of:
-            exchange, obs_ids = exchange_of[start]
-            out.append({"entity_id": start, "value": values[start], "exchange": exchange,
-                       "hops": 0, "confidence": 1.0, "path": [start],
-                       "evidence_ids": obs_ids})
+            end = exchange_of[start]
+            out.append({"entity_id": start, "value": values[start],
+                        "exchange": end["exchange"], "hops": 0, "confidence": 1.0,
+                        "path": [start], "evidence_ids": end["evidence_ids"],
+                        "attribution": end["attribution"],
+                        "attribution_source": end["attribution_source"],
+                        "proximity": AT_VASP, "direction": DIRECTION_UNKNOWN})
             continue
 
         visited = {start}
@@ -675,18 +778,23 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
         for hop in range(1, max_hops + 1):
             next_frontier = []
             for node, path, ev_ids in frontier:
-                for peer, hop_obs in adjacency.get(node, []):
+                for peer, hop_obs, flow in adjacency.get(node, []):
                     if peer in visited:
                         continue
                     visited.add(peer)
                     new_path = path + [peer]
                     new_ev = ev_ids + hop_obs
                     if peer in exchange_of:
-                        exchange, label_obs = exchange_of[peer]
-                        found = {"entity_id": start, "value": values[start], "exchange": exchange,
-                                "hops": hop, "confidence": round(EXCHANGE_HOP_DECAY ** hop, 4),
-                                "path": new_path,
-                                "evidence_ids": new_ev + label_obs}
+                        end = exchange_of[peer]
+                        found = {"entity_id": start, "value": values[start],
+                                 "exchange": end["exchange"], "hops": hop,
+                                 "confidence": round(EXCHANGE_HOP_DECAY ** hop, 4),
+                                 "path": new_path,
+                                 "evidence_ids": new_ev + end["evidence_ids"],
+                                 "attribution": end["attribution"],
+                                 "attribution_source": end["attribution_source"],
+                                 "proximity": DIRECT if hop == 1 else INDIRECT,
+                                 "direction": _direction(flow)}
                         break
                     next_frontier.append((peer, new_path, new_ev))
                 if found:
@@ -742,10 +850,29 @@ def wallet_path_flags(store: EvidenceStore, hit: Optional[dict],
             flags.append(f"{addr}: GraphSense tagpack(s): {', '.join(packs)}")
 
     if hit:
-        if hit["hops"] > 0:
-            flags.append(f"{hit['hops']} hop(s) of layering before reaching a labeled exchange")
-        flags.append(f"reached analyst-labeled exchange: {hit['exchange']} "
-                     f"(reachability confidence {hit['confidence']:.2f})")
+        # Proximity, attribution and direction each answer a different question
+        # an LEA request turns on, so each is stated rather than left implied by
+        # a hop count. "layering" is deliberately NOT said here: intermediate
+        # hops are intermediate hops, and calling them layering asserts a
+        # laundering typology this engine does not detect (see wallet_trace_report).
+        proximity = {AT_VASP: "this address is itself attributed to",
+                     DIRECT: "transacted directly with",
+                     INDIRECT: f"reached, through {max(hit['hops'] - 1, 0)} "
+                               f"intermediary address(es),"}[hit["proximity"]]
+        source = ("analyst-asserted" if hit["attribution"] == ANALYST_ASSERTED
+                  else "third-party tag, not verified by CyberTrace")
+        flags.append(f"{hit['proximity']}: {proximity} {hit['exchange']} "
+                     f"({hit['hops']} hop(s), reachability confidence "
+                     f"{hit['confidence']:.2f})")
+        flags.append(f"VASP attribution is {source}: {hit['attribution_source']}")
+        flags.append({
+            TO_VASP: f"value moved TOWARD {hit['exchange']} on the final hop "
+                     f"— consistent with a deposit",
+            FROM_VASP: f"value moved FROM {hit['exchange']} on the final hop "
+                       f"— a payout, not a deposit",
+            DIRECTION_UNKNOWN: "fund-flow direction on the final hop was never "
+                               "recorded — this is reachability, not a deposit",
+        }[hit["direction"]])
     return flags
 
 
@@ -797,6 +924,10 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4) -
         "hops": hit["hops"] if hit else None,
         "exchange": hit["exchange"] if hit else None,
         "exchange_confidence": hit["confidence"] if hit else None,
+        "attribution": hit["attribution"] if hit else None,
+        "attribution_source": hit["attribution_source"] if hit else None,
+        "proximity": hit["proximity"] if hit else None,
+        "direction": hit["direction"] if hit else None,
         "flags": flags,
         "evidence_ids": hit["evidence_ids"] if hit else [],
     }
@@ -1841,12 +1972,16 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
         lines.append("")
 
     if results["wallet_exchange_paths"]:
-        lines += ["## Wallet → nearest exchange", "",
-                  "_Reachability only — an analyst-labeled exchange address, never an engine "
-                  "finding. Does not affect any candidate's score._", ""]
+        lines += ["## Wallet → nearest VASP", "",
+                  "_Reachability only. The endpoint is either an analyst's cited claim or a "
+                  "third party's public tag — never an engine finding — and does not affect "
+                  "any candidate's score. Direction UNKNOWN means the capture recorded that a "
+                  "transaction happened and not which way value moved: that is not a deposit._",
+                  ""]
         for w in results["wallet_exchange_paths"]:
-            lines.append(f"- `{w['value']}` → {w['hops']} hop(s) → {w['exchange']} "
-                         f"(confidence {w['confidence']:.2f})")
+            lines.append(f"- `{w['value']}` → {w['proximity']} · {w['hops']} hop(s) → "
+                         f"{w['exchange']} · {w['attribution']} ({w['attribution_source']}) · "
+                         f"flow {w['direction']} · reachability {w['confidence']:.2f}")
         lines.append("")
 
     for d in dossiers:
@@ -2073,6 +2208,26 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
                        f"<td>{s['score']:.3f}</td><td class=wrap>"
                        + _esc("; ".join(x["detail"] for x in s.get("signals_detail", [])))
                        + "</td></tr>")
+        out.append("</table>")
+
+    if results.get("wallet_exchange_paths"):
+        out.append("<h2>Wallet → nearest VASP</h2>"
+                   "<p class=dim>Reachability over transaction edges. The endpoint is "
+                   "either an analyst's cited claim (ANALYST_ASSERTED) or a third party's "
+                   "public tagpack entry (TAG_ATTESTED) — never this engine's own finding, "
+                   "and never written as a relationship. Confidence is hop decay, not a "
+                   "probability. Flow UNKNOWN means the capture recorded that a transaction "
+                   "happened and not which way value moved: that is not a deposit.</p>"
+                   "<table><tr><th>wallet</th><th>proximity</th><th>hops</th><th>flow</th>"
+                   "<th>VASP</th><th>attributed by</th><th>reachability</th></tr>")
+        for w in results["wallet_exchange_paths"]:
+            out.append(f"<tr><td class=mono>{_esc(w['value'])}</td>"
+                       f"<td>{_esc(w['proximity'])}</td><td>{w['hops']}</td>"
+                       f"<td>{_esc(w['direction'])}</td>"
+                       f"<td>{_esc(w['exchange'])}</td>"
+                       f"<td class=wrap>{_esc(w['attribution'])} · "
+                       f"{_esc(w['attribution_source'])}</td>"
+                       f"<td>{w['confidence']:.2f}</td></tr>")
         out.append("</table>")
 
     out.append("<h2>Candidates</h2>")

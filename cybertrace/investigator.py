@@ -253,15 +253,22 @@ def _wallet_exchange(ctx: dict) -> dict:
         return _insufficient("No wallet in this case has a recorded path to an "
                              "analyst-labeled exchange address.")
     claims = [{
-        "text": f"`{_short(w['value'], 32)}` is {w['hops']} hop(s) from {w['exchange']} "
-                f"(confidence {w['confidence']:.2f}).",
+        "text": f"`{_short(w['value'], 32)}` — {w['proximity']} to {w['exchange']} "
+                f"({w['hops']} hop(s), flow {w['direction']}, "
+                f"{w['attribution']}: {w['attribution_source']}, "
+                f"reachability {w['confidence']:.2f}).",
         "kind": "INFERRED", "evidence_ids": w["evidence_ids"],
         "candidate_ids": [], "finding_ids": [],
     } for w in paths]
-    return {"answer": "Nearest analyst-labeled exchange for each traced wallet:",
+    return {"answer": "Nearest VASP-attributed address for each traced wallet:",
             "claims": claims,
-            "limitations": ["Exchange labels are analyst-asserted, never inferred by the engine.",
-                            "Hop distance is reachability, not proof of an intentional transfer."]}
+            "limitations": [
+                "ANALYST_ASSERTED endpoints are a human's cited claim; TAG_ATTESTED "
+                "endpoints are a third party's public tagpack entry. Neither is "
+                "CyberTrace's own finding, and neither is written as an edge.",
+                "Hop distance is reachability, not proof of an intentional transfer.",
+                "Direction UNKNOWN means the capture never recorded which way value "
+                "moved — it is not evidence of a deposit."]}
 
 
 def _boundary(ctx: dict, lead: str = "No. ") -> dict:

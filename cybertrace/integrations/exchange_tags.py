@@ -159,3 +159,59 @@ def lookup_address(address: str, currency: str) -> List[Dict[str, Any]]:
         conn.close()
     return [{"currency": r[0], "category": r[1], "label": r[2], "actor": r[3],
              "source": r[4], "pack": r[5]} for r in rows]
+
+
+def exchange_labels(addresses: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]]:
+    """{raw address -> {"label", "pack"}} for every input this corpus tags
+    category='exchange'. `addresses` is {"BTC": [...], "ETH": [...], ...}.
+
+    Batched because the caller (correlate.wallet_exchange_paths) asks about
+    every address in a case at once and lookup_address opens its own
+    connection per call.
+
+    Returns {} -- never raises -- when the archive or its index is absent, so
+    a reader can degrade to "no third-party attribution available" instead of
+    branching on two availability predicates. That is the same degradation
+    contract bitcoin_module._check_exchange_tags already has, moved to where
+    a non-module caller needs it.
+
+    SAFETY: this is the *suggestion* half of nearest-exchange attribution and
+    the module docstring's boundary applies unchanged -- an answer here is a
+    third party's public claim about an address, so a caller must present it
+    as its own attribution class and must never write it as an
+    EXCHANGE_DEPOSIT edge. Only evidence.label_exchange does that, on an
+    analyst's own say-so.
+    """
+    if not (available() and index_available()):
+        return {}
+    by_canon: Dict[str, str] = {}
+    for currency, values in addresses.items():
+        norm_fn = _NORMALIZERS.get(currency.upper())
+        if norm_fn is None:
+            continue
+        for raw in values:
+            canon = norm_fn(raw)
+            if canon is not None:
+                by_canon.setdefault(canon.split(":", 1)[1], raw)
+    if not by_canon:
+        return {}
+
+    out: Dict[str, Dict[str, Any]] = {}
+    conn = sqlite3.connect(f"file:{INDEX_PATH}?mode=ro", uri=True)
+    try:
+        keys = list(by_canon)
+        for i in range(0, len(keys), 400):        # SQLITE_MAX_VARIABLE_NUMBER
+            chunk = keys[i:i + 400]
+            marks = ",".join("?" * len(chunk))
+            for addr, label, pack in conn.execute(
+                    f"SELECT address, label, pack FROM tags "
+                    f"WHERE address IN ({marks}) AND lower(category)='exchange'",
+                    tuple(chunk)):
+                raw = by_canon[addr]
+                # First tag wins, and packs are read in whatever order the
+                # index returns them -- a second tagpack naming the same
+                # exchange adds no information worth a merge policy here.
+                out.setdefault(raw, {"label": label, "pack": pack})
+    finally:
+        conn.close()
+    return out
