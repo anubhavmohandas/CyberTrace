@@ -450,10 +450,12 @@ def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: s
     nearest VASP-attributed address, and every third-party flag already on
     record for each address along that path.
 
-    The endpoint is attributed either ANALYST_ASSERTED (label-exchange, a
-    human's cited claim) or TAG_ATTESTED (a public GraphSense tagpack entry
-    read offline, never verified by CyberTrace and never written as an
-    EXCHANGE_DEPOSIT edge). Proximity is AT_VASP / DIRECT / INDIRECT and fund
+    The endpoint is attributed ANALYST_ASSERTED (label-exchange, a human's
+    cited claim), REGULATORY_ATTESTED (an OFAC SDN digital-currency-address
+    record, read offline -- not always a VASP, some designated parties are a
+    market or a mixer), or TAG_ATTESTED (a public GraphSense tagpack entry
+    read offline) -- none verified by CyberTrace and none written as an
+    EXCHANGE_DEPOSIT edge. Proximity is AT_VASP / DIRECT / INDIRECT and fund
     flow is TO_VASP / FROM_VASP / UNKNOWN — UNKNOWN means the capture recorded
     that a transaction happened, not which way value moved.
 

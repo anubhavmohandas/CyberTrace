@@ -7,7 +7,7 @@ import inspect
 
 import pytest
 
-from cybertrace.integrations import ellipticpp, evolution, exchange_tags
+from cybertrace.integrations import ellipticpp, evolution, exchange_tags, ofac
 
 
 class TestEvidenceStoreIsUnreachable:
@@ -16,7 +16,7 @@ class TestEvidenceStoreIsUnreachable:
     adapter must fail this test, the same way evidence.py:270 documents
     CERTIFICATE staying unwired rather than leaving it to be noticed later."""
 
-    @pytest.mark.parametrize("module", [ellipticpp, evolution, exchange_tags])
+    @pytest.mark.parametrize("module", [ellipticpp, evolution, exchange_tags, ofac])
     def test_adapter_never_imports_the_evidence_store(self, module):
         # Checks the module's actual namespace, not its docstring prose (which
         # names EvidenceStore/ingest deliberately, to document the boundary).
@@ -43,6 +43,12 @@ class TestManifestProvenance:
         assert m["license"] == "MIT"
         assert m["source_url"]
         assert m["pack_count"] > 0
+
+    def test_ofac_manifest_declares_public_domain(self):
+        m = ofac.manifest()
+        assert m["license"] == "US Government Work"
+        assert m["source_url"]
+        assert m["publication_date"]
 
 
 class TestRecordsCarryDatasetLabelNotAttribution:
@@ -215,3 +221,42 @@ class TestExchangeTagsIndex:
         monkeypatch.setattr(exchange_tags, "index_available", lambda: False)
         with pytest.raises(RuntimeError, match="build_index"):
             exchange_tags.lookup_address("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", "BTC")
+
+
+class TestOfacIndex:
+    """Mirrors TestExchangeTagsIndex, over the OFAC SDN Advanced XML adapter.
+    Uses two addresses independently verified in docs/LOOP14.md: Grinex's
+    TRON address (confirmed real and active via TronGrid, a source unrelated
+    to both OFAC and GraphSense) and Blender.io's Bitcoin address."""
+
+    @pytest.mark.skipif(not ofac.index_available(),
+                        reason="OFAC SDN not downloaded/indexed in this checkout")
+    def test_a_real_grinex_address_resolves_to_grinex(self):
+        # 2025-08-14 designation ("Garantex 2.0" successor network) -- read
+        # directly off the built index, not assumed.
+        hits = ofac.lookup_address("TEcuHDQthTmULe8fFLUccBPpjfXaTmJuuD", "TRX")
+        assert hits
+        assert hits[0]["entity_name"] == "Grinex"
+
+    @pytest.mark.skipif(not ofac.index_available(),
+                        reason="OFAC SDN not downloaded/indexed in this checkout")
+    def test_a_real_blender_address_resolves_to_blender(self):
+        # 2022-05-06 designation, the first-ever mixer designation.
+        hits = ofac.lookup_address("3NDzzVxiLBUs1WPvVGRfCYDTAD2Ua2PvW4", "BTC")
+        assert hits
+        assert hits[0]["entity_name"] == "Blender.io"
+
+    @pytest.mark.skipif(not ofac.index_available(),
+                        reason="OFAC SDN not downloaded/indexed in this checkout")
+    def test_lookup_address_absent_returns_empty(self):
+        assert ofac.lookup_address("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", "BTC") == []
+
+    @pytest.mark.skipif(not ofac.index_available(),
+                        reason="OFAC SDN not downloaded/indexed in this checkout")
+    def test_lookup_address_rejects_a_malformed_address(self):
+        assert ofac.lookup_address("not-a-real-address", "BTC") == []
+
+    def test_lookup_address_without_an_index_fails_loudly(self, monkeypatch):
+        monkeypatch.setattr(ofac, "index_available", lambda: False)
+        with pytest.raises(RuntimeError, match="build_index"):
+            ofac.lookup_address("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", "BTC")

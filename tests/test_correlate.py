@@ -12,7 +12,8 @@ import pytest
 
 from cybertrace.correlate import (
     FUNNELS, SHARED_ARTIFACTS,
-    COMMON_ARTIFACT_FLOOR, EXCHANGE_HOP_DECAY, LEAD_FLOOR, RETIRED_ASSESSMENT,
+    COMMON_ARTIFACT_FLOOR, EXCHANGE_HOP_DECAY, LEAD_FLOOR, REGULATORY_ATTESTED,
+    RETIRED_ASSESSMENT,
     SUCCESSOR_SIGNALS, UNJOINED_CONTEXT,
     canonical_entity_key, candidate_infra, candidate_ips, candidate_operators,
     confidence_level, contradiction_anchor, contradictions_from_identity,
@@ -1250,6 +1251,86 @@ def test_an_analyst_label_outranks_a_third_party_tag_on_one_address(tmp_path):
         assert len(hits) == 1
         assert hits[0]["attribution"] == "ANALYST_ASSERTED"
         assert "jdoe" in hits[0]["attribution_source"]
+
+
+def test_a_regulatory_attested_entity_is_reachable_but_never_becomes_an_edge(tmp_path):
+    """Same boundary as the GraphSense case, for OFAC: the SDN Advanced XML
+    names this real Bitcoin address as Blender.io's (OFAC action 2022-05-06),
+    so the trace must reach it -- but the engine must still never write the
+    EXCHANGE_DEPOSIT edge label_exchange exists to gate, and Blender.io is a
+    mixing service, not a VASP, so the report must not call it one."""
+    from cybertrace.integrations import ofac
+    if not (ofac.available() and ofac.index_available()):
+        pytest.skip("OFAC SDN not downloaded/indexed in this checkout")
+    blender = "3NDzzVxiLBUs1WPvVGRfCYDTAD2Ua2PvW4"   # OFAC SDN: Blender.io, profile 37070
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        sid = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": BTC_VALID, "sent_to_addresses": [blender]}, "bitcoin")
+
+        hit = next(w for w in wallet_exchange_paths(store) if w["entity_id"] == addr)
+        assert hit["attribution"] == REGULATORY_ATTESTED
+        assert "OFAC SDN" in hit["attribution_source"]
+        assert hit["exchange"] == "Blender.io"
+
+        flags = wallet_path_flags(store, hit)
+        assert any("OFAC-designated entity" in f for f in flags)
+        assert not any("VASP attribution" in f for f in flags)
+
+        # The boundary: no edge, and no EXCHANGE entity minted by the engine.
+        assert store._all("SELECT 1 FROM relationships WHERE rtype='EXCHANGE_DEPOSIT'") == []
+        assert store._all("SELECT 1 FROM entities WHERE etype='EXCHANGE'") == []
+        assert run_correlation(store)["operators"] == []
+
+
+def test_an_analyst_label_outranks_an_ofac_designation_on_one_address(tmp_path):
+    """Same precedence rule as the GraphSense case: whoever has to stand
+    behind the claim outranks an unattended source -- here, a government
+    designation rather than a community tag."""
+    from cybertrace.integrations import ofac
+    if not (ofac.available() and ofac.index_available()):
+        pytest.skip("OFAC SDN not downloaded/indexed in this checkout")
+    blender = "3NDzzVxiLBUs1WPvVGRfCYDTAD2Ua2PvW4"
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        sid = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": BTC_VALID, "sent_to_addresses": [blender]}, "bitcoin")
+        label_exchange(store, blender, "Blender.io (analyst-confirmed)",
+                       analyst="jdoe", note="court filing")
+
+        hits = [w for w in wallet_exchange_paths(store) if w["entity_id"] == addr]
+        assert len(hits) == 1
+        assert hits[0]["attribution"] == "ANALYST_ASSERTED"
+        assert "jdoe" in hits[0]["attribution_source"]
+
+
+def test_ofac_designation_outranks_a_third_party_tag_on_one_address(tmp_path):
+    """The collision this integration exists to guard against: Blender.io's
+    GraphSense tag (category=mixing_service) is itself sourced from this same
+    OFAC action -- see docs/LOOP14.md Phase 6 -- so the same real address is
+    independently present in both local corpora. It must surface as ONE
+    finding, at REGULATORY_ATTESTED, not as two pieces of evidence."""
+    from cybertrace.integrations import exchange_tags, ofac
+    if not (ofac.available() and ofac.index_available()):
+        pytest.skip("OFAC SDN not downloaded/indexed in this checkout")
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+    blender = "3NDzzVxiLBUs1WPvVGRfCYDTAD2Ua2PvW4"
+    # Confirms the fixture is still the real collision, not a stale address --
+    # a future dataset refresh silently dropping one side must fail loudly.
+    assert ofac.lookup_address(blender, "BTC")
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        sid = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": BTC_VALID, "sent_to_addresses": [blender]}, "bitcoin")
+
+        hits = [w for w in wallet_exchange_paths(store) if w["entity_id"] == addr]
+        assert len(hits) == 1
+        assert hits[0]["attribution"] == REGULATORY_ATTESTED
+        assert "OFAC SDN" in hits[0]["attribution_source"]
 
 
 # --- wallet -> exchange reachability ------------------------------------------
@@ -2618,6 +2699,16 @@ OFAC_SUEX = "1LrxsRd7zNuxPJcL5rttnoeJFy1y4AffYY"
 OFAC_POLYANIN = "158treVZBGMBThoaympxccPdZPtqUfYrT9"
 # Binance hot wallet, GraphSense-tagged binance.com; 1,191,656 txs on 2026-08-28.
 BINANCE_HOT = "1NDyJtNTjmwk5xPNhjgAMu4HDHigtobu1s"
+# Real, publicly checkable, and confirmed (Loop 15) absent from both the OFAC
+# SDN Advanced XML and the GraphSense corpus: the Bitcoin genesis coinbase
+# address. Used below wherever a test needs a "suspect" wallet whose OWN
+# reachability entry must come only from its hop to BINANCE_HOT -- OFAC_SUEX
+# and OFAC_POLYANIN no longer serve that role once _vasp_endpoints reads the
+# OFAC SDN directly (see correlate.REGULATORY_ATTESTED): both are themselves
+# genuinely OFAC-designated addresses, so tracing either one now correctly
+# reports AT_VASP on itself at hop 0, before any hop to Binance is reached --
+# see test_an_ofac_designated_suspect_is_at_vasp_on_itself_before_any_hop below.
+UNDESIGNATED_SUSPECT = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
 
 
 def _traced(store, suspect, summary_extra):
@@ -2629,6 +2720,28 @@ def _traced(store, suspect, summary_extra):
     sid = store.insert_snapshot(store.upsert_target("btc:" + suspect), {}, "bitcoin")
     enrich_bitcoin(store, sid, addr, {"address": suspect, **summary_extra}, "bitcoin")
     return addr
+
+
+def test_an_ofac_designated_suspect_is_at_vasp_on_itself_before_any_hop(tmp_path):
+    """The reason the rest of this block no longer traces OFAC_SUEX/
+    OFAC_POLYANIN directly (see UNDESIGNATED_SUSPECT above): once
+    _vasp_endpoints reads the OFAC SDN Advanced XML (Loop 15), a suspect
+    address that is itself OFAC-designated is discovered as AT_VASP on
+    itself at hop 0 -- correctly outranking a 1-hop reach to a different,
+    unrelated VASP (Binance). This is the intended new behavior, pinned
+    here rather than left as an unexplained cause of the fixture swap."""
+    from cybertrace.integrations import ofac
+    if not (ofac.available() and ofac.index_available()):
+        pytest.skip("OFAC SDN not downloaded/indexed in this checkout")
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = _traced(store, OFAC_SUEX, {"counterparty_addresses": [BINANCE_HOT],
+                                          "sent_to_addresses": [BINANCE_HOT]})
+        label_exchange(store, BINANCE_HOT, "binance.com", analyst="jdoe")
+        hit = next(w for w in wallet_exchange_paths(store) if w["entity_id"] == addr)
+        assert hit["attribution"] == REGULATORY_ATTESTED
+        assert hit["proximity"] == "AT_VASP"
+        assert hit["hops"] == 0
+        assert "SUEX" in hit["exchange"]
 
 
 def test_direction_does_not_depend_on_the_sqlite_query_planner(tmp_path):
@@ -2643,7 +2756,7 @@ def test_direction_does_not_depend_on_the_sqlite_query_planner(tmp_path):
     says about which way the money went."""
     def direction_after(analyze):
         with EvidenceStore(str(tmp_path / f"a{int(analyze)}.db")) as store:
-            addr = _traced(store, OFAC_SUEX,
+            addr = _traced(store, UNDESIGNATED_SUSPECT,
                            {"counterparty_addresses": [BINANCE_HOT],
                             "sent_to_addresses": [BINANCE_HOT]})
             label_exchange(store, BINANCE_HOT, "binance.com", analyst="jdoe")
@@ -2663,7 +2776,7 @@ def test_a_two_way_exchange_relationship_is_never_reported_as_a_deposit(tmp_path
     hot wallet. Collapsing it to 'consistent with a deposit' would state a
     one-way fact the evidence contradicts."""
     with EvidenceStore(str(tmp_path / "both.db")) as store:
-        addr = _traced(store, OFAC_SUEX,
+        addr = _traced(store, UNDESIGNATED_SUSPECT,
                        {"counterparty_addresses": [BINANCE_HOT],
                         "sent_to_addresses": [BINANCE_HOT],
                         "received_from_addresses": [BINANCE_HOT]})
@@ -2685,10 +2798,10 @@ def test_a_shared_omnibus_endpoint_is_flagged_rather_than_read_as_customer_evide
     the wallet path had no equivalent guard at all, so 'DIRECT / TO_VASP /
     Binance' read as though the suspect were Binance's customer."""
     with EvidenceStore(str(tmp_path / "hub.db")) as store:
-        a = _traced(store, OFAC_SUEX, {"counterparty_addresses": [BINANCE_HOT],
+        a = _traced(store, UNDESIGNATED_SUSPECT, {"counterparty_addresses": [BINANCE_HOT],
+                                                   "sent_to_addresses": [BINANCE_HOT]})
+        b = _traced(store, BTC_VALID, {"counterparty_addresses": [BINANCE_HOT],
                                        "sent_to_addresses": [BINANCE_HOT]})
-        b = _traced(store, OFAC_POLYANIN, {"counterparty_addresses": [BINANCE_HOT],
-                                           "sent_to_addresses": [BINANCE_HOT]})
         label_exchange(store, BINANCE_HOT, "binance.com", analyst="jdoe")
         paths = {w["entity_id"]: w for w in wallet_exchange_paths(store)}
         assert paths[a]["endpoint_shared_by"] == 2

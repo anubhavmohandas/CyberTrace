@@ -263,9 +263,11 @@ def _wallet_exchange(ctx: dict) -> dict:
     return {"answer": "Nearest VASP-attributed address for each traced wallet:",
             "claims": claims,
             "limitations": [
-                "ANALYST_ASSERTED endpoints are a human's cited claim; TAG_ATTESTED "
-                "endpoints are a third party's public tagpack entry. Neither is "
-                "CyberTrace's own finding, and neither is written as an edge.",
+                "ANALYST_ASSERTED endpoints are a human's cited claim; REGULATORY_ATTESTED "
+                "endpoints are an OFAC SDN designation of that address (not always a VASP -- "
+                "some designated parties are a market or a mixer); TAG_ATTESTED endpoints are "
+                "a third party's public tagpack entry. None is CyberTrace's own finding, and "
+                "none is written as an edge.",
                 "Hop distance is reachability, not proof of an intentional transfer.",
                 "Direction UNKNOWN means the capture never recorded which way value "
                 "moved — it is not evidence of a deposit."]}
