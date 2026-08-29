@@ -507,6 +507,101 @@ class TestBitcoinModuleRelationshipOutputCompleteness:
         assert data['counterparty_addresses'] == [counterparty_peer]
 
 
+class TestBitcoinModuleSamplingWindowBoundary:
+    """Loop 23: distinguishes two different, non-conflicting facts about
+    _check_blockchain_com's bounded transaction sample.
+
+    Loop 22's guarantee: every relationship found INSIDE the sampled
+    transactions is emitted (no second, alphabetical output cap).
+
+    Loop 23's limitation: a relationship that only exists OUTSIDE the
+    bounded transaction window (page 5+, beyond _TX_DEEP_PAGES) cannot be
+    discovered -- and must be correctly, silently absent, never fabricated
+    or inferred. Real-world evidence for why this is an accepted, documented
+    tradeoff rather than a defect is in docs/LOOP23.md Phase 3: the real
+    Bitfinex hot wallet's own most-recent 200-tx window covers ~2.5 real
+    calendar days (487,629 total tx, extreme velocity), and a real,
+    independently-verified reciprocal counterparty (the cold wallet) sits at
+    real transaction index 556 of the hot wallet's own history -- outside
+    even a hypothetical 500-tx bound, and moving farther away every day.
+    """
+
+    BTC = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+
+    def _padding_txs(self, n, start_time, prefix):
+        return [{'time': start_time - i, 'hash': f'{prefix}{i}',
+                'inputs': [{'prev_out': {'addr': self.BTC}}],
+                'out': [{'addr': f'1Padding{prefix}{i}'}]}
+               for i in range(n)]
+
+    def _paged_module(self, pages, monkeypatch):
+        from cybertrace.modules import bitcoin_module
+
+        async def _no_op_sleep(*_a, **_k):
+            return
+
+        monkeypatch.setattr(bitcoin_module.asyncio, "sleep", _no_op_sleep)
+        module = BitcoinModule()
+        calls = []
+        total_n_tx = sum(len(p) for p in pages)
+
+        async def fake_fetch_json(url, **kwargs):
+            params = kwargs.get('params') or {}
+            calls.append(params)
+            page_idx = params.get('offset', 0) // params.get('limit', 50)
+            page_txs = pages[page_idx] if page_idx < len(pages) else []
+            return {'address': self.BTC, 'final_balance': 0, 'total_received': 0,
+                    'total_sent': 0, 'n_tx': total_n_tx, 'txs': page_txs}
+        module.fetch_json = fake_fetch_json
+        return module, calls
+
+    def test_a_relationship_beyond_the_deep_window_is_correctly_absent_not_inferred(self, monkeypatch):
+        """A relationship inside the bounded deep window (page 4, the last
+        page _TX_DEEP_PAGES reads) survives -- Loop 22's guarantee. A second
+        relationship that exists only on page 5, one page past the hard cap,
+        must be absent from the output, and the module must never even fetch
+        page 5 to learn that -- the absence is a property of the bound, not
+        a filtered-out discovery."""
+        import asyncio
+        from cybertrace.modules.bitcoin_module import _TX_DEEP_PAGES, _TX_PAGE_SIZE
+        inside_peer = 'zInsideWindowPeer'
+        outside_peer = 'zOutsideWindowPeer'
+        inside_tx = {'time': 1670000000, 'hash': 'inside',
+                     'inputs': [{'prev_out': {'addr': self.BTC}}],
+                     'out': [{'addr': inside_peer}]}
+        outside_tx = {'time': 1660000000, 'hash': 'outside',
+                      'inputs': [{'prev_out': {'addr': self.BTC}}],
+                      'out': [{'addr': outside_peer}]}
+        pages = [
+            self._padding_txs(50, 1700000000, 'p0'),
+            self._padding_txs(50, 1690000000, 'p1'),
+            self._padding_txs(50, 1680000000, 'p2'),
+            [inside_tx] + self._padding_txs(49, 1670000000, 'p3'),
+            [outside_tx] + self._padding_txs(49, 1660000000, 'p4'),
+        ]
+        module, calls = self._paged_module(pages, monkeypatch)
+        result = asyncio.run(module._check_blockchain_com(self.BTC, deep=True))
+        assert len(calls) == _TX_DEEP_PAGES  # page 5 is never requested
+        assert inside_peer in result.data['sent_to_addresses']
+        assert outside_peer not in result.data['sent_to_addresses']
+        assert result.data['tx_sample_size'] == _TX_DEEP_PAGES * _TX_PAGE_SIZE
+
+    def test_repeated_execution_of_the_same_bounded_request_is_deterministic(self, monkeypatch):
+        """Same paginated responses in, byte-identical relationship sets and
+        tx_sample_size out, every time -- no randomness anywhere in the
+        sampling path (every output field is sorted())."""
+        import asyncio
+        pages = [self._padding_txs(50, 1700000000, 'p0'),
+                 self._padding_txs(50, 1690000000, 'p1'),
+                 self._padding_txs(50, 1680000000, 'p2'),
+                 self._padding_txs(50, 1670000000, 'p3')]
+        runs = []
+        for _ in range(3):
+            module, _ = self._paged_module(pages, monkeypatch)
+            runs.append(asyncio.run(module._check_blockchain_com(self.BTC, deep=True)).data)
+        assert runs[0] == runs[1] == runs[2]
+
+
 class TestBitcoinModuleEllipticpp:
     """Local-index lookup, no network -- degrades the same way chainabuse does
     without a key, but on dataset/index availability instead of a config key.
