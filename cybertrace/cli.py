@@ -305,15 +305,20 @@ def _correlate_store(result_files, output_format: str, db_path: str,
               type=click.Choice(['table', 'json']), help='Output format')
 @click.option('--dossier', 'dossier_path', type=click.Path(dir_okay=False),
               help='Rewrite the case file after re-correlating')
+@click.option('--deep', is_flag=True,
+              help='Re-check wallets with a deeper transaction sample (see search --deep)')
 def watch(db_path: str, targets, discover: bool, output_format: str,
-          dossier_path: Optional[str]):
+          dossier_path: Optional[str], deep: bool):
     """
     Re-visit every target in a case and report what changed.
 
-    Each target is fetched again, the capture is chained to the previous one, and
-    the result is re-correlated. A site that stops answering is recorded as dark
-    with its own hashed snapshot — that is what lets a later relaunch read as a
-    successor rather than as two unrelated markets.
+    Each onion target is fetched again and each wallet address already
+    enriched in this case is re-searched; every capture is chained to its own
+    previous one and the result is re-correlated. A site that stops answering
+    is recorded as dark with its own hashed snapshot — that is what lets a
+    later relaunch read as a successor rather than as two unrelated markets. A
+    wallet that newly reaches a VASP, or whose nearest one changed, is
+    reported the same way a new candidate is.
 
     \b
       cybertrace watch --db case.db
@@ -327,12 +332,13 @@ def watch(db_path: str, targets, discover: bool, output_format: str,
 
     with EvidenceStore(db_path) as store:
         report = run_watch(store, urls=list(targets) or None, discover=discover,
-                           case_id=Path(db_path).stem)
+                           case_id=Path(db_path).stem, deep=deep)
 
         if output_format == 'json':
             click.echo(json.dumps(report, indent=2, default=str))
         else:
-            click.echo(f"\nRe-checked {len(report['checked'])} target(s) "
+            click.echo(f"\nRe-checked {len(report['checked'])} target(s) and "
+                       f"{len(report['wallets_checked'])} wallet(s) "
                        f"at {report['checked_at']}\n")
             for row in report['checked']:
                 colour = {'DARK': 'red', 'CHANGED': 'yellow',
@@ -340,9 +346,15 @@ def watch(db_path: str, targets, discover: bool, output_format: str,
                 status = click.style(f"{row['status']:<9}", fg=colour)
                 detail = row.get('title') or row.get('error') or ''
                 click.echo(f"  {status} {row['url'][:56]}  {detail[:60]}")
+            for row in report['wallets_checked']:
+                colour = {'CHECK_FAILED': 'red', 'CHANGED': 'yellow'}.get(row['status'], None)
+                status = click.style(f"{row['status']:<9}", fg=colour)
+                click.echo(f"  {status} {row['address'][:56]}  ({row['chain']})")
             for row in report.get('deltas', []):
                 click.echo(f"\n  [{row['change']}] {row['candidate_id']} "
                            f"({row['confidence']}) {row['assessment']}")
+            for row in report.get('wallet_deltas', []):
+                click.echo(f"\n  [WALLET-{row['change']}] {row['value']}")
             if report.get('narrative'):
                 click.echo(f"\n  [ANALYST ALERT] {report['narrative']['answer']}")
             if report.get('discovered'):
