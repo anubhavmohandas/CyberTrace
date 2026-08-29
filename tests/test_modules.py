@@ -389,6 +389,124 @@ class TestBitcoinModuleTransactionDepth:
         assert len(calls) == 3  # stopped on page 2's short (5-tx) page
 
 
+class TestBitcoinModuleRelationshipOutputCompleteness:
+    """Loop 22: _check_blockchain_com used to re-truncate its own already-
+    bounded transaction sample to the first 20 relationships, ALPHABETICALLY
+    -- a second, unrelated cap layered on top of the real one (transaction
+    DEPTH, see TestBitcoinModuleTransactionDepth above). A relationship fully
+    inside the scanned window could still vanish from the output purely
+    because 20 alphabetically-earlier addresses filled the cap first --
+    transaction discovery and relationship reporting are different things,
+    and only the first was ever meant to be bounded."""
+
+    BTC = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+
+    def _run(self, txs):
+        import asyncio
+        module = BitcoinModule()
+
+        async def fake_fetch_json(url, **kwargs):
+            return {'address': self.BTC, 'final_balance': 0, 'total_received': 0,
+                    'total_sent': 0, 'n_tx': len(txs), 'txs': txs}
+        module.fetch_json = fake_fetch_json
+        return asyncio.run(module._check_blockchain_com(self.BTC)).data
+
+    def _sent_to_tx(self, n):
+        """One transaction, n distinct outputs -- all inside ONE bounded
+        transaction, the case that matters: transaction DEPTH was never the
+        problem here, only the output projection was."""
+        peers = [f'1Peer{i:03d}' for i in range(n)]
+        return peers, [{
+            'time': 1700000000,
+            'inputs': [{'prev_out': {'addr': self.BTC}}],
+            'out': [{'addr': p} for p in peers],
+        }]
+
+    def test_fewer_than_twenty_relationships_all_survive(self):
+        peers, txs = self._sent_to_tx(5)
+        data = self._run(txs)
+        assert data['sent_to_addresses'] == sorted(peers)
+
+    def test_exactly_twenty_relationships_all_survive(self):
+        peers, txs = self._sent_to_tx(20)
+        data = self._run(txs)
+        assert data['sent_to_addresses'] == sorted(peers)
+
+    def test_more_than_twenty_relationships_in_one_bounded_transaction_all_survive(self):
+        """The regression: this is exactly the shape the old [:20] alphabetical
+        slice broke -- more unique addresses than the old cap, all discovered
+        from a SINGLE transaction already inside the bounded sample."""
+        peers, txs = self._sent_to_tx(37)
+        data = self._run(txs)
+        assert data['sent_to_addresses'] == sorted(peers)
+        assert len(data['sent_to_addresses']) == 37
+
+    def test_a_peer_sorting_after_the_old_boundary_is_retained(self):
+        """The exact real-world failure mode: a directed counterparty (the
+        kind SENT_FUNDS_TO is built from -- see enrich_bitcoin and
+        wallet_exchange_paths' BOTH_WAYS) whose own address value sorts after
+        the first 20 peers alphabetically must not disappear just because
+        other peers' values happened to sort earlier -- exactly what a busy
+        exchange hot wallet with many counterparties looks like."""
+        padding = [f'1Peer{i:03d}' for i in range(24)]
+        reciprocal = 'zReciprocalPeer'
+        peers = padding + [reciprocal]
+        txs = [{
+            'time': 1700000000,
+            'inputs': [{'prev_out': {'addr': self.BTC}}],
+            'out': [{'addr': p} for p in peers],
+        }]
+        data = self._run(txs)
+        assert reciprocal in data['sent_to_addresses']
+        # inside ONE bounded transaction -- depth was never the issue here
+        assert data['tx_sample_size'] == 1
+
+    def test_a_received_from_peer_beyond_the_old_boundary_is_retained_without_collapsing_direction(self):
+        """Mirrors test_a_peer_sorting_after_the_old_boundary_is_retained but
+        for the OTHER directed set -- received_from_addresses is built from
+        the same sorted(...)[was :20] call site the fix touched, and the two
+        directions must stay disjoint even once received_from alone exceeds
+        the old cap."""
+        payers = [f'1Payer{i:03d}' for i in range(24)]
+        late_payer = 'zLatePayer'
+        receiving_tx = {
+            'time': 1700000000,
+            'inputs': [{'prev_out': {'addr': p}} for p in payers + [late_payer]],
+            'out': [{'addr': self.BTC}],
+        }
+        sent_peer = 'aSentToPeer'
+        paying_tx = {
+            'time': 1700000001,
+            'inputs': [{'prev_out': {'addr': self.BTC}}],
+            'out': [{'addr': sent_peer}],
+        }
+        data = self._run([receiving_tx, paying_tx])
+        assert len(data['received_from_addresses']) == 25
+        assert late_payer in data['received_from_addresses']
+        assert data['sent_to_addresses'] == [sent_peer]
+        assert late_payer not in data['sent_to_addresses']
+        assert sent_peer not in data['received_from_addresses']
+
+    def test_cospend_and_counterparty_also_survive_beyond_the_old_cap(self):
+        """The fix touched five sibling fields in the same function -- this
+        pins that cospend_addresses and counterparty_addresses (not just the
+        directed sent_to/received_from sets exercised above) were fixed too,
+        and that the semantic split between them (PART_OF_CLUSTER-eligible
+        vs TRANSACTED_WITH-eligible) survives an output larger than 20."""
+        cospend_peers = [f'1Cospend{i:03d}' for i in range(25)]
+        counterparty_peer = 'zLoneCounterparty'
+        txs = [{
+            'time': 1700000000,
+            'inputs': ([{'prev_out': {'addr': self.BTC}}]
+                      + [{'prev_out': {'addr': p}} for p in cospend_peers]),
+            'out': [{'addr': counterparty_peer}],
+        }]
+        data = self._run(txs)
+        assert data['cospend_addresses'] == sorted(cospend_peers)
+        assert len(data['cospend_addresses']) == 25
+        assert data['counterparty_addresses'] == [counterparty_peer]
+
+
 class TestBitcoinModuleEllipticpp:
     """Local-index lookup, no network -- degrades the same way chainabuse does
     without a key, but on dataset/index availability instead of a config key.

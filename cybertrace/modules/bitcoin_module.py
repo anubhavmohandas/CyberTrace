@@ -206,11 +206,20 @@ class BitcoinModule(BaseModule):
                     sent_to |= outs
                 else:
                     received_from |= inputs - {address}
-            parsed['cospend_addresses'] = sorted(cospend)[:20]
-            parsed['counterparty_addresses'] = sorted(counterparty - cospend)[:20]
-            parsed['sent_to_addresses'] = sorted(sent_to - cospend)[:20]
-            parsed['received_from_addresses'] = sorted(received_from - cospend)[:20]
-            parsed['connected_addresses'] = sorted(cospend | counterparty)[:20]
+            # No [:20] here. Transaction DEPTH is already the bound (the
+            # paginated fetch above, hard-capped at _TX_SHALLOW_PAGES/
+            # _TX_DEEP_PAGES); slicing the address sets on top of that was a
+            # SECOND, unrelated cap that silently dropped relationships
+            # sitting inside the already-bounded transaction sample -- sorted()
+            # made it alphabetical, so a reciprocal address could lose only
+            # because its own value sorted late. Reporting every unique
+            # relationship found in the bounded sample is what "bounded
+            # acquisition, complete extraction" means; see docs/LOOP22.md.
+            parsed['cospend_addresses'] = sorted(cospend)
+            parsed['counterparty_addresses'] = sorted(counterparty - cospend)
+            parsed['sent_to_addresses'] = sorted(sent_to - cospend)
+            parsed['received_from_addresses'] = sorted(received_from - cospend)
+            parsed['connected_addresses'] = sorted(cospend | counterparty)
 
         # How far this call actually looked -- makes the sampling window an
         # observable fact instead of a silent implementation detail. Distinct

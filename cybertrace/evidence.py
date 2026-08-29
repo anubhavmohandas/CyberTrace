@@ -1517,7 +1517,13 @@ def enrich_bitcoin(store: EvidenceStore, snapshot_id: str, addr_id: str, summary
 
     row = store._one("SELECT etype FROM entities WHERE entity_id=?", (addr_id,))
     etype = row["etype"] if row else "BTC_ADDRESS"
-    for peer in (summary.get("cospend_addresses") or [])[:20]:
+    # No [:20] here either -- the module already reports every relationship
+    # found in its own bounded transaction sample (see bitcoin_module.py's
+    # _check_blockchain_com), so re-truncating here would just move the same
+    # lossy alphabetical cap one layer downstream. ETH/TRX callers of this
+    # same function still hand in a list their own module already capped at
+    # 20, so this is a no-op ceiling for them -- see docs/LOOP22.md.
+    for peer in (summary.get("cospend_addresses") or []):
         peer_id = store.upsert_entity(etype, str(peer), observed_at=observed_at)
         if not peer_id or peer_id == addr_id:
             continue
@@ -1529,7 +1535,7 @@ def enrich_bitcoin(store: EvidenceStore, snapshot_id: str, addr_id: str, summary
                                         source_label=collector, observed_at=observed_at)
         store.add_evidence(rel, [obs], note="common-input-ownership heuristic")
 
-    for peer in (summary.get("counterparty_addresses") or [])[:20]:
+    for peer in (summary.get("counterparty_addresses") or []):
         peer_id = store.upsert_entity(etype, str(peer), observed_at=observed_at)
         if not peer_id or peer_id == addr_id:
             continue
@@ -1553,7 +1559,7 @@ def enrich_bitcoin(store: EvidenceStore, snapshot_id: str, addr_id: str, summary
     for key, subject_is_payer, note in (
             ("sent_to_addresses", True, "value moved from this address to the peer"),
             ("received_from_addresses", False, "value moved from the peer to this address")):
-        for peer in (summary.get(key) or [])[:20]:
+        for peer in (summary.get(key) or []):
             peer_id = store.upsert_entity(etype, str(peer), observed_at=observed_at)
             if not peer_id or peer_id == addr_id:
                 continue

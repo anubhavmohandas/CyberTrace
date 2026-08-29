@@ -2981,6 +2981,56 @@ def test_reciprocal_directed_edges_from_two_independent_captures_merge_into_both
         assert hit["direction"] == "BOTH_WAYS"
 
 
+def _valid_btc_addresses(n):
+    """n distinct, checksum-valid mainnet P2PKH addresses. upsert_entity's
+    normalize() gate (normalize.norm_btc) requires a real Base58Check
+    checksum, so a fixture that exercises the real EvidenceStore path (unlike
+    test_modules.py's raw dict fixtures, which never reach upsert_entity)
+    needs real addresses, not 'padding0', 'padding1', ... Deterministic --
+    payloads are derived from an incrementing seed, not randomly generated,
+    so a test run is reproducible."""
+    import hashlib
+    from cybertrace.normalize import b58encode
+    out = []
+    i = 0
+    while len(out) < n:
+        payload = b"\x00" + hashlib.sha256(f"cybertrace-test-{i}".encode()).digest()[:20]
+        checksum = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
+        out.append(b58encode(payload + checksum))
+        i += 1
+    return out
+
+
+def test_a_reciprocal_peer_beyond_the_old_alphabetical_output_cap_still_reaches_both_ways(tmp_path):
+    """Loop 22. The module-level [:20] alphabetical cap this loop removed
+    (bitcoin_module.py's _check_blockchain_com, and the matching redundant
+    cap in evidence.enrich_bitcoin) used to drop a real relationship whenever
+    more than 20 unique addresses existed in the SAME bounded transaction
+    sample and the surviving peer's own address value happened to sort late.
+    A busy exchange hot wallet -- the real Bitfinex shape this loop was
+    checking against -- is exactly this: many counterparties, one of them
+    the suspect. This is the test above
+    (test_reciprocal_directed_edges_from_two_independent_captures_merge_into_
+    both_ways) with the one variable that test held constant: BINANCE_HOT
+    now arrives buried behind 20 other real, checksum-valid peers that sort
+    before it, reproducing the exact loss mode rather than a hand-picked
+    single-peer summary that could never have exercised the cap either way."""
+    padding_pool = _valid_btc_addresses(200)
+    padding = sorted(a for a in padding_pool if a < BINANCE_HOT)[:20]
+    assert len(padding) == 20  # sanity: enough generated peers sort before BINANCE_HOT
+
+    with EvidenceStore(str(tmp_path / "cap_boundary.db")) as store:
+        suspect = _traced(store, UNDESIGNATED_SUSPECT,
+                          {"sent_to_addresses": sorted(padding + [BINANCE_HOT])})
+        _traced(store, BINANCE_HOT, {"sent_to_addresses": [UNDESIGNATED_SUSPECT]})
+        label_exchange(store, BINANCE_HOT, "binance.com", analyst="jdoe")
+
+        hit = next(w for w in wallet_exchange_paths(store) if w["entity_id"] == suspect)
+        assert hit["proximity"] == "DIRECT"
+        assert hit["hops"] == 1
+        assert hit["direction"] == "BOTH_WAYS"
+
+
 def test_a_shared_omnibus_endpoint_is_flagged_rather_than_read_as_customer_evidence(tmp_path):
     """Two unrelated OFAC-designated entities reaching one exchange hot wallet
     is a fact about the hot wallet, not about either suspect. Measured live:
