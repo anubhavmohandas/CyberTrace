@@ -216,6 +216,21 @@ class PhoneModule(BaseModule):
         if not data:
             return SourceResult(source='numverify', success=False, error='No response from NumVerify')
 
+        # APILayer's shared error envelope (used across numverify/fixer/
+        # currencylayer alike): {"success": false, "error": {...}} for a bad
+        # key, exhausted quota, etc. A genuine validation response never
+        # carries top-level "success" — only "valid". Without this check, an
+        # API-level failure has no "valid" key either, so `not data.get(
+        # 'valid')` would misreport the call as "checked, number is invalid"
+        # instead of "the check never happened".
+        if data.get('success') is False:
+            err = data.get('error') or {}
+            return SourceResult(
+                source='numverify',
+                success=False,
+                error=err.get('info') or err.get('type') or 'NumVerify API error',
+            )
+
         if not data.get('valid'):
             return SourceResult(
                 source='numverify',

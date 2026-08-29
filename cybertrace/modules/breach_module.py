@@ -109,15 +109,9 @@ class BreachModule(BaseModule):
             'User-Agent': 'CyberTrace OSINT Tool',
         }
 
-        data = await self.fetch_json(
-            url,
-            headers=headers,
-            retries=1,
-            ok_statuses=(200, 404),  # 404 = not found, which is a valid result
-        )
-
-        # fetch_json uses fetch_json which checks status==200 — handle 404 separately
-        # We'll use fetch() to capture both 200 and 404
+        # fetch_json only ever treats status==200 as success, and HIBP's 404
+        # (email not found in any breach) is itself a valid, billable result —
+        # so this uses fetch() with an explicit ok_statuses to see both.
         raw_text = await self.fetch(url, headers=headers, retries=1, ok_statuses=(200, 404))
 
         if raw_text is None:

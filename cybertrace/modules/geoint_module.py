@@ -415,7 +415,7 @@ class GeointModule(BaseModule):
                 'lon': el_lon,
                 'osm_id': el.get('id'),
             }
-            if el_lat and el_lon:
+            if el_lat is not None and el_lon is not None:
                 facility['google_maps'] = f"https://www.google.com/maps?q={el_lat},{el_lon}"
 
             cat = tag_to_category.get(amenity)
@@ -544,7 +544,7 @@ class GeointModule(BaseModule):
         summary: Dict[str, Any] = {
             'target': result.target,
             'target_type': target_type,
-            'coordinates': {'lat': lat, 'lon': lon} if lat and lon else None,
+            'coordinates': {'lat': lat, 'lon': lon} if lat is not None and lon is not None else None,
             'address': resolved_address,
             'city': None,
             'country': None,

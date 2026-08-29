@@ -13,6 +13,12 @@ from cybertrace.modules import (
     EmailModule,
     DarkwebModule,
     IndianModule,
+    PhoneModule,
+    GeointModule,
+    IPModule,
+    ImageModule,
+    BreachModule,
+    SocialModule,
 )
 from cybertrace.integrations import evolution, exchange_tags
 from cybertrace.modules.base import ModuleResult, SourceResult
@@ -1856,6 +1862,722 @@ class TestIndianModule:
     def test_detect_indian_type_name(self):
         module = IndianModule()
         assert module._detect_indian_type("John Doe") == 'name'
+
+
+# ---------------------------------------------------------------------------#
+# The six OSINT collectors below (phone, geoint, ip, image, breach, social)  #
+# had zero dedicated tests before Loop 25 (Loop 24 §2/§10.2). They dead-end  #
+# before the graph (Loop 11 §4/§10 — investigator-facing output only), so    #
+# the risk a defect here poses is under-reporting a raw collector value to   #
+# an investigator, never a false attribution. Coverage below exercises each  #
+# source's malformed/empty/failure paths directly against the real parsing  #
+# code (fetch_json/fetch monkeypatched, no network), per Loop 25 Phase 6.    #
+# ---------------------------------------------------------------------------#
+
+
+class TestPhoneModule:
+    def test_module_attributes(self):
+        module = PhoneModule()
+        assert module.name == 'phone'
+        assert 'phone' in module.supported_types
+
+    def test_parses_a_valid_number(self):
+        import asyncio
+        module = PhoneModule()
+        result = asyncio.run(module._parse_with_phonenumbers('+14155552671'))
+        assert result.success is True
+        assert result.data['valid'] is True
+        assert result.data['e164'] == '+14155552671'
+        assert result.data['country_code'] == '+1'
+
+    def test_garbage_input_reports_failure_not_a_crash(self):
+        import asyncio
+        module = PhoneModule()
+        result = asyncio.run(module._parse_with_phonenumbers('not-a-phone-number'))
+        assert result.success is False
+
+    def test_free_carrier_lookup_parses_a_valid_response(self):
+        import asyncio
+        module = PhoneModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'countryCode': 'US', 'carrierName': 'Verizon', 'numberType': 'MOBILE',
+                    'countryName': 'United States', 'city': 'New York'}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._free_carrier_lookup('+14155552671'))
+        assert result.success is True
+        assert result.data['carrier'] == 'Verizon'
+        assert result.data['line_type'] == 'mobile'
+
+    def test_free_carrier_lookup_falls_back_to_phonenumbers_when_the_api_fails(self):
+        import asyncio
+        module = PhoneModule()
+        async def fake_fetch_json(url, **kwargs):
+            return None
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._free_carrier_lookup('+14155552671'))
+        assert result.success is True
+        assert result.data['source_api'] == 'phonenumbers_fallback'
+
+    def test_free_carrier_lookup_reports_failure_when_nothing_usable_comes_back(self):
+        import asyncio
+        module = PhoneModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'unexpected': 'shape'}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._free_carrier_lookup('garbage-not-a-real-number'))
+        assert result.success is False
+
+    def test_numverify_parses_a_valid_response(self):
+        import asyncio
+        module = PhoneModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'valid': True, 'number': '14155552671', 'carrier': 'Verizon',
+                    'country_name': 'United States', 'line_type': 'mobile'}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._check_numverify('+14155552671'))
+        assert result.success is True
+        assert result.data['valid'] is True
+        assert result.data['carrier'] == 'Verizon'
+
+    def test_numverify_reports_a_genuinely_invalid_number(self):
+        import asyncio
+        module = PhoneModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'valid': False, 'number': '123'}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._check_numverify('123'))
+        assert result.success is True
+        assert result.data['valid'] is False
+
+    def test_numverify_api_error_is_not_reported_as_an_invalid_number(self):
+        """Regression: APILayer's error envelope ({'success': false, 'error':
+        {...}}) has no 'valid' key either, so before the fix `not data.get(
+        'valid')` reported a bad API key / exhausted quota as a confidently-
+        checked 'this number is invalid' result -- an API failure silently
+        becoming a successful finding."""
+        import asyncio
+        module = PhoneModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'success': False,
+                    'error': {'code': 101, 'type': 'invalid_access_key',
+                              'info': 'You have not supplied a valid API access key.'}}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._check_numverify('+14155552671'))
+        assert result.success is False
+        assert 'valid API access key' in result.error
+
+
+class TestGeointModule:
+    def test_module_attributes(self):
+        module = GeointModule()
+        assert module.name == 'geoint'
+        assert 'coordinates' in module.supported_types
+
+    def test_detect_type_coordinates(self):
+        assert GeointModule._detect_type('51.5074,-0.1278') == 'coordinates'
+
+    def test_detect_type_ip(self):
+        assert GeointModule._detect_type('8.8.8.8') == 'ip'
+
+    def test_detect_type_falls_back_to_address(self):
+        assert GeointModule._detect_type('221B Baker Street, London') == 'address'
+
+    def test_parse_coordinates_valid(self):
+        assert GeointModule._parse_coordinates('51.5074,-0.1278') == (51.5074, -0.1278)
+
+    def test_parse_coordinates_malformed_returns_none_none(self):
+        assert GeointModule._parse_coordinates('not,coordinates') == (None, None)
+
+    def test_parse_coordinates_wrong_arity_returns_none_none(self):
+        assert GeointModule._parse_coordinates('1,2,3') == (None, None)
+
+    def test_reverse_geocode_parses_a_valid_response(self):
+        import asyncio
+        module = GeointModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'display_name': 'London, UK', 'lat': '51.5', 'lon': '-0.1',
+                    'address': {'city': 'London', 'country': 'United Kingdom',
+                                'country_code': 'gb'}}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._reverse_geocode(51.5, -0.1))
+        assert result.success is True
+        assert result.data['city'] == 'London'
+
+    def test_reverse_geocode_reports_failure_on_an_error_response(self):
+        import asyncio
+        module = GeointModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'error': 'Unable to geocode'}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._reverse_geocode(999, 999))
+        assert result.success is False
+
+    def test_reverse_geocode_reports_failure_when_the_fetch_itself_fails(self):
+        import asyncio
+        module = GeointModule()
+        async def fake_fetch_json(url, **kwargs):
+            return None
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._reverse_geocode(51.5, -0.1))
+        assert result.success is False
+
+    def test_forward_geocode_reports_failure_on_a_non_list_response(self):
+        import asyncio
+        module = GeointModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'unexpected': 'a dict, not the documented list'}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._forward_geocode('nowhere at all'))
+        assert result.success is False
+
+    def test_geolocate_ip_reports_failure_on_a_bogon_address(self):
+        import asyncio
+        module = GeointModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'ip': '127.0.0.1', 'bogon': True}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._geolocate_ip('127.0.0.1'))
+        assert result.success is False
+
+    def test_get_timezone_falls_back_to_a_longitude_estimate_when_the_api_fails(self):
+        import asyncio
+        module = GeointModule()
+        async def fake_fetch_json(url, **kwargs):
+            return None
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._get_timezone(51.5, -0.1))
+        assert result.success is True
+        assert result.data['source'] == 'longitude_estimate'
+
+    def test_equator_and_prime_meridian_coordinates_survive_the_summary(self):
+        """Regression: `{'lat': lat, 'lon': lon} if lat and lon else None`
+        treated a legitimate 0.0 latitude or longitude (equator / prime
+        meridian) as falsy and silently dropped real, successfully-resolved
+        coordinates from the summary an investigator reads."""
+        module = GeointModule()
+        result = ModuleResult(target='0,0', target_type='coordinates', module='geoint')
+        summary = module._build_summary(
+            result, lat=0.0, lon=0.0, resolved_address=None, target_type='coordinates')
+        assert summary['coordinates'] == {'lat': 0.0, 'lon': 0.0}
+
+    def test_search_reports_a_parse_error_for_unparseable_coordinates(self):
+        import asyncio
+        module = GeointModule()
+        result = asyncio.run(module.search('garbage', target_type='coordinates'))
+        assert 'error' in result.summary
+
+
+class TestIPModule:
+    def test_module_attributes(self):
+        module = IPModule()
+        assert module.name == 'ip'
+        assert 'ip' in module.supported_types
+
+    def test_ipinfo_parses_a_valid_response(self):
+        import asyncio
+        module = IPModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'ip': '8.8.8.8', 'city': 'Mountain View', 'country': 'US',
+                    'org': 'AS15169 Google LLC', 'loc': '37.4,-122.1'}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._check_ipinfo('8.8.8.8'))
+        assert result.success is True
+        assert result.data['org'] == 'Google LLC'
+        assert result.data['asn'] == 'AS15169'
+
+    def test_ipinfo_reports_failure_on_a_bogon_address(self):
+        import asyncio
+        module = IPModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'ip': '10.0.0.1', 'bogon': True}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._check_ipinfo('10.0.0.1'))
+        assert result.success is False
+
+    def test_ip_api_reports_failure_on_a_non_success_status(self):
+        import asyncio
+        module = IPModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'status': 'fail', 'message': 'invalid query'}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._check_ip_api('not-an-ip'))
+        assert result.success is False
+
+    def test_greynoise_classifies_not_seen(self):
+        import asyncio
+        module = IPModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'message': 'IP not observed scanning the internet or '
+                                'contained in RIOT data set.'}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._check_greynoise('1.2.3.4'))
+        assert result.success is True
+        assert result.data['seen'] is False
+
+    def test_greynoise_reports_failure_on_no_response(self):
+        import asyncio
+        module = IPModule()
+        async def fake_fetch_json(url, **kwargs):
+            return None
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._check_greynoise('1.2.3.4'))
+        assert result.success is False
+
+    def test_threatfox_no_result_is_a_successful_negative(self):
+        import asyncio
+        module = IPModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'query_status': 'no_result'}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._check_threatfox('1.2.3.4'))
+        assert result.success is True
+        assert result.data['found'] is False
+
+    def test_threatfox_unexpected_status_reports_failure_not_a_false_negative(self):
+        import asyncio
+        module = IPModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'query_status': 'illegal_search_term'}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._check_threatfox('1.2.3.4'))
+        assert result.success is False
+
+    def test_abuseipdb_reports_failure_on_a_malformed_response(self):
+        import asyncio
+        module = IPModule()
+        module.config.api_keys.abuseipdb = 'testkey'
+        try:
+            async def fake_fetch_json(url, **kwargs):
+                return {'errors': [{'detail': 'bad key'}]}
+            module.fetch_json = fake_fetch_json
+            result = asyncio.run(module._check_abuseipdb('1.2.3.4'))
+            assert result.success is False
+        finally:
+            module.config.api_keys.abuseipdb = None
+
+    def test_exonerator_distinguishes_positive_negative_and_unanswerable(self):
+        import asyncio
+        module = IPModule()
+
+        async def fake_fetch_positive(url, **kwargs):
+            return 'blah blah Result is positive blah'
+        module.fetch = fake_fetch_positive
+        positive = asyncio.run(module._check_exonerator('1.2.3.4'))
+        assert positive.success is True
+        assert positive.data['tor_relay'] is True
+
+        async def fake_fetch_negative(url, **kwargs):
+            return 'blah blah Result is negative blah'
+        module.fetch = fake_fetch_negative
+        negative = asyncio.run(module._check_exonerator('1.2.3.4'))
+        assert negative.success is True
+        assert negative.data['tor_relay'] is False
+
+        async def fake_fetch_unanswerable(url, **kwargs):
+            return 'Server problem, no data for this range'
+        module.fetch = fake_fetch_unanswerable
+        unanswerable = asyncio.run(module._check_exonerator('1.2.3.4'))
+        assert unanswerable.success is False
+        assert 'NOT a negative result' in unanswerable.error
+
+    def test_risk_level_escalates_with_abuse_score(self):
+        module = IPModule()
+        result = ModuleResult(target='1.2.3.4', target_type='ip', module='ip')
+        result.sources['abuseipdb'] = SourceResult(
+            source='abuseipdb', success=True,
+            data={'abuse_confidence_score': 90, 'is_tor': False})
+        summary = module._build_summary(result)
+        assert summary['risk_level'] == 'critical'
+
+
+class TestImageModule:
+    def test_module_attributes(self):
+        module = ImageModule()
+        assert module.name == 'image'
+        assert 'image' in module.supported_types
+
+    def test_resolve_target_missing_local_file_returns_none(self):
+        import asyncio
+        module = ImageModule()
+        path, temp = asyncio.run(module._resolve_target('/no/such/file.jpg'))
+        assert path is None
+        assert temp is None
+
+    def test_resolve_target_existing_local_file(self, tmp_path):
+        import asyncio
+        module = ImageModule()
+        f = tmp_path / 'photo.jpg'
+        f.write_bytes(b'not a real jpeg, just bytes')
+        path, temp = asyncio.run(module._resolve_target(str(f)))
+        assert path == str(f)
+        assert temp is None  # local path -- no temp file to clean up
+
+    def test_dms_to_decimal_valid(self):
+        result = ImageModule._dms_to_decimal((40, 26, 46), 'N')
+        assert result == pytest.approx(40.446111, abs=1e-5)
+
+    def test_dms_to_decimal_negates_for_south_and_west(self):
+        result = ImageModule._dms_to_decimal((40, 26, 46), 'S')
+        assert result < 0
+
+    def test_dms_to_decimal_none_input_returns_none(self):
+        assert ImageModule._dms_to_decimal(None, 'N') is None
+
+    def test_dms_to_decimal_malformed_tuple_returns_none_not_a_crash(self):
+        assert ImageModule._dms_to_decimal((1, 2), 'N') is None  # wrong arity
+
+    def test_parse_exiftool_output_negates_south_and_west(self):
+        module = ImageModule()
+        raw = {'GPSLatitude': '33.8688', 'GPSLatitudeRef': 'S',
+               'GPSLongitude': '151.2093', 'GPSLongitudeRef': 'W', 'Make': 'Apple'}
+        data = module._parse_exiftool_output(raw)
+        assert data['gps_latitude'] == -33.8688
+        assert data['gps_longitude'] == -151.2093
+        assert data['has_gps'] is True
+
+    def test_parse_exiftool_output_no_gps_fields(self):
+        module = ImageModule()
+        data = module._parse_exiftool_output({'Make': 'Apple', 'Model': 'iPhone'})
+        assert data['has_gps'] is False
+        assert 'gps_latitude' not in data
+
+    def test_parse_exiftool_output_malformed_gps_does_not_crash(self):
+        module = ImageModule()
+        raw = {'GPSLatitude': 'not-a-number', 'GPSLongitude': 'also-not-a-number'}
+        data = module._parse_exiftool_output(raw)
+        assert data['has_gps'] is False
+
+    def test_compute_hashes_missing_file_returns_none(self):
+        assert ImageModule._compute_hashes('/no/such/file.jpg') is None
+
+    def test_compute_hashes_matches_known_content(self, tmp_path):
+        import hashlib
+        f = tmp_path / 'test.bin'
+        f.write_bytes(b'hello world')
+        result = ImageModule._compute_hashes(str(f))
+        assert result['md5'] == hashlib.md5(b'hello world').hexdigest()
+        assert result['size'] == 11
+
+    def test_query_malwarebazaar_hash_not_found(self):
+        import asyncio
+        module = ImageModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'query_status': 'hash_not_found'}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._query_malwarebazaar('deadbeef'))
+        assert result == {'found': False}
+
+    def test_query_malwarebazaar_reports_none_on_no_response(self):
+        import asyncio
+        module = ImageModule()
+        async def fake_fetch_json(url, **kwargs):
+            return None
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._query_malwarebazaar('deadbeef'))
+        assert result is None
+
+    def test_generate_reverse_image_search_links_for_a_url(self):
+        import asyncio
+        module = ImageModule()
+        result = asyncio.run(
+            module._generate_reverse_image_search_links('https://example.com/photo.jpg'))
+        assert result.success is True
+        assert 'google_lens' in result.data['links']
+
+    def test_generate_reverse_image_search_links_for_a_local_file(self):
+        import asyncio
+        module = ImageModule()
+        result = asyncio.run(
+            module._generate_reverse_image_search_links('/tmp/photo.jpg'))
+        assert 'upload local file' in result.data['links']['tineye']
+
+
+class TestSocialModule:
+    def test_module_attributes(self):
+        module = SocialModule()
+        assert module.name == 'social'
+        assert 'username' in module.supported_types
+
+    def test_reddit_profile_found_and_parsed(self):
+        import asyncio
+        module = SocialModule()
+        async def fake_fetch_json(url, **kwargs):
+            if 'about.json' in url:
+                return {'kind': 't2', 'data': {'name': 'torvalds', 'id': 'abc',
+                                                 'comment_karma': 100, 'link_karma': 50}}
+            return {'data': {'children': []}}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._search_reddit('torvalds'))
+        assert result.success is True
+        assert result.data['profile_found'] is True
+        assert result.data['profile']['total_karma'] == 150
+
+    def test_reddit_profile_not_found_search_still_parsed(self):
+        import asyncio
+        module = SocialModule()
+        async def fake_fetch_json(url, **kwargs):
+            if 'about.json' in url:
+                return {'kind': None}  # not t2 -- account doesn't exist
+            return {'data': {'children': [
+                {'kind': 't3', 'data': {'title': 'a post', 'permalink': '/r/x/1'}}
+            ]}}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._search_reddit('nonexistent_user_xyz'))
+        assert result.success is True
+        assert result.data['profile_found'] is False
+        assert result.data['search_post_count'] == 1
+
+    def test_reddit_malformed_search_response_does_not_crash(self):
+        import asyncio
+        module = SocialModule()
+        async def fake_fetch_json(url, **kwargs):
+            if 'about.json' in url:
+                return None
+            return {'data': None}  # 'data' present but null, not the documented dict
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._search_reddit('someone'))
+        assert result.success is True
+        assert result.data['search_post_count'] == 0
+
+    def test_bluesky_profile_found(self):
+        import asyncio
+        module = SocialModule()
+        async def fake_fetch_json(url, **kwargs):
+            if 'getProfile' in url:
+                return {'did': 'did:plc:abc', 'handle': 'user.bsky.social',
+                         'followersCount': 10}
+            return {'posts': []}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._search_bluesky('user.bsky.social'))
+        assert result.success is True
+        assert result.data['profile']['handle'] == 'user.bsky.social'
+
+    def test_bluesky_profile_not_found_does_not_crash(self):
+        import asyncio
+        module = SocialModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'error': 'ProfileNotFound'}  # no 'did' key
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._search_bluesky('nonexistent'))
+        assert result.success is True
+        assert result.data['profile_found'] is False
+
+    def test_mastodon_reports_failure_on_no_response(self):
+        import asyncio
+        module = SocialModule()
+        async def fake_fetch_json(url, **kwargs):
+            return None
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._search_mastodon('someone'))
+        assert result.success is False
+
+    def test_mastodon_handles_missing_sections_gracefully(self):
+        import asyncio
+        module = SocialModule()
+        async def fake_fetch_json(url, **kwargs):
+            # Real zero-result shape: keys present, all empty -- not a bare {}.
+            return {'accounts': [], 'statuses': [], 'hashtags': []}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._search_mastodon('someone'))
+        assert result.success is True
+        assert result.data['account_count'] == 0
+
+    def test_github_user_not_found_still_returns_success_with_no_profile(self):
+        import asyncio
+        module = SocialModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'message': 'Not Found'}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._search_github('this_user_should_not_exist_xyz'))
+        assert result.success is True
+        assert result.data['profile_found'] is False
+
+    def test_github_profile_found_surfaces_repos(self):
+        import asyncio
+        module = SocialModule()
+        async def fake_fetch_json(url, **kwargs):
+            if '/repos?' in url:
+                return [{'name': 'linux', 'full_name': 'torvalds/linux',
+                          'stargazers_count': 1}]
+            return {'login': 'torvalds', 'id': 1, 'public_repos': 1}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._search_github('torvalds'))
+        assert result.success is True
+        assert result.data['profile']['login'] == 'torvalds'
+        assert result.data['repo_count'] == 1
+
+    def test_telegram_no_token_degrades_gracefully(self):
+        import asyncio
+        module = SocialModule()
+        module.config.api_keys.telegram_bot = None
+        result = asyncio.run(module._search_telegram('somechannel'))
+        assert result.success is False
+
+    def test_telegram_chat_not_found_is_a_successful_negative(self):
+        import asyncio
+        module = SocialModule()
+        module.config.api_keys.telegram_bot = 'testtoken'
+        try:
+            async def fake_fetch_json(url, **kwargs):
+                return {'ok': False, 'description': 'Bad Request: chat not found'}
+            module.fetch_json = fake_fetch_json
+            result = asyncio.run(module._search_telegram('@nonexistent'))
+            assert result.success is True
+            assert result.data['found'] is False
+        finally:
+            module.config.api_keys.telegram_bot = None
+
+
+class TestBreachModule:
+    def test_module_attributes(self):
+        module = BreachModule()
+        assert module.name == 'breach'
+        assert 'email' in module.supported_types
+
+    def test_hibp_no_key_degrades_gracefully(self):
+        import asyncio
+        module = BreachModule()
+        module.config.api_keys.hibp = None
+        result = asyncio.run(module._check_hibp('user@example.com'))
+        assert result.success is False
+
+    def test_hibp_parses_a_valid_breach_list(self):
+        import asyncio, json as _json
+        module = BreachModule()
+        module.config.api_keys.hibp = 'testkey'
+        try:
+            async def fake_fetch(url, **kwargs):
+                return _json.dumps([{'Name': 'Adobe', 'Title': 'Adobe',
+                                      'Domain': 'adobe.com', 'BreachDate': '2013-10-04',
+                                      'PwnCount': 152445165,
+                                      'DataClasses': ['Email addresses', 'Passwords']}])
+            module.fetch = fake_fetch
+            result = asyncio.run(module._check_hibp('user@example.com'))
+            assert result.success is True
+            assert result.data['found'] is True
+            assert result.data['breach_count'] == 1
+            assert result.data['has_password_data'] is True
+        finally:
+            module.config.api_keys.hibp = None
+
+    def test_hibp_404_with_no_body_reports_not_found(self):
+        import asyncio
+        module = BreachModule()
+        module.config.api_keys.hibp = 'testkey'
+        try:
+            async def fake_fetch(url, **kwargs):
+                return ''  # HIBP returns an empty body on 404
+            module.fetch = fake_fetch
+            result = asyncio.run(module._check_hibp('user@example.com'))
+            assert result.success is True
+            assert result.data['found'] is False
+        finally:
+            module.config.api_keys.hibp = None
+
+    def test_hibp_never_calls_the_removed_broken_fetch_json_path(self):
+        """Regression: _check_hibp used to make a guaranteed-to-fail
+        fetch_json() call before its real fetch() call -- fetch_json() does
+        not accept an ok_statuses kwarg at all, so passing it raised inside
+        aiohttp on every single lookup, was swallowed by fetch_json's own
+        generic except-clause, and the (always-None) result was never even
+        read. That wasted one HTTP attempt against a paid, rate-limited API
+        (HIBP) on every email lookup for nothing."""
+        import asyncio
+        module = BreachModule()
+        module.config.api_keys.hibp = 'testkey'
+        try:
+            async def failing_fetch_json(url, **kwargs):
+                raise AssertionError('fetch_json should not be called by _check_hibp')
+            async def fake_fetch(url, **kwargs):
+                return ''
+            module.fetch_json = failing_fetch_json
+            module.fetch = fake_fetch
+            result = asyncio.run(module._check_hibp('user@example.com'))
+            assert result.success is True
+        finally:
+            module.config.api_keys.hibp = None
+
+    def test_breach_directory_parses_a_valid_response(self):
+        import asyncio
+        module = BreachModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'success': True, 'result': [{'sources': ['Adobe'], 'sha1': 'abc123'}]}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._check_breach_directory('user@example.com'))
+        assert result.success is True
+        assert result.data['found'] is True
+        assert result.data['has_password_data'] is True
+
+    def test_breach_directory_reports_not_found_on_an_unsuccessful_response(self):
+        import asyncio
+        module = BreachModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'success': False}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._check_breach_directory('user@example.com'))
+        assert result.success is True
+        assert result.data['found'] is False
+
+    def test_leakcheck_distinguishes_not_found_from_a_real_error(self):
+        import asyncio
+        module = BreachModule()
+        module.config.api_keys.leakcheck = 'testkey'
+        try:
+            async def fake_fetch_json(url, **kwargs):
+                return {'success': False, 'error': 'Not found'}
+            module.fetch_json = fake_fetch_json
+            result = asyncio.run(module._check_leakcheck('user@example.com'))
+            assert result.success is True
+            assert result.data['found'] is False
+        finally:
+            module.config.api_keys.leakcheck = None
+
+    def test_leakcheck_reports_a_genuine_api_error_as_a_failure(self):
+        import asyncio
+        module = BreachModule()
+        module.config.api_keys.leakcheck = 'testkey'
+        try:
+            async def fake_fetch_json(url, **kwargs):
+                return {'success': False, 'error': 'Rate limit exceeded'}
+            module.fetch_json = fake_fetch_json
+            result = asyncio.run(module._check_leakcheck('user@example.com'))
+            assert result.success is False
+        finally:
+            module.config.api_keys.leakcheck = None
+
+    def test_psbdmp_handles_a_dict_shaped_response(self):
+        import asyncio
+        module = BreachModule()
+        async def fake_fetch_json(url, **kwargs):
+            return {'data': [{'id': 'abc123', 'tags': 'leak', 'length': 500}]}
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._check_psbdmp('user@example.com'))
+        assert result.success is True
+        assert result.data['paste_count'] == 1
+        assert result.data['pastes'][0]['url'] == 'https://pastebin.com/abc123'
+
+    def test_psbdmp_handles_a_list_shaped_response(self):
+        import asyncio
+        module = BreachModule()
+        async def fake_fetch_json(url, **kwargs):
+            return [{'id': 'xyz', 'tags': '', 'length': 10}]
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._check_psbdmp('user@example.com'))
+        assert result.success is True
+        assert result.data['paste_count'] == 1
+
+    def test_intelx_search_initiation_failure_reports_failure(self):
+        import asyncio
+        module = BreachModule()
+        module.config.api_keys.intelx = 'testkey'
+        try:
+            async def fake_fetch_json(url, **kwargs):
+                return {}  # no 'id' -- search never started
+            module.fetch_json = fake_fetch_json
+            result = asyncio.run(module._check_intelx('user@example.com'))
+            assert result.success is False
+        finally:
+            module.config.api_keys.intelx = None
 
 
 class TestDataClasses:
