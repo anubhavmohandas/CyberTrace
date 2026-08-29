@@ -260,6 +260,135 @@ class TestBitcoinModuleFundFlowDirection:
         assert self.PAYER not in data['received_from_addresses']
 
 
+class TestBitcoinModuleTransactionDepth:
+    """Loop 21: transaction depth must be explicit and bounded, not an
+    accident of the API's default page size or a hardcoded top-10 slice.
+    See bitcoin_module.py's _TX_PAGE_SIZE/_TX_SHALLOW_PAGES/_TX_DEEP_PAGES and
+    docs/LOOP21.md for the real Bitfinex hot<->cold wallet pair this was sized
+    against -- docs/LOOP20.md found the real reciprocal transaction at
+    positions 105/139/142 of one wallet's own history, past any single page.
+    """
+
+    BTC = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+    PEER = "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+
+    def _padding_txs(self, n, start_time, prefix):
+        """n distinct, unrelated transactions -- each address different, so
+        none of them accidentally becomes a real counterparty/direction
+        signal for PEER."""
+        return [{'time': start_time - i, 'hash': f'{prefix}{i}',
+                'inputs': [{'prev_out': {'addr': self.BTC}}],
+                'out': [{'addr': f'1Padding{prefix}{i}'}]}
+               for i in range(n)]
+
+    def _paged_module(self, pages, monkeypatch):
+        """pages: list of tx-lists, one per successive 50-tx offset. Returns
+        (module, calls) where calls records the params of every fetch."""
+        from cybertrace.modules import bitcoin_module
+
+        async def _no_op_sleep(*_a, **_k):
+            return
+
+        monkeypatch.setattr(bitcoin_module.asyncio, "sleep", _no_op_sleep)
+        module = BitcoinModule()
+        calls = []
+        total_n_tx = sum(len(p) for p in pages)
+
+        async def fake_fetch_json(url, **kwargs):
+            params = kwargs.get('params') or {}
+            calls.append(params)
+            page_idx = params.get('offset', 0) // params.get('limit', 50)
+            page_txs = pages[page_idx] if page_idx < len(pages) else []
+            return {'address': self.BTC, 'final_balance': 0, 'total_received': 0,
+                    'total_sent': 0, 'n_tx': total_n_tx, 'txs': page_txs}
+        module.fetch_json = fake_fetch_json
+        return module, calls
+
+    def test_default_mode_reads_exactly_one_bounded_page(self, monkeypatch):
+        import asyncio
+        pages = [self._padding_txs(50, 1700000000, 'p0')]
+        module, calls = self._paged_module(pages, monkeypatch)
+        result = asyncio.run(module._check_blockchain_com(self.BTC, deep=False))
+        assert len(calls) == 1
+        assert calls[0] == {'limit': 50, 'offset': 0}
+        assert result.data['tx_sample_size'] == 50
+
+    def test_deep_mode_stops_as_soon_as_a_page_comes_back_short(self, monkeypatch):
+        """A wallet with 110 real transactions must not pay for a 4th call
+        that cannot return anything -- pagination stops on the short page,
+        not at the hard cap."""
+        import asyncio
+        pages = [self._padding_txs(50, 1700000000, 'p0'),
+                self._padding_txs(50, 1690000000, 'p1'),
+                self._padding_txs(10, 1680000000, 'p2')]
+        module, calls = self._paged_module(pages, monkeypatch)
+        result = asyncio.run(module._check_blockchain_com(self.BTC, deep=True))
+        assert len(calls) == 3
+        assert result.data['tx_sample_size'] == 110
+
+    def test_deep_mode_never_exceeds_the_hard_page_cap(self, monkeypatch):
+        """A huge exchange wallet (Bitfinex's real hot wallet: 487,628 tx) must
+        not turn --deep into an unbounded crawl -- always <=_TX_DEEP_PAGES
+        calls, no matter how many full pages the address actually has."""
+        import asyncio
+        from cybertrace.modules.bitcoin_module import _TX_DEEP_PAGES, _TX_PAGE_SIZE
+        pages = [self._padding_txs(50, 1700000000 - i * 100, f'p{i}') for i in range(10)]
+        module, calls = self._paged_module(pages, monkeypatch)
+        result = asyncio.run(module._check_blockchain_com(self.BTC, deep=True))
+        assert len(calls) == _TX_DEEP_PAGES
+        assert result.data['tx_sample_size'] == _TX_DEEP_PAGES * _TX_PAGE_SIZE
+
+    def test_a_transaction_repeated_across_a_pagination_boundary_counts_once(self, monkeypatch):
+        """A new tx landing on the address between two paginated calls shifts
+        every offset by one, so the same transaction can appear twice across
+        a page boundary. It must not be double-counted into the counterparty
+        set (harmless here) or, worse, be double-processed in a way that
+        could ever invent a second distinct peer out of one real transaction.
+
+        Padding is on the RECEIVED side (peer -> BTC) so it cannot crowd
+        sent_to_addresses' own [:20] cap and mask the assertion below --
+        overlap_tx (BTC -> PEER) is the only thing that can ever appear there.
+        """
+        import asyncio
+        overlap_tx = {'time': 1700000000, 'hash': 'overlap',
+                     'inputs': [{'prev_out': {'addr': self.BTC}}],
+                     'out': [{'addr': self.PEER}]}
+        def _received_padding(n, prefix):
+            return [{'time': 1699999999 - i, 'hash': f'{prefix}{i}',
+                    'inputs': [{'prev_out': {'addr': f'1Padding{prefix}{i}'}}],
+                    'out': [{'addr': self.BTC}]} for i in range(n)]
+        page0 = [overlap_tx] + _received_padding(49, 'p0')
+        page1 = [overlap_tx] + _received_padding(49, 'p1')  # boundary re-sends overlap_tx
+        module, calls = self._paged_module([page0, page1], monkeypatch)
+        result = asyncio.run(module._check_blockchain_com(self.BTC, deep=True))
+        assert result.data['sent_to_addresses'] == [self.PEER]
+        # 50 + 50 - 1 shared duplicate = 99 distinct transactions actually scanned
+        assert result.data['tx_sample_size'] == 99
+
+    def test_a_reciprocal_transaction_past_the_first_page_is_only_found_deep(self, monkeypatch):
+        """The exact real-world gap this loop closes (docs/LOOP20.md): a
+        genuine reciprocal transaction sits beyond the first page of the
+        wallet's own history. The default (shallow) mode must not see it --
+        it is genuinely outside what a bounded default call reads -- while
+        --deep, paginating further into the same real history, must."""
+        import asyncio
+        reciprocal_tx = {'time': 1600000000, 'hash': 'reciprocal',
+                         'inputs': [{'prev_out': {'addr': self.PEER}}],
+                         'out': [{'addr': self.BTC}]}
+        pages = [self._padding_txs(50, 1700000000, 'p0'),
+                self._padding_txs(50, 1690000000, 'p1'),
+                [reciprocal_tx] + self._padding_txs(4, 1680000000, 'p2')]
+
+        module, _ = self._paged_module(pages, monkeypatch)
+        shallow = asyncio.run(module._check_blockchain_com(self.BTC, deep=False))
+        assert self.PEER not in shallow.data.get('received_from_addresses', [])
+
+        module, calls = self._paged_module(pages, monkeypatch)
+        deep = asyncio.run(module._check_blockchain_com(self.BTC, deep=True))
+        assert self.PEER in deep.data['received_from_addresses']
+        assert len(calls) == 3  # stopped on page 2's short (5-tx) page
+
+
 class TestBitcoinModuleEllipticpp:
     """Local-index lookup, no network -- degrades the same way chainabuse does
     without a key, but on dataset/index availability instead of a config key.

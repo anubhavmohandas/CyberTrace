@@ -1,13 +1,35 @@
 """Bitcoin and cryptocurrency OSINT module."""
 
+import asyncio
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import aiohttp
 
 from ..integrations import ellipticpp, exchange_tags
 from .base import BaseModule, ModuleResult, SourceResult
+
+# blockchain.info's own documented per-call maximum for rawaddr -- requesting
+# more is silently clamped by the API, so this is also the unit pagination
+# advances by.
+_TX_PAGE_SIZE = 50
+# Bounded transaction-history depth for the two investigation modes. Both are
+# HARD caps regardless of how large the address's real tx count is -- a real
+# exchange hot wallet (Bitfinex's: 487,628 tx, confirmed live in docs/LOOP20.md)
+# must not turn --deep into an unbounded crawl. Default mode reads exactly one
+# page; --deep paginates up to _TX_DEEP_PAGES pages via the API's own
+# offset/limit contract, stopping early the moment a page comes back short
+# (the address has no more history to page into).
+#
+# Why deeper than one page matters: a real, independently-verified Bitfinex
+# hot<->cold wallet pair has genuine transactions in both directions, but the
+# reciprocal leg sat at positions 105/139/142 of one wallet's own 6,042-tx
+# history (docs/LOOP20.md Phase 3) -- past any single page. 4 pages (200 tx)
+# was chosen to comfortably clear that real, measured depth with headroom,
+# not as a round number.
+_TX_SHALLOW_PAGES = 1
+_TX_DEEP_PAGES = 4
 
 
 class BitcoinModule(BaseModule):
@@ -26,17 +48,25 @@ class BitcoinModule(BaseModule):
     supported_types = {'bitcoin', 'ethereum'}
     
     async def search(self, target: str, **options) -> ModuleResult:
-        """Search cryptocurrency address across blockchain explorers."""
-        
+        """Search cryptocurrency address across blockchain explorers.
+
+        `deep` (the CLI's existing `--deep` flag, otherwise off) widens the
+        transaction-history sample _check_blockchain_com scans for
+        counterparty/direction evidence from one page to _TX_DEEP_PAGES pages
+        -- see the constants above for why depth, not source count, is what
+        that flag buys here for Bitcoin.
+        """
+        deep = bool(options.get('deep'))
+
         result = ModuleResult(
             target=target,
             target_type=self._detect_crypto_type(target),
             module=self.name,
         )
-        
+
         if result.target_type == 'bitcoin':
             sources = [
-                ('blockchain.com', self._check_blockchain_com(target)),
+                ('blockchain.com', self._check_blockchain_com(target, deep=deep)),
                 ('blockchair', self._check_blockchair(target, 'bitcoin')),
                 ('blockstream', self._check_blockstream(target)),
                 ('bitcoinabuse', self._check_bitcoin_abuse(target)),
@@ -73,19 +103,54 @@ class BitcoinModule(BaseModule):
             return 'bitcoin'
         return 'unknown'
     
-    async def _check_blockchain_com(self, address: str) -> SourceResult:
-        """Query blockchain.com API (no auth needed)."""
-        url = f"https://blockchain.info/rawaddr/{address}"
-        
-        data = await self.fetch_json(url)
-        
+    async def _check_blockchain_com(self, address: str, deep: bool = False) -> SourceResult:
+        """Query blockchain.com API (no auth needed).
+
+        Transaction depth is explicit and bounded, not an accident of the
+        API's default page size. `deep=False` (investigation default) reads
+        one page (<=_TX_PAGE_SIZE tx); `deep=True` paginates via rawaddr's own
+        offset/limit contract up to _TX_DEEP_PAGES pages, stopping the moment
+        a page comes back short -- a wallet with 5 transactions never pays for
+        3 more calls that can't return anything. See the module-level
+        constants for why 4 pages, and docs/LOOP21.md for the real address
+        pair (Bitfinex hot<->cold) this was sized against.
+        """
+        txs: List[dict] = []
+        seen_hashes = set()
+        data = None
+        max_pages = _TX_DEEP_PAGES if deep else _TX_SHALLOW_PAGES
+        for page in range(max_pages):
+            page_data = await self.fetch_json(
+                f"https://blockchain.info/rawaddr/{address}",
+                params={'limit': _TX_PAGE_SIZE, 'offset': page * _TX_PAGE_SIZE},
+            )
+            if not page_data:
+                break
+            if data is None:
+                data = page_data  # balance/n_tx/etc. are only ever read off page 0
+            page_txs = page_data.get('txs', [])
+            for tx in page_txs:
+                # Pagination-boundary overlap (a new tx can shift offsets
+                # between calls) must not double-count a transaction's
+                # addresses into cospend/counterparty/direction sets twice.
+                tx_hash = tx.get('hash')
+                if tx_hash and tx_hash in seen_hashes:
+                    continue
+                if tx_hash:
+                    seen_hashes.add(tx_hash)
+                txs.append(tx)
+            if len(page_txs) < _TX_PAGE_SIZE:
+                break  # short page: no more history for this address to page into
+            if page + 1 < max_pages:
+                await asyncio.sleep(1.0)  # blockchain.info asks for spaced requests
+
         if not data:
             return SourceResult(
                 source='blockchain.com',
                 success=False,
                 error='No data returned',
             )
-        
+
         # Parse response
         parsed = {
             'address': data.get('address'),
@@ -97,9 +162,8 @@ class BitcoinModule(BaseModule):
             'total_sent_btc': data.get('total_sent', 0) / 100_000_000,
             'tx_count': data.get('n_tx', 0),
         }
-        
+
         # Get first and last transaction
-        txs = data.get('txs', [])
         if txs:
             parsed['first_seen'] = datetime.fromtimestamp(txs[-1].get('time', 0)).isoformat()
             parsed['last_seen'] = datetime.fromtimestamp(txs[0].get('time', 0)).isoformat()
@@ -128,7 +192,7 @@ class BitcoinModule(BaseModule):
             # set stays TRANSACTED_WITH, these become SENT_FUNDS_TO.
             cospend, counterparty = set(), set()
             sent_to, received_from = set(), set()
-            for tx in txs[:10]:
+            for tx in txs:
                 inputs = {inp.get('prev_out', {}).get('addr') for inp in tx.get('inputs', [])}
                 inputs.discard(None)
                 outs = {o.get('addr') for o in tx.get('out', [])
@@ -147,7 +211,13 @@ class BitcoinModule(BaseModule):
             parsed['sent_to_addresses'] = sorted(sent_to - cospend)[:20]
             parsed['received_from_addresses'] = sorted(received_from - cospend)[:20]
             parsed['connected_addresses'] = sorted(cospend | counterparty)[:20]
-        
+
+        # How far this call actually looked -- makes the sampling window an
+        # observable fact instead of a silent implementation detail. Distinct
+        # tx count after dedup, not raw pages fetched, since a short final
+        # page or an overlap can make those differ.
+        parsed['tx_sample_size'] = len(txs)
+
         return SourceResult(
             source='blockchain.com',
             success=True,
@@ -593,6 +663,11 @@ class BitcoinModule(BaseModule):
             # evidence.enrich_bitcoin's SENT_FUNDS_TO branch.
             'sent_to_addresses': [],
             'received_from_addresses': [],
+            # How many distinct transactions blockchain.com's counterparty
+            # extraction actually scanned -- the sampling window is a fact an
+            # analyst can see, not silent. None for a target with no
+            # blockchain.com source (e.g. ethereum) or no tx history.
+            'tx_sample_size': None,
         }
         
         # Aggregate from sources
@@ -668,5 +743,7 @@ class BitcoinModule(BaseModule):
                 summary['sent_to_addresses'] = data['sent_to_addresses']
             if data.get('received_from_addresses'):
                 summary['received_from_addresses'] = data['received_from_addresses']
+            if source == 'blockchain.com' and data.get('tx_sample_size') is not None:
+                summary['tx_sample_size'] = data['tx_sample_size']
 
         return summary

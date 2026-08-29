@@ -2947,6 +2947,40 @@ def test_a_two_way_exchange_relationship_is_never_reported_as_a_deposit(tmp_path
         assert "never recorded" not in text     # direction WAS recorded, twice
 
 
+def test_reciprocal_directed_edges_from_two_independent_captures_merge_into_both_ways(tmp_path):
+    """Loop 21's real shape (docs/LOOP20.md): a real Bitfinex hot<->cold wallet
+    pair has genuine transactions in both directions, but each wallet's OWN
+    live capture only ever reports the direction ITS OWN transaction sample
+    saw -- one capture says suspect->VASP, a separate later capture of the
+    VASP-side address says VASP->suspect. Two different SENT_FUNDS_TO
+    relationship rows result (source/target swapped), not one.
+    wallet_exchange_paths must read the union of both captures as BOTH_WAYS,
+    the same as test_a_two_way_exchange_relationship_is_never_reported_as_a_
+    deposit does for a single capture that already saw both directions
+    itself -- this pins that the merge also works when the two directions
+    arrive as two entirely separate ingests, which is the real Bitfinex
+    hot<->cold shape (each wallet's own transaction sample only ever reports
+    its own side).
+
+    Uses UNDESIGNATED_SUSPECT/BINANCE_HOT rather than the real Bitfinex
+    addresses: both real Bitfinex wallets are themselves VASP_DISCLOSED
+    (Loop 16/20), so tracing either one directly resolves AT_VASP on itself
+    at hop 0 before ever reaching the other -- the same reason the rest of
+    this file stopped tracing OFAC_SUEX/OFAC_POLYANIN directly once
+    _vasp_endpoints started reading the OFAC SDN. The mechanism under test
+    (two independent SENT_FUNDS_TO captures merging into one BOTH_WAYS
+    reading) is identical either way."""
+    with EvidenceStore(str(tmp_path / "reciprocal.db")) as store:
+        suspect = _traced(store, UNDESIGNATED_SUSPECT, {"sent_to_addresses": [BINANCE_HOT]})
+        _traced(store, BINANCE_HOT, {"sent_to_addresses": [UNDESIGNATED_SUSPECT]})
+        label_exchange(store, BINANCE_HOT, "binance.com", analyst="jdoe")
+
+        hit = next(w for w in wallet_exchange_paths(store) if w["entity_id"] == suspect)
+        assert hit["proximity"] == "DIRECT"
+        assert hit["hops"] == 1
+        assert hit["direction"] == "BOTH_WAYS"
+
+
 def test_a_shared_omnibus_endpoint_is_flagged_rather_than_read_as_customer_evidence(tmp_path):
     """Two unrelated OFAC-designated entities reaching one exchange hot wallet
     is a fact about the hot wallet, not about either suspect. Measured live:
