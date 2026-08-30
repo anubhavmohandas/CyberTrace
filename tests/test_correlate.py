@@ -1234,6 +1234,151 @@ def test_a_tag_attested_vasp_is_reachable_but_never_becomes_an_edge(tmp_path):
         assert run_correlation(store)["operators"] == []
 
 
+# --- Loop 33: GraphSense service/category intelligence (mixing_service,
+# defi, defi_dex, coinjoin) -- surfaced alongside, never inside, VASP
+# attribution. Real addresses read directly off the shipped corpus, same
+# discipline as the TAG_ATTESTED test above: one per supported category
+# (verified single-category, no independent OFAC/exchange tag, at loop-33
+# authoring time), plus one from an explicitly unsupported category.
+
+def test_wallet_trace_report_surfaces_a_coinjoin_tag_as_intermediate_intelligence(tmp_path):
+    """Suspect -> CoinJoin-tagged wallet -> exchange-tagged wallet: the
+    2-hop shape the loop's own spec calls out (Suspect -> Wallet A ->
+    CoinJoin service -> Wallet B -> VASP). The endpoint stays VASP
+    attribution (TAG_ATTESTED, unaffected, exactly as before this loop);
+    the CoinJoin hop is a separate, structured finding, never the reported
+    exchange and never a VASP field."""
+    from cybertrace.integrations import exchange_tags
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+    coinjoin_addr = "bc1qnfu52l5vgg0gf2hw98epfvupveepnq7tg5l75h"   # samourai: coinjoin only
+    binance = "34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo"                  # category=exchange
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        suspect = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        sid1 = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
+        enrich_bitcoin(store, sid1, suspect,
+                       {"address": BTC_VALID, "sent_to_addresses": [coinjoin_addr]}, "bitcoin")
+        coinjoin_id = store.find_entity("BTC_ADDRESS", coinjoin_addr)
+        sid2 = store.insert_snapshot(store.upsert_target("btc:" + coinjoin_addr), {}, "bitcoin")
+        enrich_bitcoin(store, sid2, coinjoin_id,
+                       {"address": coinjoin_addr, "sent_to_addresses": [binance]}, "bitcoin")
+
+        report = wallet_trace_report(store, BTC_VALID)
+        assert report["hops"] == 2
+        assert report["attribution"] == TAG_ATTESTED
+        assert report["exchange"] not in ("Samourai Wallet", "samourai wallet")
+
+        tags = report["service_tags"]
+        assert len(tags) == 1
+        assert tags[0] == {
+            "entity_id": coinjoin_id, "value": coinjoin_addr,
+            "category": "coinjoin", "label": "Samourai Wallet",
+            "attribution": TAG_ATTESTED,
+            "attribution_source": "GraphSense tagpack: samourai",
+            "evidence_ids": [],
+        }
+
+        flags_text = " ".join(report["flags"])
+        assert ("transaction path intersects a GraphSense-tagged CoinJoin "
+                "service: Samourai Wallet" in flags_text)
+        # Never phrased as the nearest-VASP finding.
+        assert "Nearest VASP" not in flags_text
+
+
+def test_wallet_trace_report_surfaces_a_defi_tag_with_no_vasp_path_at_all(tmp_path):
+    """The defi/defi_dex tags exist without ever reaching a VASP -- proves
+    service_tags surfaces on the searched wallet itself, independent of
+    whether wallet_exchange_paths finds anything (hit is None here)."""
+    from cybertrace.integrations import exchange_tags
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+    defi_addr = "0xc25167ffa19b4d9d03c7d5aa4682c7063f345b66"   # defi-protocols-csh: defi only
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr_id = store.upsert_entity("ETH_ADDRESS", defi_addr)
+        sid = store.insert_snapshot(store.upsert_target("eth:" + defi_addr), {}, "ethereum")
+        enrich_bitcoin(store, sid, addr_id, {"address": defi_addr}, "ethereum")
+
+        report = wallet_trace_report(store, defi_addr)
+        assert report["hops"] is None
+        assert report["exchange"] is None
+        assert report["service_tags"] == [{
+            "entity_id": addr_id, "value": defi_addr,
+            "category": "defi", "label": "renvm_Protocol",
+            "attribution": TAG_ATTESTED,
+            "attribution_source": "GraphSense tagpack: defi-protocols-csh",
+            "evidence_ids": [],
+        }]
+        assert "DeFi service" in " ".join(report["flags"])
+
+
+def test_wallet_trace_report_surfaces_a_defi_dex_tag(tmp_path):
+    from cybertrace.integrations import exchange_tags
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+    dex_addr = "0x9424b1412450d0f8fc2255faf6046b98213b76bd"   # defi-protocols-csh: defi_dex only
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr_id = store.upsert_entity("ETH_ADDRESS", dex_addr)
+        sid = store.insert_snapshot(store.upsert_target("eth:" + dex_addr), {}, "ethereum")
+        enrich_bitcoin(store, sid, addr_id, {"address": dex_addr}, "ethereum")
+
+        report = wallet_trace_report(store, dex_addr)
+        assert report["service_tags"][0]["category"] == "defi_dex"
+        assert "DeFi DEX" in " ".join(report["flags"])
+
+
+def test_wallet_trace_report_surfaces_a_mixing_service_tag_beside_its_own_ofac_attribution(tmp_path):
+    """Blender.io is real ground truth for BOTH datasets at once: an OFAC
+    SDN digital-currency-address record (REGULATORY_ATTESTED -- pre-existing
+    behavior, unchanged: 'OFAC-designated entity', not 'VASP') AND a
+    GraphSense mixing_service tag. Proves the two coexist without either
+    corrupting the other: the endpoint fields stay exactly what OFAC alone
+    would have produced, and the mixer tag rides beside them in
+    service_tags, never replacing them."""
+    from cybertrace.integrations import exchange_tags, ofac
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+    if not (ofac.available() and ofac.index_available()):
+        pytest.skip("OFAC SDN not downloaded/indexed in this checkout")
+    blender = "3NDzzVxiLBUs1WPvVGRfCYDTAD2Ua2PvW4"   # OFAC: Blender.io; GraphSense: mixing_service
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        suspect = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        sid = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
+        enrich_bitcoin(store, sid, suspect,
+                       {"address": BTC_VALID, "sent_to_addresses": [blender]}, "bitcoin")
+
+        report = wallet_trace_report(store, BTC_VALID)
+        # Pre-existing REGULATORY_ATTESTED behavior, byte-for-byte unchanged.
+        assert report["exchange"] == "Blender.io"
+        assert report["attribution"] == REGULATORY_ATTESTED
+        assert report["proximity"] == "DIRECT"
+
+        # The separate, additive finding this loop adds.
+        tags = report["service_tags"]
+        assert len(tags) == 1
+        assert tags[0]["category"] == "mixing_service"
+        assert tags[0]["attribution"] == TAG_ATTESTED           # not REGULATORY_ATTESTED
+        assert tags[0]["attribution_source"].startswith("GraphSense tagpack:")
+        assert tags[0]["evidence_ids"] == []
+
+
+def test_wallet_service_category_is_not_surfaced_as_a_service_tag(tmp_path):
+    """wallet_service is a real category in this corpus (Inputs.io, a 2013
+    hosted-wallet hack) -- deliberately outside the four this loop surfaces.
+    Must read as no findings at all, not as a silently-passed-through fifth
+    category."""
+    from cybertrace.integrations import exchange_tags
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+    wallet_service_addr = "19NXYce4udWqeW9U1KgVoLzDVa26v6SbGz"   # hacks: wallet_service
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        store.upsert_entity("BTC_ADDRESS", wallet_service_addr)
+
+        report = wallet_trace_report(store, wallet_service_addr)
+        assert report["service_tags"] == []
+        assert not any("GraphSense-tagged" in f for f in report["flags"])
+        assert report["exchange"] is None
+
+
 def test_an_analyst_label_outranks_a_third_party_tag_on_one_address(tmp_path):
     """Both sources naming the same address must not read as two findings, and
     the analyst -- the one who has to stand behind it -- is the one cited."""

@@ -6,6 +6,11 @@ Read-only over external_data/exchange_tags/original/graphsense-tagpacks.zip
 MIT licensed (confirmed via the GitHub API) -- unlike Elliptic++ this dataset
 is openly redistributable; see external_data/exchange_tags/manifest.json.
 
+exchange_labels/vasp_disclosed_labels read category='exchange' only (VASP
+attribution); service_tags reads a disjoint, non-VASP set -- mixing_service,
+defi, defi_dex, coinjoin (see _SERVICE_CATEGORIES) -- kept out of VASP
+attribution entirely, never merged into the same field.
+
 SAFETY BOUNDARY -- same class as ellipticpp.py's, applied to a second, public
 dataset: a tag here is a THIRD PARTY's public claim about an address (a
 contributed tagpack entry), never CyberTrace's own finding and never proof of
@@ -161,6 +166,15 @@ def lookup_address(address: str, currency: str) -> List[Dict[str, Any]]:
              "source": r[4], "pack": r[5]} for r in rows]
 
 
+# Non-VASP service/category intelligence this project surfaces alongside
+# exchange attribution -- GraphSense TagPacks' own category vocabulary, not a
+# taxonomy CyberTrace invented. Any other category this corpus carries (miner,
+# gambling, wallet_service, defi_lending, black_list, ...) is read and dropped
+# in service_tags below on purpose: extend this set, not a caller, once a new
+# category has independently earned investigator surfacing.
+_SERVICE_CATEGORIES = {"mixing_service", "defi", "defi_dex", "coinjoin"}
+
+
 def _canon_index(addresses: Dict[str, List[str]]) -> Dict[str, str]:
     """canonical bare address -> the raw value the caller passed in, for every
     (currency, address) pair this project has a normalizer for. Shared by
@@ -243,6 +257,52 @@ _VASP_DISCLOSED_SOURCES: Dict[str, str] = {
     "https://s3-eu-west-1.amazonaws.com/public.bitmex.com/data/porl/"
     "20221115-reserves-763269-20221115D113036434534000.yaml": "BitMEX",
 }
+
+
+def service_tags(addresses: Dict[str, List[str]]) -> Dict[str, List[Dict[str, Any]]]:
+    """{raw address -> [{"category", "label", "pack"}, ...]} for every input
+    this corpus tags under a non-VASP service category CyberTrace surfaces --
+    mixing_service, defi, defi_dex, coinjoin (see _SERVICE_CATEGORIES). One
+    address can carry more than one hit (a coinjoin wallet also flagged by a
+    second pack, say), so unlike exchange_labels this returns a list per
+    address rather than the first tag.
+
+    Same batching and degradation contract as exchange_labels: returns {} --
+    never raises -- when the archive or its index is absent.
+
+    SAFETY: same boundary as exchange_labels and vasp_disclosed_labels -- a
+    hit here is a third party's public claim that an address is a
+    mixer/DeFi/CoinJoin service, never CyberTrace's own finding. Unlike an
+    exchange tag it is not even a VASP *candidate*: a caller must never let
+    this populate `exchange`, nearest-VASP attribution, direct_vasp_contacts,
+    or secondary_vasp_contacts -- it is service/category intelligence, kept
+    in a field of its own.
+    """
+    if not (available() and index_available()):
+        return {}
+    by_canon = _canon_index(addresses)
+    if not by_canon:
+        return {}
+
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    conn = sqlite3.connect(f"file:{INDEX_PATH}?mode=ro", uri=True)
+    try:
+        keys = list(by_canon)
+        cats = sorted(_SERVICE_CATEGORIES)
+        cat_marks = ",".join("?" * len(cats))
+        for i in range(0, len(keys), 400):        # SQLITE_MAX_VARIABLE_NUMBER
+            chunk = keys[i:i + 400]
+            marks = ",".join("?" * len(chunk))
+            for addr, category, label, pack in conn.execute(
+                    f"SELECT address, category, label, pack FROM tags "
+                    f"WHERE address IN ({marks}) AND lower(category) IN ({cat_marks})",
+                    tuple(chunk) + tuple(cats)):
+                raw = by_canon[addr]
+                out.setdefault(raw, []).append(
+                    {"category": category.lower(), "label": label, "pack": pack})
+    finally:
+        conn.close()
+    return out
 
 
 def vasp_disclosed_labels(addresses: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]]:

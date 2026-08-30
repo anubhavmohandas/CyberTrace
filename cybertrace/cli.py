@@ -476,6 +476,10 @@ def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: s
     the evidence it came from; label-exchange and search results feed this,
     correlate never invents new ones here.
 
+    A path address GraphSense tags as a mixing service, DeFi service, DeFi
+    DEX, or CoinJoin service shows up as its own flag line and in
+    `service_tags` — separate from, and never counted as, VASP attribution.
+
     \b
       cybertrace trace-wallet bc1q... --db case.db
     """

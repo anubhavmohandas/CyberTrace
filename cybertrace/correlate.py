@@ -823,6 +823,69 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
     return out
 
 
+# Human-readable phrase per GraphSense non-VASP service category -- module
+# level so wallet_path_flags' flag text and wallet_trace_report's structured
+# service_tags field describe the same category the same way.
+_SERVICE_CATEGORY_PHRASE = {
+    "mixing_service": "mixing service",
+    "defi": "DeFi service",
+    "defi_dex": "DeFi DEX",
+    "coinjoin": "CoinJoin service",
+}
+
+
+def _path_service_tags(store: EvidenceStore, path_ids: List[str]) -> Dict[str, List[dict]]:
+    """entity_id -> every GraphSense TagPacks hit on a non-VASP service
+    category (mixing_service, defi, defi_dex, coinjoin) for THESE addresses
+    only -- scoped to one wallet_exchange_paths() path, or wallet_trace_
+    report's single-wallet fallback, the same narrow scoping wallet_path_
+    flags already uses for scam/Elliptic++/tagpack metadata below it.
+
+    Reads the same offline GraphSense corpus _vasp_endpoints reads, batched
+    the same currency-grouped way -- but a mixer/DeFi/CoinJoin tag is
+    service/category intelligence, never a VASP claim: this is never
+    consulted by the nearest-VASP BFS, direct_vasp_contacts, or secondary_
+    vasp_contacts, and nothing here writes into `exchange` or VASP
+    `attribution`. attribution is always TAG_ATTESTED -- the only tier this
+    corpus supports for a service tag -- and evidence_ids is always [], the
+    same "the citation IS the evidence" contract exchange_tags.py's SAFETY
+    boundary already sets for TAG_ATTESTED VASP hits (see _vasp_endpoints).
+    """
+    if not path_ids:
+        return {}
+    marks = ",".join("?" * len(path_ids))
+    rows = store._all(
+        f"SELECT entity_id, etype, raw_value, normalized_value FROM entities "
+        f"WHERE entity_id IN ({marks})", tuple(path_ids))
+    by_currency: Dict[str, List[str]] = defaultdict(list)
+    values: Dict[str, str] = {}
+    for r in rows:
+        value = r["raw_value"] or r["normalized_value"]
+        values[r["entity_id"]] = value
+        currency = _TAG_CURRENCY.get(r["etype"])
+        if currency:
+            by_currency[currency].append(value)
+    if not by_currency:
+        return {}
+
+    from .integrations.exchange_tags import service_tags as _lookup_service_tags
+    tagged = _lookup_service_tags(dict(by_currency))
+
+    out: Dict[str, List[dict]] = {}
+    for eid, value in values.items():
+        hits = tagged.get(value)
+        if not hits:
+            continue
+        out[eid] = [
+            {"category": h["category"], "label": h["label"],
+             "attribution": TAG_ATTESTED,
+             "attribution_source": f"GraphSense tagpack: {h['pack']}",
+             "evidence_ids": []}
+            for h in hits
+        ]
+    return out
+
+
 def _secondary_vasp_reach(adjacency: Dict[str, Dict[str, tuple]],
                           exchange_of: Dict[str, dict], start: str,
                           max_hops: int) -> Dict[str, dict]:
@@ -1117,6 +1180,7 @@ def wallet_path_flags(store: EvidenceStore, hit: Optional[dict],
     by_id = {r["entity_id"]: r for r in store._all(
         f"SELECT entity_id, raw_value, metadata FROM entities WHERE entity_id IN ({marks})",
         tuple(path_ids))}
+    service_hits = _path_service_tags(store, path_ids)
 
     flags = []
     for eid in path_ids:
@@ -1134,6 +1198,18 @@ def wallet_path_flags(store: EvidenceStore, hit: Optional[dict],
         packs = meta.get("exchange_tag_packs")
         if packs:
             flags.append(f"{addr}: GraphSense tagpack(s): {', '.join(packs)}")
+        # Service/category intelligence, never VASP attribution -- see
+        # _path_service_tags. Worded "transaction path intersects" rather
+        # than "this address is" because a mixer/DeFi/CoinJoin tag names a
+        # service the path passed through, not a claim about who controls
+        # or owns it, and never implies laundering, criminality, or a
+        # customer relationship.
+        for tag in service_hits.get(eid, []):
+            phrase = _SERVICE_CATEGORY_PHRASE.get(tag["category"], tag["category"])
+            flags.append(
+                f"{addr}: transaction path intersects a GraphSense-tagged "
+                f"{phrase}: {tag['label']} "
+                f"({_ATTRIBUTION_SOURCE_PHRASE[TAG_ATTESTED]}; {tag['attribution_source']})")
 
     if hit:
         # Proximity, attribution and direction each answer a different question
@@ -1230,6 +1306,14 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4) -
     hop discovered purely as a counterparty (never itself investigated) has
     none, and this is silent about it rather than implying absence-of-risk.
 
+    `service_tags` is a SEPARATE, non-VASP finding: every GraphSense-tagged
+    mixing_service/defi/defi_dex/coinjoin hit on an address along the path
+    (see _path_service_tags), structured for a caller that wants it without
+    parsing `flags`' matching text back out. It never populates `exchange`,
+    `attribution`, or any VASP field above -- a mixer/DeFi/CoinJoin tag is
+    service/category intelligence, not a VASP claim and not proof of illicit
+    activity, ownership, or a customer relationship.
+
     Returns None if `address` was never searched into this store at all.
     """
     from .detector import chain_caveat, detect_input_type
@@ -1257,6 +1341,18 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4) -
         f"SELECT entity_id, raw_value FROM entities WHERE entity_id IN ({marks})",
         tuple(path_ids))}
 
+    # Structured sibling of the "transaction path intersects..." flags text
+    # above -- same data, machine-readable, kept in a field of its own so a
+    # reader never has to parse it back out of `exchange`/`attribution`,
+    # which stay VASP-only. See _path_service_tags' docstring for the
+    # VASP/service-tag separation this preserves.
+    service_by_id = _path_service_tags(store, path_ids)
+    service_tags = [
+        {"entity_id": eid,
+         "value": by_id[eid]["raw_value"] if eid in by_id else eid, **tag}
+        for eid in path_ids for tag in service_by_id.get(eid, [])
+    ]
+
     return {
         "entity_id": start_id,
         "address": by_id[start_id]["raw_value"] if start_id in by_id else address,
@@ -1270,6 +1366,7 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4) -
         "direction": hit["direction"] if hit else None,
         "flags": flags,
         "evidence_ids": hit["evidence_ids"] if hit else [],
+        "service_tags": service_tags,
     }
 
 

@@ -223,6 +223,60 @@ class TestExchangeTagsIndex:
             exchange_tags.lookup_address("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", "BTC")
 
 
+class TestExchangeTagsServiceTags:
+    """service_tags(): the non-VASP sibling of exchange_labels, reading the
+    same corpus filtered to a disjoint category set (mixing_service, defi,
+    defi_dex, coinjoin -- see exchange_tags._SERVICE_CATEGORIES). Real
+    addresses, read directly off the shipped packs, the same way
+    TestExchangeTagsIndex pins lookup_address against binance.yaml."""
+
+    # Real addresses independently confirmed present in the shipped corpus
+    # (external_data/exchange_tags/index.sqlite) at loop-33 authoring time,
+    # one per supported category plus one from an explicitly unsupported
+    # category (wallet_service) sharing the same currency shape.
+    _MIXER = "3NDzzVxiLBUs1WPvVGRfCYDTAD2Ua2PvW4"          # blender_io: Blender.io
+    _COINJOIN = "bc1qnfu52l5vgg0gf2hw98epfvupveepnq7tg5l75h"  # samourai: Samourai Wallet
+    _DEFI = "0xc25167ffa19b4d9d03c7d5aa4682c7063f345b66"      # defi-protocols-csh
+    _DEFI_DEX = "0x9424b1412450d0f8fc2255faf6046b98213b76bd"  # defi-protocols-csh
+    _UNSUPPORTED = "19NXYce4udWqeW9U1KgVoLzDVa26v6SbGz"       # hacks: category=wallet_service
+
+    @pytest.mark.skipif(not exchange_tags.index_available(),
+                        reason="GraphSense TagPacks index not built (call build_index() once)")
+    def test_each_supported_category_is_returned(self):
+        hits = exchange_tags.service_tags(
+            {"BTC": [self._MIXER, self._COINJOIN], "ETH": [self._DEFI, self._DEFI_DEX]})
+        assert {h["category"] for h in hits[self._MIXER]} == {"mixing_service"}
+        assert {h["category"] for h in hits[self._COINJOIN]} == {"coinjoin"}
+        assert {h["category"] for h in hits[self._DEFI]} == {"defi"}
+        assert {h["category"] for h in hits[self._DEFI_DEX]} == {"defi_dex"}
+        # pack is carried through unchanged, same as exchange_labels/
+        # vasp_disclosed_labels -- an investigator's route back to the source.
+        assert hits[self._MIXER][0]["pack"] == "blender_io"
+
+    @pytest.mark.skipif(not exchange_tags.index_available(),
+                        reason="GraphSense TagPacks index not built (call build_index() once)")
+    def test_an_unsupported_category_is_never_returned(self):
+        # wallet_service is a real category in this corpus (Inputs.io, a 2013
+        # hosted-wallet hack) -- deliberately absent from _SERVICE_CATEGORIES,
+        # and must stay absent rather than leaking through as an accidental
+        # fifth category nobody decided to surface.
+        assert exchange_tags.service_tags({"BTC": [self._UNSUPPORTED]}) == {}
+
+    @pytest.mark.skipif(not exchange_tags.index_available(),
+                        reason="GraphSense TagPacks index not built (call build_index() once)")
+    def test_exchange_labels_and_service_tags_are_disjoint(self):
+        # The real Binance address exchange_labels tests already use --
+        # category='exchange' must never also come back as a service tag.
+        binance = "34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo"
+        assert exchange_tags.exchange_labels({"BTC": [binance]})
+        assert exchange_tags.service_tags({"BTC": [binance]}) == {}
+
+    def test_service_tags_degrades_to_empty_without_the_index(self, monkeypatch):
+        # Same degradation contract as exchange_labels -- never raises.
+        monkeypatch.setattr(exchange_tags, "index_available", lambda: False)
+        assert exchange_tags.service_tags({"BTC": [self._MIXER]}) == {}
+
+
 class TestOfacIndex:
     """Mirrors TestExchangeTagsIndex, over the OFAC SDN Advanced XML adapter.
     Uses two addresses independently verified: Grinex's
