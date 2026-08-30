@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Score cybertrace.stylometry's n-gram author-profile similarity against
-external_data/evolution's own ground truth -- the Phase 2 validation gate
+external_data/evolution's own ground truth -- the validation gate
 before any BEHAVIORAL_SIMILARITY signal is allowed near correlate.py.
 
     python tools/eval_stylometry.py

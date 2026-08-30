@@ -39,7 +39,7 @@ Every row is labeled `"attribution": "NOT ESTABLISHED BY MEMORY"` so a caller
 can never forward one as a SAME_OPERATOR claim by accident.
 
 SIMILAR (fuzzy/derived similarity) is still not implemented: no justifying
-case in corpus/labels.toml, and Phase 7's own priority order puts it last.
+case in corpus/labels.toml, and it is deliberately the lowest priority.
 """
 
 from __future__ import annotations
@@ -302,9 +302,9 @@ def pattern_overlap(store: EvidenceStore, target_url: str) -> List[dict]:
 def summarize(matches: List[dict]) -> List[dict]:
     """Aggregate per (etype, value): how many previous targets, first/last
     seen across all of them, and whether any analyst feedback is on file.
-    Phase 10's "seen on 3 previous targets" without losing the per-target
-    rows — call historical_matches() again to inspect what was aggregated
-    away."""
+    Preserves a "seen on 3 previous targets" summary without losing the
+    per-target rows — call historical_matches() again to inspect what was
+    aggregated away."""
     groups: Dict[tuple, dict] = {}
     for m in matches:
         key = (m["classification"], m.get("etype"), m.get("value"))

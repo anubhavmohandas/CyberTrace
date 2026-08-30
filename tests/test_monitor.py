@@ -80,8 +80,8 @@ class TestWalletTargets:
             assert wallet_targets(s) == []
 
     def test_a_pivot_discovered_wallet_resolves_its_own_canonical_target(self):
-        """Real shape found live against cases/tortaxi.db (this loop's own
-        adversarial validation, not a synthetic guess): a market crawl's own
+        """Real shape found live against cases/tortaxi.db (adversarial
+        validation against a real case database, not a synthetic guess): a market crawl's own
         operator_pivot enrichment of an address found on the page is filed
         under the MARKET's target row (evidence.py:1290-1294), yet its
         observation's method still ends in ':enrichment'. wallet_targets must
@@ -225,18 +225,17 @@ class TestWalletRecheck:
     def test_a_pivot_discovered_wallets_first_recheck_lands_on_its_own_chain(
             self, monkeypatch):
         """End-to-end version of the wallet_targets fix above, using the exact
-        real shape found live against cases/tortaxi.db this loop.
+        real shape found live against cases/tortaxi.db.
 
         insert_snapshot chains per (target_id, collector) -- correct for page
-        captures (docs/LOOP-era comment beside it: a per-target-only chain
-        would compare unrelated pages) but it means a pivot's capture
-        (collector="operator_pivot:pivot") and a direct re-check's capture
-        (collector="bitcoin") are, by that same rule, two different chains
-        even once they share a target_id. So the FIRST watch re-check of a
-        pivot-discovered wallet still reads CHANGED here -- correctly read as
-        "first capture under this collector", not a false claim -- and this
-        is the known, named remainder of the fix (see docs/LOOP24.md): every
-        re-check AFTER this one correctly diffs against ITS OWN prior
+        captures (a per-target-only chain would compare unrelated pages) but
+        it means a pivot's capture (collector="operator_pivot:pivot") and a
+        direct re-check's capture (collector="bitcoin") are, by that same
+        rule, two different chains even once they share a target_id. So the
+        FIRST watch re-check of a pivot-discovered wallet still reads CHANGED
+        here -- correctly read as "first capture under this collector", not a
+        false claim -- and this is the known, named remainder of the fix:
+        every re-check AFTER this one correctly diffs against ITS OWN prior
         "bitcoin"-collector capture, because both now share the right
         target_id. What this test actually pins is the fix that removed the
         WORSE failure: without it, the new capture landed on the market's
@@ -263,7 +262,7 @@ class TestWalletRecheck:
                 (canonical_tid,))
 
         # The recheck's own capture landed on the address's own canonical
-        # target, not the market's -- the failure mode this loop's live run
+        # target, not the market's -- the failure mode a real run
         # against cases/tortaxi.db actually found and this fix closes.
         assert second_snapshot is not None
         assert report["wallets_checked"] == [

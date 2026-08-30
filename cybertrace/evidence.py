@@ -1522,7 +1522,7 @@ def enrich_bitcoin(store: EvidenceStore, snapshot_id: str, addr_id: str, summary
     # _check_blockchain_com), so re-truncating here would just move the same
     # lossy alphabetical cap one layer downstream. ETH/TRX callers of this
     # same function still hand in a list their own module already capped at
-    # 20, so this is a no-op ceiling for them -- see docs/LOOP22.md.
+    # 20, so this is a no-op ceiling for them.
     for peer in (summary.get("cospend_addresses") or []):
         peer_id = store.upsert_entity(etype, str(peer), observed_at=observed_at)
         if not peer_id or peer_id == addr_id:

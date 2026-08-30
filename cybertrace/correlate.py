@@ -684,7 +684,7 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
                            names the entity OFAC designated, not a VASP claim.
       VASP_DISCLOSED       this address is on a VASP's own published wallet
                            list, and that publication was independently
-                           corroborated (docs/LOOP16.md Phase 2) -- currently
+                           corroborated -- currently
                            only Bitfinex's GitHub proof-of-reserves repo and
                            BitMEX's November 2022 proof-of-reserves snapshot;
                            see exchange_tags._VASP_DISCLOSED_SOURCES. This
@@ -935,7 +935,7 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
         w["endpoint_shared_by"] = (len(direct_reachers[w["path"][-1]])
                                    if w["hops"] else 0)
 
-    # docs/LOOP16.md Phase 4's gap: endpoint_shared_by is address-level, but a
+    # endpoint_shared_by is address-level, but a
     # VASP_DISCLOSED source can be a whole disclosed SET (BitMEX: 336,208
     # addresses). Three suspects each reaching a DIFFERENT address in that set
     # each show endpoint_shared_by == 1 -- individually true, and collectively
@@ -943,8 +943,8 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
     # Grouped by "exchange" (the brand -- see the VASP_DISCLOSED write above,
     # which reuses that field rather than adding a redundant one), never by
     # the specific address, and only for VASP_DISCLOSED rows: this is not a
-    # generic cross-address scoring model, only the one guard docs/LOOP16.md
-    # identified as a real prerequisite. hops > 0 only, same reasoning as
+    # generic cross-address scoring model, only the one guard the omnibus
+    # disclosure shape above requires. hops > 0 only, same reasoning as
     # endpoint_shared_by above.
     brand_reachers: Dict[str, set] = defaultdict(set)
     for w in out:

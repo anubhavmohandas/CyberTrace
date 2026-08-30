@@ -1309,7 +1309,7 @@ def test_an_analyst_label_outranks_an_ofac_designation_on_one_address(tmp_path):
 def test_ofac_designation_outranks_a_third_party_tag_on_one_address(tmp_path):
     """The collision this integration exists to guard against: Blender.io's
     GraphSense tag (category=mixing_service) is itself sourced from this same
-    OFAC action -- see docs/LOOP14.md Phase 6 -- so the same real address is
+    OFAC action, so the same real address is
     independently present in both local corpora. It must surface as ONE
     finding, at REGULATORY_ATTESTED, not as two pieces of evidence."""
     from cybertrace.integrations import exchange_tags, ofac
@@ -1333,9 +1333,9 @@ def test_ofac_designation_outranks_a_third_party_tag_on_one_address(tmp_path):
         assert "OFAC SDN" in hits[0]["attribution_source"]
 
 
-# --- Loop 17: VASP_DISCLOSED (docs/LOOP17.md) --------------------------------
+# --- VASP_DISCLOSED -----------------------------------------------------
 #
-# Real addresses from the two sources docs/LOOP16.md Phase 2 independently
+# Real addresses from the two sources independently
 # verified live -- Bitfinex's own GitHub proof-of-reserves repo and BitMEX's
 # November 2022 proof-of-reserves snapshot -- not fixtures. See
 # cybertrace.integrations.exchange_tags._VASP_DISCLOSED_SOURCES.
@@ -1344,7 +1344,7 @@ BITMEX_RESERVE = "3BMEXbSSrK2K7cRgqxrtqUWfxowBBrW1BE"    # bitmex reserve wallet
 
 
 def test_a_real_bitfinex_disclosed_address_is_vasp_disclosed_not_an_edge(tmp_path):
-    """Phase 6/11 item 6: a real address from Bitfinex's own published
+    """A real address from Bitfinex's own published
     wallets.txt reaches VASP_DISCLOSED attribution, and the same boundary
     REGULATORY_ATTESTED/TAG_ATTESTED already hold applies unchanged: no
     EXCHANGE_DEPOSIT edge, no EXCHANGE entity, no operator claim."""
@@ -1371,8 +1371,8 @@ def test_a_real_bitfinex_disclosed_address_is_vasp_disclosed_not_an_edge(tmp_pat
 
 
 def test_a_real_bitmex_disclosed_address_is_vasp_disclosed(tmp_path):
-    """Phase 6/11 item 7: same check against the BitMEX proof-of-reserves
-    population (336,208 addresses, docs/LOOP16.md Phase 2) rather than
+    """Same check against the BitMEX proof-of-reserves
+    population (336,208 addresses) rather than
     Bitfinex's much smaller set -- the two verified sources are read through
     the same code path, so both must attribute identically."""
     from cybertrace.integrations import exchange_tags
@@ -1437,8 +1437,8 @@ def test_an_analyst_label_outranks_a_vasp_disclosure_on_one_address(tmp_path):
 
 
 def test_ofac_designation_outranks_a_vasp_disclosure_on_one_address(tmp_path, monkeypatch):
-    """Mechanism fixture, not ground-truth validation (docs/LOOP17.md Phase
-    11): checked directly against both local indexes, zero real addresses are
+    """Mechanism fixture, not ground-truth validation: checked directly
+    against both local indexes, zero real addresses are
     both OFAC-designated and in either verified VASP_DISCLOSED source set, so
     there is no real address to pin this collision on. This pins the write
     order _vasp_endpoints actually encodes -- REGULATORY_ATTESTED is written
@@ -1465,11 +1465,11 @@ def test_ofac_designation_outranks_a_vasp_disclosure_on_one_address(tmp_path, mo
 
 
 def test_vasp_disclosed_direction_is_independent_of_attribution_source(tmp_path):
-    """Phase 7/11 item 9: TO_VASP / FROM_VASP / BOTH_WAYS derive purely from
+    """TO_VASP / FROM_VASP / BOTH_WAYS derive purely from
     the transaction graph (correlate._direction), unchanged by which tier
     named the endpoint -- exercised here against a real VASP_DISCLOSED
-    endpoint the same way docs/LOOP16.md Phase 5 confirmed it for
-    REGULATORY_ATTESTED/TAG_ATTESTED by reading, not by new code."""
+    endpoint the same way it was already confirmed for
+    REGULATORY_ATTESTED/TAG_ATTESTED, by reading, not by new code."""
     from cybertrace.integrations import exchange_tags
     if not (exchange_tags.available() and exchange_tags.index_available()):
         pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
@@ -1759,9 +1759,9 @@ def test_two_onions_behind_one_tor_exit_are_not_linked(tmp_path):
     (classify_ip.__doc__: TOR_RELAY "outranks the rest and is the one class
     that argues AGAINST the candidate"), so this pins that ip_class carrying
     that verdict changes nothing about NON_ATTRIBUTIVE_SIGNALS gating
-    shared_ip already does independent of enrichment (see the trace this loop
-    ran: candidate operator IPs are auto-piped through ip_module's live
-    ExoneraTor check, but shared_ip is gated categorically either way).
+    shared_ip already does independent of enrichment (candidate operator IPs
+    are auto-piped through ip_module's live ExoneraTor check, but shared_ip
+    is gated categorically either way).
     """
     exit_ip = '171.25.193.25'
     relay = {'tor_relay': True, 'checked_date': '2026-08-13', 'org': 'Foreningen for digitala fri'}
@@ -2130,7 +2130,7 @@ def test_candidate_deltas_report_only_movement():
 
 
 def test_label_exchange_does_not_zero_a_small_cases_operators(tmp_path):
-    """LOOP7 gap 1: labeling an exchange on a two-market case must not flip
+    """Labeling an exchange on a two-market case must not flip
     entity_discrimination's "too small to judge" floor to "corpus-sized" and
     erase both real operator candidates as a side effect.
 
@@ -2154,7 +2154,7 @@ def test_label_exchange_does_not_zero_a_small_cases_operators(tmp_path):
 
 
 def test_save_candidates_retires_a_dropped_candidate_but_keeps_feedback(tmp_path):
-    """LOOP7 gap 1's compounding effect: save_candidates only ever upserted
+    """The same underlying defect's compounding effect: save_candidates only ever upserted
     rows present in the current pass's dossiers, so a candidate that stopped
     scoring was left behind at its old confidence forever -- which also broke
     monitor.candidate_deltas's GONE detection, since that reads the same
@@ -2844,7 +2844,7 @@ def test_a_refused_pair_cites_the_captures_it_was_refused_on(tmp_path):
         assert all(e["sha256"] for e in evidence_chain(store, stored))
 
 
-# --- Loop 12: VASP-path boundaries pinned against real-world failure shapes ---
+# --- VASP-path boundaries pinned against real-world failure shapes ---
 #
 # Every address below is a real, publicly checkable mainnet address: the
 # suspects are OFAC-designated (SDN publication 2026-08-26), the endpoint is
@@ -2857,7 +2857,7 @@ OFAC_SUEX = "1LrxsRd7zNuxPJcL5rttnoeJFy1y4AffYY"
 OFAC_POLYANIN = "158treVZBGMBThoaympxccPdZPtqUfYrT9"
 # Binance hot wallet, GraphSense-tagged binance.com; 1,191,656 txs on 2026-08-28.
 BINANCE_HOT = "1NDyJtNTjmwk5xPNhjgAMu4HDHigtobu1s"
-# Real, publicly checkable, and confirmed (Loop 15) absent from both the OFAC
+# Real, publicly checkable, and confirmed absent from both the OFAC
 # SDN Advanced XML and the GraphSense corpus: the Bitcoin genesis coinbase
 # address. Used below wherever a test needs a "suspect" wallet whose OWN
 # reachability entry must come only from its hop to BINANCE_HOT -- OFAC_SUEX
@@ -2883,7 +2883,7 @@ def _traced(store, suspect, summary_extra):
 def test_an_ofac_designated_suspect_is_at_vasp_on_itself_before_any_hop(tmp_path):
     """The reason the rest of this block no longer traces OFAC_SUEX/
     OFAC_POLYANIN directly (see UNDESIGNATED_SUSPECT above): once
-    _vasp_endpoints reads the OFAC SDN Advanced XML (Loop 15), a suspect
+    _vasp_endpoints reads the OFAC SDN Advanced XML, a suspect
     address that is itself OFAC-designated is discovered as AT_VASP on
     itself at hop 0 -- correctly outranking a 1-hop reach to a different,
     unrelated VASP (Binance). This is the intended new behavior, pinned
@@ -2948,7 +2948,7 @@ def test_a_two_way_exchange_relationship_is_never_reported_as_a_deposit(tmp_path
 
 
 def test_reciprocal_directed_edges_from_two_independent_captures_merge_into_both_ways(tmp_path):
-    """Loop 21's real shape (docs/LOOP20.md): a real Bitfinex hot<->cold wallet
+    """A real Bitfinex hot<->cold wallet
     pair has genuine transactions in both directions, but each wallet's OWN
     live capture only ever reports the direction ITS OWN transaction sample
     saw -- one capture says suspect->VASP, a separate later capture of the
@@ -2963,8 +2963,8 @@ def test_reciprocal_directed_edges_from_two_independent_captures_merge_into_both
     its own side).
 
     Uses UNDESIGNATED_SUSPECT/BINANCE_HOT rather than the real Bitfinex
-    addresses: both real Bitfinex wallets are themselves VASP_DISCLOSED
-    (Loop 16/20), so tracing either one directly resolves AT_VASP on itself
+    addresses: both real Bitfinex wallets are themselves VASP_DISCLOSED,
+    so tracing either one directly resolves AT_VASP on itself
     at hop 0 before ever reaching the other -- the same reason the rest of
     this file stopped tracing OFAC_SUEX/OFAC_POLYANIN directly once
     _vasp_endpoints started reading the OFAC SDN. The mechanism under test
@@ -3002,13 +3002,13 @@ def _valid_btc_addresses(n):
 
 
 def test_a_reciprocal_peer_beyond_the_old_alphabetical_output_cap_still_reaches_both_ways(tmp_path):
-    """Loop 22. The module-level [:20] alphabetical cap this loop removed
+    """The module-level [:20] alphabetical cap this fix removed
     (bitcoin_module.py's _check_blockchain_com, and the matching redundant
     cap in evidence.enrich_bitcoin) used to drop a real relationship whenever
     more than 20 unique addresses existed in the SAME bounded transaction
     sample and the surviving peer's own address value happened to sort late.
-    A busy exchange hot wallet -- the real Bitfinex shape this loop was
-    checking against -- is exactly this: many counterparties, one of them
+    A busy exchange hot wallet -- the real Bitfinex shape this fix targets
+    -- is exactly this: many counterparties, one of them
     the suspect. This is the test above
     (test_reciprocal_directed_edges_from_two_independent_captures_merge_into_
     both_ways) with the one variable that test held constant: BINANCE_HOT
@@ -3074,10 +3074,10 @@ def test_the_two_suspects_sharing_a_hot_wallet_are_not_linked_to_each_other(tmp_
         assert (a, b) not in joined and (b, a) not in joined
 
 
-# --- Loop 17: brand-level (VASP_DISCLOSED) omnibus sharing (docs/LOOP17.md) --
+# --- brand-level (VASP_DISCLOSED) omnibus sharing --------------------------
 #
 # Real addresses from BitMEX's actual verified proof-of-reserves population
-# (docs/LOOP16.md Phase 2, 336,208 addresses) -- the loop's own stress case,
+# (336,208 addresses) -- a real stress case,
 # not a fabricated fixture: three DIFFERENT disclosed reserve addresses, so
 # the address-level endpoint_shared_by guard (which counts predecessors of
 # ONE address) cannot catch the sharing on its own.
@@ -3092,7 +3092,7 @@ CLEAN_SUSPECT_3 = "1FeexV6bAHb8ybZjqQMjJrcCrHGW9sb6uF"
 
 
 def test_a_disclosed_wallet_set_shared_across_suspects_is_flagged_even_though_no_single_address_is(tmp_path):
-    """docs/LOOP16.md Phase 4's defect, closed: BitMEX's disclosure is not one
+    """The closed defect: BitMEX's disclosure is not one
     address, it is a SET of 336,208. Three unrelated suspects each reaching a
     DIFFERENT address in that set show endpoint_shared_by == 1 individually --
     true, and exactly the shape that would silently evade the existing
@@ -3133,3 +3133,166 @@ def test_a_disclosed_wallet_set_shared_across_suspects_is_flagged_even_though_no
         # address-level omnibus guard's own contract.
         assert paths[a]["proximity"] == "DIRECT"
         assert run_correlation(store)["operators"] == []
+
+
+# --- suspect -> VASP ground truth, real transaction data (not a synthetic
+# same-shaped fixture) ---
+#
+# OFAC_POLYANIN (defined above, real, OFAC SDN-designated, profile 33858 --
+# Yevgeniy Igorevich Polyanin, sanctioned 2021-11-08 under E.O. 13694 for the
+# Sodinokibi/REvil ransomware-as-a-service campaign; separately DOJ-indicted,
+# $6.1M seized) was previously used ONLY as a hand-authored
+# same-shaped stand-in ({"sent_to_addresses": [BINANCE_HOT]}) once its own
+# OFAC self-attribution preempted the hop-1 reachability tests it originally
+# posed for. Its REAL on-chain history was never fed through this pipeline
+# until the tests below.
+#
+# Fetched live (independent of blockchain.info, which was
+# 429-rate-limited at the time) via blockstream.info's esplora API,
+# reshaped into blockchain.info's own rawaddr schema and run through the
+# actual, unmodified BitcoinModule._check_blockchain_com. The only
+# substitution is the one HTTP data source -- every parsing/pipeline
+# function downstream of it runs unmodified, on a real on-disk store.
+# OFAC_POLYANIN's full real history is 19 transactions
+# (2018-01-18 to 2021-02-14); 8 of them pay BINANCE_HOT directly (Binance's
+# identity attested by GraphSense tags citing coindesk.com and
+# bitinfocharts.com -- independent of both OFAC and of CyberTrace's own
+# output). Zero of the 19 receive FROM BINANCE_HOT. This is the real,
+# observed sent_to_addresses set (all 9 real payees across those 8
+# transactions -- BINANCE_HOT plus 8 distinct real change addresses);
+# omitted here are the ~450 real but not-under-test cospend/counterparty/
+# received_from addresses from the same fetch (irrelevant to the deposit
+# relationship this block tests, and not worth transcribing in full).
+OFAC_POLYANIN_REAL_SENT_TO = [
+    "1NDyJtNTjmwk5xPNhjgAMu4HDHigtobu1s",  # BINANCE_HOT
+    "32aYQCHHAdRZGyxX5ZqJtr3FEmQPnhvmvC",
+    "38u7Gu2GsEEUhQDwzqHLkEA6NQuu7HrdAC",
+    "3AAXYnRdcrN56tgDVbDsrFHbhK2A9QE1s5",
+    "3Dj75bpjUVd4J7bnYnEqzS9YUtxtsfJmjg",
+    "3KUkjNLuwH4WaN5u8v5xkT8uQfiuv7J3kV",
+    "3LGyKfGNQ62CiKrhDLbMS1hrixzYGTxuK4",
+    "3PrUCKdZUP2LsrUUaD16BM54kj2gNkcnyr",
+    "3QCqAMWK51iwTGRipZVQWGrBiQPihmU2a9",
+]
+
+
+def _real_polyanin_case(store):
+    """Ingest OFAC_POLYANIN the way the real collector actually reported it
+    (real sent_to_addresses, real tx_sample_size), not a
+    hand-picked single-peer summary."""
+    return _traced(store, OFAC_POLYANIN, {
+        "sent_to_addresses": OFAC_POLYANIN_REAL_SENT_TO,
+        "tx_sample_size": 19,
+        "first_seen": "2018-01-18T09:06:08",
+        "last_seen": "2021-02-14T19:46:51",
+    })
+
+
+def _skip_unless_real_sources_available():
+    from cybertrace.integrations import exchange_tags, ofac
+    if not (ofac.available() and ofac.index_available()):
+        pytest.skip("OFAC SDN not downloaded/indexed in this checkout")
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+
+
+def test_a_real_ofac_designated_suspects_actual_deposits_are_captured_as_evidence(tmp_path):
+    """Positive case. Real transaction data, not a
+    synthetic stand-in: OFAC_POLYANIN's real sent_to_addresses (a real
+    live fetch) must produce a real, directed SENT_FUNDS_TO edge to
+    BINANCE_HOT -- the raw fact PS2 2.3c/PS3 3.3 ask for ("VASP receiving
+    direct deposits") -- regardless of what wallet_exchange_paths' own
+    nearest-endpoint summary later does with it (see the next test)."""
+    _skip_unless_real_sources_available()
+    with EvidenceStore(str(tmp_path / "polyanin_real.db")) as store:
+        _real_polyanin_case(store)
+        suspect_id = store.find_entity("BTC_ADDRESS", OFAC_POLYANIN)
+        binance_id = store.find_entity("BTC_ADDRESS", BINANCE_HOT)
+        rel = store._one(
+            "SELECT rtype, status FROM relationships "
+            "WHERE source_entity_id=? AND target_entity_id=? AND rtype='SENT_FUNDS_TO'",
+            (suspect_id, binance_id))
+        assert rel is not None
+        assert rel["status"] == "ACTIVE"
+
+
+def test_wallet_exchange_paths_reports_the_suspects_own_designation_not_the_real_deposit(tmp_path):
+    """Boundary case, pinned with real data. OFAC_POLYANIN is itself
+    REGULATORY_ATTESTED (his own address is OFAC-designated), so
+    wallet_exchange_paths resolves him AT_VASP on HIMSELF at hop 0 (the
+    nearest-endpoint design) -- and, because a BFS start that is already an
+    exchange_of key never walks its own edges (correlate.py:862-871), the
+    real 8-transaction Binance deposit this same real data contains is NOT a
+    second entry in wallet_exchange_paths, and therefore never reaches
+    wallet_path_flags, the CLI table, the dossier, or the markdown brief.
+    Confirmed here, not assumed: the previous test proves the SENT_FUNDS_TO
+    edge and its evidence exist in the graph; this one proves the summary
+    layer that every investigator-facing renderer reads does not surface it
+    once the suspect is already self-attributed -- a named reporting-
+    completeness gap in the nearest-endpoint design, not an implementation
+    defect this test fixes."""
+    _skip_unless_real_sources_available()
+    with EvidenceStore(str(tmp_path / "polyanin_boundary.db")) as store:
+        suspect_id = _real_polyanin_case(store)
+        paths = {w["entity_id"]: w for w in wallet_exchange_paths(store)}
+
+        hit = paths[suspect_id]
+        assert hit["attribution"] == REGULATORY_ATTESTED
+        assert hit["proximity"] == "AT_VASP"
+        assert hit["hops"] == 0
+        assert "Polyanin" in hit["exchange"]
+        assert hit["exchange"] != "binance.com"  # the real deposit is not what's reported here
+
+        binance_id = store.find_entity("BTC_ADDRESS", BINANCE_HOT)
+        assert binance_id in paths          # Binance still resolves AT_VASP on itself...
+        assert paths[binance_id]["hops"] == 0
+        assert not any(w["hops"] and w["exchange"] == "binance.com"
+                       for w in paths.values())  # ...but nothing reaches it via a hop
+
+        flags_text = " ".join(wallet_path_flags(store, hit))
+        assert "binance" not in flags_text.lower()  # the real deposit is invisible here too
+
+
+def test_the_real_binance_deposit_infers_no_ownership_or_operator_candidate(tmp_path):
+    """Negative/ambiguous case: a sanctioned
+    suspect's real, repeated deposits into a named exchange's real hot wallet
+    are transaction interaction, not customer identity, beneficial ownership,
+    or an exchange-controlled-suspect claim. No EXCHANGE_DEPOSIT edge, no
+    operator/infra/ip candidate, on real data with a real, government-
+    designated suspect -- exactly the higher-risk case that deserves this
+    stricter bar, not just collector-level validation."""
+    _skip_unless_real_sources_available()
+    with EvidenceStore(str(tmp_path / "polyanin_no_ownership.db")) as store:
+        _real_polyanin_case(store)
+        result = run_correlation(store)
+        assert result["operators"] == []
+        assert result["infra"] == []
+        assert result["ips"] == []
+        edge = store._one(
+            "SELECT 1 FROM relationships WHERE rtype='EXCHANGE_DEPOSIT' AND status='ACTIVE'")
+        assert edge is None
+
+
+def test_the_real_deposit_relationship_resolves_to_a_hashed_evidence_chain(tmp_path):
+    """Evidence-integrity case: the real
+    SENT_FUNDS_TO edge from the previous tests must resolve, through the
+    relationship's own evidence row, to a real hashed+chained observation --
+    not an unexplained score. Same assertion shape as the existing
+    finding-evidence check earlier in this file (evidence_chain +
+    sha256), applied here to a real ground-truth address pair instead of a
+    dark-web finding."""
+    _skip_unless_real_sources_available()
+    with EvidenceStore(str(tmp_path / "polyanin_evidence.db")) as store:
+        suspect_id = _real_polyanin_case(store)
+        binance_id = store.find_entity("BTC_ADDRESS", BINANCE_HOT)
+        row = store._one(
+            "SELECT ev.observation_ids FROM relationships r "
+            "JOIN evidence ev ON ev.relationship_id = r.rel_id "
+            "WHERE r.source_entity_id=? AND r.target_entity_id=? AND r.rtype='SENT_FUNDS_TO'",
+            (suspect_id, binance_id))
+        assert row is not None
+        obs_ids = json.loads(row["observation_ids"])
+        assert obs_ids
+        chain = evidence_chain(store, obs_ids)
+        assert chain
+        assert all(e["sha256"] for e in chain)

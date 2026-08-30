@@ -117,7 +117,7 @@ def test_shared_nameserver_is_contextual(tmp_path):
 
 def test_shared_certificate_is_contextual(tmp_path):
     """Same reasoning as the nameserver case above — CERTIFICATE is also
-    unwired today (Phase 3 of this loop confirmed both stay blocked); this
+    unwired today (confirmed blocked the same way); this
     proves memory's classification is correct FOR WHEN one exists, without
     claiming a producer exists now."""
     with EvidenceStore(str(tmp_path / "e.db")) as store:

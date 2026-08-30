@@ -226,18 +226,18 @@ def exchange_labels(addresses: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]
     return out
 
 
-# docs/LOOP16.md Phase 2/3: of this corpus's 21 distinct `source` domains for
-# category='exchange' tags, these two are the ones independently verified
-# live that loop -- not merely domain-plausible, but cross-checked against a
-# second, independent record: Bitfinex's own verified X/Twitter account
-# linking this exact GitHub repo, and contemporaneous news coverage (CoinDesk
-# and others) of BitMEX's November 2022 proof-of-reserves publication.
+# Of this corpus's 21 distinct `source` domains for category='exchange'
+# tags, these two are the ones independently verified -- not merely
+# domain-plausible, but cross-checked against a second, independent record:
+# Bitfinex's own verified X/Twitter account linking this exact GitHub repo,
+# and contemporaneous news coverage (CoinDesk and others) of BitMEX's
+# November 2022 proof-of-reserves publication.
 # Binance/Huobi/KuCoin/Deribit/Bybit/OKX are real-looking by domain pattern
-# alone and were explicitly left unverified (docs/LOOP16.md Phase 9) --
-# adding them here on domain-plausibility would be exactly the unearned
-# precision this project's REGULATORY_ATTESTED/TAG_ATTESTED split already
-# refuses. Extend this dict only after independently corroborating a new
-# source the way Phase 2 corroborated these two -- not on domain pattern alone.
+# alone and were explicitly left unverified -- adding them here on
+# domain-plausibility would be exactly the unearned precision this
+# project's REGULATORY_ATTESTED/TAG_ATTESTED split already refuses. Extend
+# this dict only after independently corroborating a new source the same
+# way -- not on domain pattern alone.
 _VASP_DISCLOSED_SOURCES: Dict[str, str] = {
     "https://github.com/bitfinexcom/pub/blob/main/wallets.txt": "Bitfinex",
     "https://s3-eu-west-1.amazonaws.com/public.bitmex.com/data/porl/"
@@ -248,9 +248,8 @@ _VASP_DISCLOSED_SOURCES: Dict[str, str] = {
 def vasp_disclosed_labels(addresses: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]]:
     """{raw address -> {"brand", "role", "source"}} for every input tagged
     under a `source` this project has independently verified (see
-    _VASP_DISCLOSED_SOURCES, docs/LOOP16.md Phase 2) as the VASP's OWN
-    publication of the address -- not a third party's guess about which VASP
-    an address belongs to.
+    _VASP_DISCLOSED_SOURCES) as the VASP's OWN publication of the address --
+    not a third party's guess about which VASP an address belongs to.
 
     `role` is this corpus's `label` text (e.g. "bitfinex BTC cold wallet",
     "bitmex reserve wallet") -- the disclosure's own description of what kind

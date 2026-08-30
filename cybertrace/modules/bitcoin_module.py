@@ -16,18 +16,17 @@ from .base import BaseModule, ModuleResult, SourceResult
 _TX_PAGE_SIZE = 50
 # Bounded transaction-history depth for the two investigation modes. Both are
 # HARD caps regardless of how large the address's real tx count is -- a real
-# exchange hot wallet (Bitfinex's: 487,628 tx, confirmed live in docs/LOOP20.md)
-# must not turn --deep into an unbounded crawl. Default mode reads exactly one
-# page; --deep paginates up to _TX_DEEP_PAGES pages via the API's own
-# offset/limit contract, stopping early the moment a page comes back short
-# (the address has no more history to page into).
+# exchange hot wallet (Bitfinex's: 487,628 tx) must not turn --deep into an
+# unbounded crawl. Default mode reads exactly one page; --deep paginates up
+# to _TX_DEEP_PAGES pages via the API's own offset/limit contract, stopping
+# early the moment a page comes back short (the address has no more history
+# to page into).
 #
 # Why deeper than one page matters: a real, independently-verified Bitfinex
 # hot<->cold wallet pair has genuine transactions in both directions, but the
 # reciprocal leg sat at positions 105/139/142 of one wallet's own 6,042-tx
-# history (docs/LOOP20.md Phase 3) -- past any single page. 4 pages (200 tx)
-# was chosen to comfortably clear that real, measured depth with headroom,
-# not as a round number.
+# history -- past any single page. 4 pages (200 tx) was chosen to comfortably
+# clear that real, measured depth with headroom, not as a round number.
 _TX_SHALLOW_PAGES = 1
 _TX_DEEP_PAGES = 4
 
@@ -112,8 +111,7 @@ class BitcoinModule(BaseModule):
         offset/limit contract up to _TX_DEEP_PAGES pages, stopping the moment
         a page comes back short -- a wallet with 5 transactions never pays for
         3 more calls that can't return anything. See the module-level
-        constants for why 4 pages, and docs/LOOP21.md for the real address
-        pair (Bitfinex hot<->cold) this was sized against.
+        constants for why 4 pages.
         """
         txs: List[dict] = []
         seen_hashes = set()
@@ -214,7 +212,7 @@ class BitcoinModule(BaseModule):
             # made it alphabetical, so a reciprocal address could lose only
             # because its own value sorted late. Reporting every unique
             # relationship found in the bounded sample is what "bounded
-            # acquisition, complete extraction" means; see docs/LOOP22.md.
+            # acquisition, complete extraction" means.
             parsed['cospend_addresses'] = sorted(cospend)
             parsed['counterparty_addresses'] = sorted(counterparty - cospend)
             parsed['sent_to_addresses'] = sorted(sent_to - cospend)

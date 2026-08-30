@@ -44,9 +44,9 @@ def _shared_key_pair(tmp_path):
 
 def _quoted_third_party_pair(tmp_path):
     """Two markets that both merely QUOTE a third party's email in a 'quoted'
-    section. A naive union-find over shared-artifact nodes (the graph.py path
-    this loop removed) would cluster these two markets as one operator purely
-    because the node has two markets attached. The governed engine must not:
+    section. A naive union-find over shared-artifact nodes (graph.py's now-
+    removed clustering path) would cluster these two markets as one operator
+    purely because the node has two markets attached. The governed engine must not:
     quoted mentions are marked non-attributive at ingest and must never
     surface as a SAME_OPERATOR dossier.
     """
@@ -103,7 +103,7 @@ def test_quoted_artifact_never_attributes_with_db(tmp_path):
 
 
 def test_correlate_db_only_rerenders_without_result_files(tmp_path):
-    """LOOP7 gap 2 / LOOP9 P2: an analyst who only wants to re-render the
+    """An analyst who only wants to re-render the
     current case state must not be forced to pass dummy JSON files or
     re-crawl live via `watch`. A prior `correlate ... --db` pass already
     ingested a.json/b.json into the store; a later `correlate --db` call

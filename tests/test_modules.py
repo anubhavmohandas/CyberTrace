@@ -267,12 +267,12 @@ class TestBitcoinModuleFundFlowDirection:
 
 
 class TestBitcoinModuleTransactionDepth:
-    """Loop 21: transaction depth must be explicit and bounded, not an
+    """Transaction depth must be explicit and bounded, not an
     accident of the API's default page size or a hardcoded top-10 slice.
-    See bitcoin_module.py's _TX_PAGE_SIZE/_TX_SHALLOW_PAGES/_TX_DEEP_PAGES and
-    docs/LOOP21.md for the real Bitfinex hot<->cold wallet pair this was sized
-    against -- docs/LOOP20.md found the real reciprocal transaction at
-    positions 105/139/142 of one wallet's own history, past any single page.
+    See bitcoin_module.py's _TX_PAGE_SIZE/_TX_SHALLOW_PAGES/_TX_DEEP_PAGES --
+    sized against a real Bitfinex hot<->cold wallet pair whose real reciprocal
+    transaction sat at positions 105/139/142 of one wallet's own history,
+    past any single page.
     """
 
     BTC = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
@@ -372,7 +372,7 @@ class TestBitcoinModuleTransactionDepth:
         assert result.data['tx_sample_size'] == 99
 
     def test_a_reciprocal_transaction_past_the_first_page_is_only_found_deep(self, monkeypatch):
-        """The exact real-world gap this loop closes (docs/LOOP20.md): a
+        """The exact real-world gap this fix closes: a
         genuine reciprocal transaction sits beyond the first page of the
         wallet's own history. The default (shallow) mode must not see it --
         it is genuinely outside what a bounded default call reads -- while
@@ -396,7 +396,7 @@ class TestBitcoinModuleTransactionDepth:
 
 
 class TestBitcoinModuleRelationshipOutputCompleteness:
-    """Loop 22: _check_blockchain_com used to re-truncate its own already-
+    """_check_blockchain_com used to re-truncate its own already-
     bounded transaction sample to the first 20 relationships, ALPHABETICALLY
     -- a second, unrelated cap layered on top of the real one (transaction
     DEPTH, see TestBitcoinModuleTransactionDepth above). A relationship fully
@@ -514,17 +514,17 @@ class TestBitcoinModuleRelationshipOutputCompleteness:
 
 
 class TestBitcoinModuleSamplingWindowBoundary:
-    """Loop 23: distinguishes two different, non-conflicting facts about
+    """Distinguishes two different, non-conflicting facts about
     _check_blockchain_com's bounded transaction sample.
 
-    Loop 22's guarantee: every relationship found INSIDE the sampled
+    The completeness guarantee: every relationship found INSIDE the sampled
     transactions is emitted (no second, alphabetical output cap).
 
-    Loop 23's limitation: a relationship that only exists OUTSIDE the
+    The sampling limitation: a relationship that only exists OUTSIDE the
     bounded transaction window (page 5+, beyond _TX_DEEP_PAGES) cannot be
     discovered -- and must be correctly, silently absent, never fabricated
     or inferred. Real-world evidence for why this is an accepted, documented
-    tradeoff rather than a defect is in docs/LOOP23.md Phase 3: the real
+    tradeoff rather than a defect: the real
     Bitfinex hot wallet's own most-recent 200-tx window covers ~2.5 real
     calendar days (487,629 total tx, extreme velocity), and a real,
     independently-verified reciprocal counterparty (the cold wallet) sits at
@@ -563,7 +563,7 @@ class TestBitcoinModuleSamplingWindowBoundary:
 
     def test_a_relationship_beyond_the_deep_window_is_correctly_absent_not_inferred(self, monkeypatch):
         """A relationship inside the bounded deep window (page 4, the last
-        page _TX_DEEP_PAGES reads) survives -- Loop 22's guarantee. A second
+        page _TX_DEEP_PAGES reads) survives -- the completeness guarantee. A second
         relationship that exists only on page 5, one page past the hard cap,
         must be absent from the output, and the module must never even fetch
         page 5 to learn that -- the absence is a property of the bound, not
@@ -1866,12 +1866,12 @@ class TestIndianModule:
 
 # ---------------------------------------------------------------------------#
 # The six OSINT collectors below (phone, geoint, ip, image, breach, social)  #
-# had zero dedicated tests before Loop 25 (Loop 24 §2/§10.2). They dead-end  #
-# before the graph (Loop 11 §4/§10 — investigator-facing output only), so    #
-# the risk a defect here poses is under-reporting a raw collector value to   #
-# an investigator, never a false attribution. Coverage below exercises each  #
-# source's malformed/empty/failure paths directly against the real parsing  #
-# code (fetch_json/fetch monkeypatched, no network), per Loop 25 Phase 6.    #
+# previously had zero dedicated tests. They dead-end before the graph       #
+# (investigator-facing output only), so the risk a defect here poses is     #
+# under-reporting a raw collector value to an investigator, never a false   #
+# attribution. Coverage below exercises each source's malformed/empty/      #
+# failure paths directly against the real parsing code (fetch_json/fetch   #
+# monkeypatched, no network).                                              #
 # ---------------------------------------------------------------------------#
 
 

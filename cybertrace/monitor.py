@@ -122,8 +122,8 @@ async def _visit_wallet(module, address: str, deep: bool = False) -> dict:
     """One live re-search of a wallet, through the same chain module and the
     same `search()` a fresh `cybertrace search <address>` would use -- no
     wallet-monitoring-specific client, so a re-check and a first look apply
-    the identical safety bounds (Loop 21's `_TX_DEEP_PAGES` cap, Loop 22's
-    uncapped-but-bounded relationship output).
+    the identical safety bounds (the `_TX_DEEP_PAGES` cap, and uncapped-but-
+    bounded relationship output).
     """
     async with module:
         result = await module.search(address, deep=deep)
@@ -146,8 +146,8 @@ def wallet_deltas(before: Dict[str, dict], after: List[dict]) -> List[dict]:
     """What a wallet re-check changed about its reachability to a VASP.
 
     Compared by entity_id, the same identity wallet_exchange_paths keys its
-    rows by. `before` is a dict (this loop's own wallets only, captured before
-    any re-check ran) rather than a list like candidate_deltas takes, because
+    rows by. `before` is a dict (this case's own watched wallets only, captured
+    before any re-check ran) rather than a list like candidate_deltas takes, because
     diffing against every wallet in the whole case -- most of them not even
     re-checked this run -- would report "changed" for wallets nothing touched.
 
@@ -196,11 +196,11 @@ async def recheck(store: EvidenceStore, urls: Optional[List[str]] = None,
     is what stops this becoming a second engine.
 
     Wallets are re-checked the same pass, over the enrichment targets a wallet
-    `search` already created (see wallet_targets) -- the PS3 gap named in
-    docs/LOOP11.md §19: every other piece (ingest, the chained-snapshot diff,
-    wallet_exchange_paths) already existed and only never ran again after the
-    first look. `urls` does not filter wallets -- it names onion hosts, and a
-    wallet address would never match one.
+    `search` already created (see wallet_targets) -- closing a PS3 gap where
+    every other piece (ingest, the chained-snapshot diff, wallet_exchange_paths)
+    already existed and only never ran again after the first look. `urls` does
+    not filter wallets -- it names onion hosts, and a wallet address would
+    never match one.
     """
     from .correlate import wallet_exchange_paths
     from .modules import get_module

@@ -225,7 +225,7 @@ class TestExchangeTagsIndex:
 
 class TestOfacIndex:
     """Mirrors TestExchangeTagsIndex, over the OFAC SDN Advanced XML adapter.
-    Uses two addresses independently verified in docs/LOOP14.md: Grinex's
+    Uses two addresses independently verified: Grinex's
     TRON address (confirmed real and active via TronGrid, a source unrelated
     to both OFAC and GraphSense) and Blender.io's Bitcoin address."""
 

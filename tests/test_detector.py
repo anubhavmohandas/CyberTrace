@@ -125,7 +125,7 @@ class TestNormalizeInput:
         assert result == "hackerman123"
 
 
-# --- Loop 12: unsupported-chain boundary --------------------------------------
+# --- unsupported-chain boundary --------------------------------------
 #
 # Every address here is real and publicly checkable. The non-Bitcoin ones are
 # taken from OFAC's SDN publication of 2026-08-26, where 50 of 1,007 designated
