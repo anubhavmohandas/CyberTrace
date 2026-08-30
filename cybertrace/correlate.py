@@ -694,6 +694,31 @@ def _direction_phrase(exchange: str, direction: str) -> str:
     }[direction]
 
 
+def _direction(flows: set) -> str:
+    """Direction of a hop, from every flow marker observed for that pair --
+    not from whichever parallel edge was reached first.
+
+    A pair that both deposited into and was paid by the other side is the
+    common real shape once an address has any history with an exchange, and
+    reporting it as a flat deposit is the "an incoming transfer must not be
+    described as a deposit" error with one extra step. BOTH_WAYS says what
+    was actually observed.
+
+    Module level (not a wallet_exchange_paths closure) so
+    _secondary_vasp_reach's multi-hop traversal reads a hop's direction the
+    exact same way the primary nearest-VASP BFS does -- one implementation of
+    "what does this set of flow markers mean", not two that could drift.
+    """
+    seen = flows - {None}
+    if seen == {True}:
+        return TO_VASP
+    if seen == {False}:
+        return FROM_VASP
+    if seen == {True, False}:
+        return BOTH_WAYS
+    return DIRECTION_UNKNOWN
+
+
 def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, dict]:
     """entity_id -> the VASP (or, for REGULATORY_ATTESTED, OFAC-designated
     entity) attributed to that address, and how.
@@ -798,6 +823,65 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
     return out
 
 
+def _secondary_vasp_reach(adjacency: Dict[str, Dict[str, tuple]],
+                          exchange_of: Dict[str, dict], start: str,
+                          max_hops: int) -> Dict[str, dict]:
+    """Every VASP distinct from whatever `start` is itself attributed to,
+    reachable from `start` within max_hops through wallets that are not
+    themselves VASP-attributed -- the multi-hop sibling of the direct
+    (1-hop) `direct_vasp_contacts` block in wallet_exchange_paths.
+
+    Walks the SAME adjacency dict that block and the nearest-VASP BFS below
+    both already query (no second traversal of the store, no new graph
+    engine), and dead-ends at any VASP-attributed node exactly as the
+    nearest-VASP BFS does rather than walking through it -- a real address
+    on this graph is one hot wallet with 1.19M transactions (see
+    endpoint_shared_by below); without this cutoff one designated suspect's
+    traversal would fan out into every one of that wallet's counterparties.
+
+    Unlike that BFS, this does not stop at the first VASP found: an AT_VASP
+    suspect can have more than one other real VASP relationship, so this
+    collects the NEAREST occurrence of every distinct brand reachable within
+    the bound, keyed by brand so a brand seen through two different paths is
+    reported once, at its shortest path (BFS level order already guarantees
+    the first recorded occurrence of a brand is its nearest).
+
+    Returns brand -> {peer_entity_id, exchange, attribution,
+    attribution_source, hops, path, direction, evidence_ids}. Callers decide
+    which of these are genuinely secondary (excluding `start`'s own brand,
+    and, in wallet_exchange_paths, excluding hop-1 brands direct_vasp_contacts
+    already reports) -- this function only answers "what's reachable".
+    """
+    found: Dict[str, dict] = {}
+    visited = {start}
+    frontier = [(start, [start], [])]
+    for hop in range(1, max_hops + 1):
+        next_frontier = []
+        for node, path, ev_ids in frontier:
+            for peer, (hop_obs, flows) in sorted(adjacency.get(node, {}).items()):
+                if peer in visited:
+                    continue
+                visited.add(peer)
+                new_path = path + [peer]
+                new_ev = ev_ids + hop_obs
+                peer_end = exchange_of.get(peer)
+                if peer_end is not None:
+                    brand = peer_end["exchange"]
+                    if brand not in found:
+                        found[brand] = {"peer_entity_id": peer, "exchange": brand,
+                                        "attribution": peer_end["attribution"],
+                                        "attribution_source": peer_end["attribution_source"],
+                                        "hops": hop, "path": new_path,
+                                        "direction": _direction(flows),
+                                        "evidence_ids": new_ev + peer_end["evidence_ids"]}
+                    continue  # a VASP-attributed node is a dead end, never walked through
+                next_frontier.append((peer, new_path, new_ev))
+        frontier = next_frontier
+        if not frontier:
+            break
+    return found
+
+
 def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]:
     """For every address with a path to a VASP-attributed address, over
     TRANSACTED_WITH + SENT_FUNDS_TO + PART_OF_CLUSTER edges (undirected for
@@ -869,24 +953,6 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
 
     exchange_of = _vasp_endpoints(store, values)
 
-    def _direction(flows: set) -> str:
-        """Direction of the final hop, from every flow marker observed for that
-        pair -- not from whichever parallel edge was reached first.
-
-        A pair that both deposited into and was paid by the VASP is the common
-        real shape once an address has any history with an exchange, and
-        reporting it as a flat deposit is the "an incoming transfer must not be
-        described as a deposit" error with one extra step. BOTH_WAYS says what
-        was actually observed."""
-        seen = flows - {None}
-        if seen == {True}:
-            return TO_VASP
-        if seen == {False}:
-            return FROM_VASP
-        if seen == {True, False}:
-            return BOTH_WAYS
-        return DIRECTION_UNKNOWN
-
     out = []
     for start in values:
         if start in exchange_of:
@@ -911,13 +977,33 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
                                   "attribution_source": peer_end["attribution_source"],
                                   "direction": _direction(flows),
                                   "evidence_ids": hop_obs + peer_end["evidence_ids"]})
+            # Same gap, one hop further out: a secondary VASP the suspect never
+            # touches directly but reaches through an intermediate wallet or two
+            # (suspect -> wallet -> wallet -> VASP B) was, before this, equally
+            # invisible -- direct_vasp_contacts above only ever walks
+            # adjacency.get(start, {}), i.e. hop 1. Kept a SEPARATE field rather
+            # than folded into direct_vasp_contacts: that name and its rendering
+            # ("(1 hop)", hardcoded) mean directly-adjacent, and a 3-hop finding
+            # under that name would misstate its own proximity to a reader who
+            # has learned to trust the name. Excludes any brand direct_vasp_contacts
+            # already reported (its hop-1 occurrence, found by construction: the
+            # 1-hop walk above and _secondary_vasp_reach's own hop-1 level see the
+            # same adjacency), so one real relationship is never reported twice
+            # under two field names at two different hop counts.
+            direct_brands = {c["exchange"] for c in secondary}
+            reach = _secondary_vasp_reach(adjacency, exchange_of, start, max_hops)
+            secondary_multi = sorted(
+                (v for v in reach.values()
+                 if v["exchange"] != end["exchange"] and v["exchange"] not in direct_brands),
+                key=lambda v: (v["hops"], v["exchange"]))
             out.append({"entity_id": start, "value": values[start],
                         "exchange": end["exchange"], "hops": 0, "confidence": 1.0,
                         "path": [start], "evidence_ids": end["evidence_ids"],
                         "attribution": end["attribution"],
                         "attribution_source": end["attribution_source"],
                         "proximity": AT_VASP, "direction": DIRECTION_UNKNOWN,
-                        "direct_vasp_contacts": secondary})
+                        "direct_vasp_contacts": secondary,
+                        "secondary_vasp_contacts": secondary_multi})
             continue
 
         visited = {start}
@@ -1097,6 +1183,23 @@ def wallet_path_flags(store: EvidenceStore, hit: Optional[dict],
             flags.append(
                 f"also transacted directly with a separate {peer_kind}: "
                 f"{contact['exchange']} (1 hop) -- distinct from the {endpoint_kind} "
+                f"this address is itself attributed to")
+            flags.append(f"{peer_kind} attribution is "
+                         f"{_ATTRIBUTION_SOURCE_PHRASE[contact['attribution']]}: "
+                         f"{contact['attribution_source']}")
+            flags.append(_direction_phrase(contact["exchange"], contact["direction"]))
+        # secondary_vasp_contacts: same relationship one hop count further out --
+        # a separate VASP reached through an intermediate wallet, not touched
+        # directly. Never "customer", never "deposit from the suspect": the hop
+        # count and the intermediary count are both stated so a reader sees this
+        # is reachability through another address, not the direct contact above.
+        for contact in hit.get("secondary_vasp_contacts", []):
+            peer_kind = ("OFAC-designated entity" if contact["attribution"] == REGULATORY_ATTESTED
+                        else "VASP")
+            flags.append(
+                f"also reached, through {contact['hops'] - 1} intermediary "
+                f"address(es), a separate {peer_kind}: {contact['exchange']} "
+                f"({contact['hops']} hop(s)) -- distinct from the {endpoint_kind} "
                 f"this address is itself attributed to")
             flags.append(f"{peer_kind} attribution is "
                          f"{_ATTRIBUTION_SOURCE_PHRASE[contact['attribution']]}: "

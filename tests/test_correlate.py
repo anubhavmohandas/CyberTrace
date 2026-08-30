@@ -5,6 +5,7 @@ under test is the same path a real crawl takes.
 """
 
 import base64
+import hashlib
 import json
 from datetime import datetime, timezone
 
@@ -29,7 +30,7 @@ from cybertrace.evidence import EvidenceStore, enrich_bitcoin, enrich_email, ing
 from cybertrace.modules.base import ModuleResult, SourceResult
 from cybertrace.modules.darkweb_module import DarkwebModule
 from cybertrace.monitor import candidate_deltas
-from cybertrace.normalize import pgp_fingerprint
+from cybertrace.normalize import b58encode, pgp_fingerprint
 
 from .test_evidence import (
     BTC_VALID, KEY_A, KEY_B, ONION_A, ONION_B, TRX_VALID, _armor, _pivot_result,
@@ -2880,6 +2881,42 @@ def _traced(store, suspect, summary_extra):
     return addr
 
 
+def _synth_btc(seed) -> str:
+    """A deterministic, checksum-valid mainnet P2PKH address that is not any
+    of this module's real/ground-truth constants -- pure base58check plumbing
+    for the multi-hop wallet-chain fixtures below, which need more distinct
+    addresses than BTC_VALID/BTC_OTHER/BINANCE_HOT provide. Same double-SHA256
+    scheme normalize.norm_btc verifies, run in reverse."""
+    payload = b"\x00" + hashlib.sha256(f"loop30-{seed}".encode()).digest()[:20]
+    checksum = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
+    return b58encode(payload + checksum)
+
+
+def _wallet_chain(store, suspect_brand, suspect, wallets, vasp_brand, vasp_addr):
+    """An AT_VASP suspect (self-attributed `suspect_brand`), wired through a
+    straight-line chain of `wallets` (none VASP-attributed) to `vasp_addr`
+    (attributed `vasp_brand`): suspect -> wallets[0] -> ... -> wallets[-1] ->
+    vasp_addr. The final edge is additionally a directed SENT_FUNDS_TO (the
+    last wallet paid vasp_addr), the same shape
+    test_wallet_exchange_paths_surfaces_a_secondary_vasp_reached_through_an_
+    intermediate_wallet already pins for 2 hops, so _direction has a real
+    flow marker to read on the last hop regardless of chain length.
+
+    Returns {address: entity_id} for every node in the chain.
+    """
+    assert label_exchange(store, suspect, suspect_brand) is not None
+    assert label_exchange(store, vasp_addr, vasp_brand) is not None
+    chain = [suspect] + wallets + [vasp_addr]
+    ids = {}
+    for i, addr in enumerate(chain[:-1]):
+        extra = {"counterparty_addresses": [chain[i + 1]]}
+        if i == len(chain) - 2:
+            extra["sent_to_addresses"] = [chain[i + 1]]
+        ids[addr] = _traced(store, addr, extra)
+    ids[chain[-1]] = store.find_entity("BTC_ADDRESS", chain[-1])
+    return ids
+
+
 def test_an_ofac_designated_suspect_is_at_vasp_on_itself_before_any_hop(tmp_path):
     """The reason the rest of this block no longer traces OFAC_SUEX/
     OFAC_POLYANIN directly (see UNDESIGNATED_SUSPECT above): once
@@ -3261,6 +3298,11 @@ def test_wallet_exchange_paths_reports_the_suspects_own_designation_and_the_real
         assert contact["direction"] == TO_VASP  # 8 real deposits, 0 payouts
         assert contact["evidence_ids"]           # resolves through evidence_chain, not asserted bare
 
+        # The real, direct Binance relationship stays EXCLUSIVELY a hop-1
+        # direct_vasp_contacts entry -- it must never also show up one field
+        # over as if it were a deeper, indirect finding.
+        assert "binance.com" not in {c["exchange"] for c in hit["secondary_vasp_contacts"]}
+
         flags_text = " ".join(wallet_path_flags(store, hit))
         assert "binance" in flags_text.lower()          # the real deposit is now visible here
         assert "Polyanin" in flags_text                 # ...alongside the primary designation, not instead of it
@@ -3269,8 +3311,10 @@ def test_wallet_exchange_paths_reports_the_suspects_own_designation_and_the_real
 def test_direct_vasp_contacts_is_empty_when_the_self_attributed_suspect_has_no_other_direct_vasp_relationship(tmp_path):
     """The [] case is the common one, not a corner: a self-attributed suspect
     with no on-chain history recorded in this store has no adjacency edges at
-    all, so there is nothing for direct_vasp_contacts to report -- and it must
-    say so as an empty list, not omit the key or invent a relationship."""
+    all, so there is nothing for direct_vasp_contacts (or, per the same
+    reasoning one hop further out, secondary_vasp_contacts) to report -- and
+    both must say so as an empty list, not omit the key or invent a
+    relationship."""
     _skip_unless_real_sources_available()
     with EvidenceStore(str(tmp_path / "empty_secondary.db")) as store:
         addr = _traced(store, OFAC_SUEX, {})
@@ -3278,6 +3322,259 @@ def test_direct_vasp_contacts_is_empty_when_the_self_attributed_suspect_has_no_o
         assert hit["attribution"] == REGULATORY_ATTESTED
         assert hit["proximity"] == "AT_VASP"
         assert hit["direct_vasp_contacts"] == []
+        assert hit["secondary_vasp_contacts"] == []
+
+
+def test_wallet_exchange_paths_surfaces_a_secondary_vasp_reached_through_an_intermediate_wallet(tmp_path):
+    """The next hop out from Loop 28's direct_vasp_contacts (the real Polyanin
+    case above): a secondary VASP the AT_VASP suspect never transacts with
+    directly, but reaches through one intermediate, unattributed wallet --
+    suspect (AT_VASP: VASP A) -> intermediate wallet -> VASP B. Two hops from
+    the suspect, so direct_vasp_contacts (which only ever walks
+    adjacency.get(start, {}), i.e. hop 1) cannot see it, and before this
+    change nothing else did either, for the same structural reason the real
+    Polyanin case did not: the nearest-VASP BFS never walks a self-attributed
+    start's own edges at all."""
+    intermediate = "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        suspect = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        assert label_exchange(store, BTC_VALID, "VASP A") is not None
+
+        target = store.upsert_target("btc:" + BTC_VALID)
+        sid = store.insert_snapshot(target, {}, "bitcoin")
+        enrich_bitcoin(store, sid, suspect,
+                       {"address": BTC_VALID, "counterparty_addresses": [BTC_OTHER]}, "bitcoin")
+
+        mid = store.find_entity("BTC_ADDRESS", BTC_OTHER)
+        target_mid = store.upsert_target("btc:" + BTC_OTHER)
+        sid_mid = store.insert_snapshot(target_mid, {}, "bitcoin")
+        enrich_bitcoin(store, sid_mid, mid,
+                       {"address": BTC_OTHER, "sent_to_addresses": [intermediate]}, "bitcoin")
+
+        assert label_exchange(store, intermediate, "VASP B") is not None
+        far = store.find_entity("BTC_ADDRESS", intermediate)
+
+        paths = {w["entity_id"]: w for w in wallet_exchange_paths(store)}
+        hit = paths[suspect]
+
+        # Primary self-attribution: unchanged. VASP A, not VASP B, still names
+        # what this address itself is, at hop 0, confidence 1.0.
+        assert hit["attribution"] == "ANALYST_ASSERTED"
+        assert hit["exchange"] == "vasp a"
+        assert hit["proximity"] == "AT_VASP"
+        assert hit["hops"] == 0
+        assert hit["confidence"] == 1.0
+        assert hit["path"] == [suspect]
+        # The intermediate wallet is not itself a VASP, so direct_vasp_contacts
+        # (hop 1 only) is untouched and empty -- the gap this test closes is
+        # one hop further out than that field can see.
+        assert hit["direct_vasp_contacts"] == []
+
+        # Secondary: VASP B, reached through exactly one intermediate address.
+        assert len(hit["secondary_vasp_contacts"]) == 1
+        contact = hit["secondary_vasp_contacts"][0]
+        assert contact["exchange"] == "vasp b"
+        assert contact["hops"] == 2
+        assert contact["path"] == [suspect, mid, far]
+        assert contact["attribution"] == "ANALYST_ASSERTED"
+        assert contact["direction"] == TO_VASP  # value moved wallet -> VASP B
+        assert contact["evidence_ids"]           # resolves through evidence_chain, not asserted bare
+
+        # No wallet_exchange_paths() row was added or removed for this: the
+        # suspect still has exactly one row, VASP B's own row (an ordinary
+        # AT_VASP-on-itself entry, same as VASP A's) is the only other new
+        # entry, and no EXCHANGE_DEPOSIT edge exists except the two this test
+        # itself created via label_exchange.
+        assert sum(1 for w in paths.values() if w["entity_id"] == suspect) == 1
+        deposit_edges = store._all(
+            "SELECT source_entity_id FROM relationships "
+            "WHERE rtype='EXCHANGE_DEPOSIT' AND status='ACTIVE'")
+        assert {r["source_entity_id"] for r in deposit_edges} == {suspect, far}
+
+        flags_text = " ".join(wallet_path_flags(store, hit))
+        assert "vasp a" in flags_text.lower()          # primary finding still cited
+        assert "vasp b" in flags_text.lower()          # secondary finding now cited
+        assert "2 hop" in flags_text
+        assert "customer" not in flags_text.lower()    # no ownership/customer claim
+
+
+# --- Loop 30: _secondary_vasp_reach at depth, and its graph-safety bounds ---
+#
+# _secondary_vasp_reach takes max_hops as a plain parameter -- the SAME one
+# wallet_exchange_paths/wallet_trace_report/the --max-hops CLI flag already
+# take (default 4). Nothing inside it is hardcoded to any particular depth;
+# these fixtures prove that generically, at hop counts Loop 29 itself never
+# exercised, and pin the safety properties (cycle termination, VASP-terminal
+# dead-ends, no duplicate contacts) the bounded BFS depends on.
+
+@pytest.mark.parametrize("n_wallets, hops", [(1, 2), (2, 3), (4, 5), (5, 6)])
+def test_secondary_vasp_contacts_discovers_paths_at_the_documented_hop_count(
+        tmp_path, n_wallets, hops):
+    """2, 3, 5, and 6 hops -- not just the 2-hop case Loop 29 pinned. Each
+    chain is given exactly enough budget (max_hops == its own edge count),
+    and what's checked is that hops/path/direction/evidence_ids describe the
+    ACTUAL chain walked, not merely that the VASP's name shows up somewhere."""
+    suspect = _synth_btc(f"depth{hops}-suspect")
+    wallets = [_synth_btc(f"depth{hops}-w{i}") for i in range(n_wallets)]
+    vasp_addr = _synth_btc(f"depth{hops}-vasp")
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ids = _wallet_chain(store, "VASP A", suspect, wallets, "VASP B", vasp_addr)
+        hit = next(w for w in wallet_exchange_paths(store, max_hops=hops)
+                   if w["entity_id"] == ids[suspect])
+
+        assert hit["proximity"] == "AT_VASP"
+        assert hit["exchange"] == "vasp a"          # primary attribution unchanged
+        assert len(hit["secondary_vasp_contacts"]) == 1
+        contact = hit["secondary_vasp_contacts"][0]
+        assert contact["exchange"] == "vasp b"
+        assert contact["hops"] == hops
+        assert contact["path"] == [ids[a] for a in [suspect] + wallets + [vasp_addr]]
+        assert contact["direction"] == TO_VASP      # last hop was a real deposit
+        assert contact["evidence_ids"]
+        assert len(contact["evidence_ids"]) == len(set(contact["evidence_ids"]))
+
+
+def test_secondary_vasp_contacts_respects_the_max_hops_boundary(tmp_path):
+    """The bound is real, not decorative. One hop short of a 6-hop chain's
+    actual length, it is not reported at all -- silence, never a truncated or
+    wrong path -- and with this codebase's own CLI default (--max-hops 4, see
+    cli.py's trace_wallet_cmd), the same 6-hop relationship is invisible to
+    an analyst who never passes --max-hops."""
+    suspect = _synth_btc("boundary-suspect")
+    wallets = [_synth_btc(f"boundary-w{i}") for i in range(5)]  # 6 edges total
+    vasp_addr = _synth_btc("boundary-vasp")
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ids = _wallet_chain(store, "VASP A", suspect, wallets, "VASP B", vasp_addr)
+
+        hit6 = next(w for w in wallet_exchange_paths(store, max_hops=6)
+                    if w["entity_id"] == ids[suspect])
+        assert [c["exchange"] for c in hit6["secondary_vasp_contacts"]] == ["vasp b"]
+
+        hit5 = next(w for w in wallet_exchange_paths(store, max_hops=5)
+                    if w["entity_id"] == ids[suspect])
+        assert hit5["secondary_vasp_contacts"] == []
+
+        hit_default = next(w for w in wallet_exchange_paths(store)
+                           if w["entity_id"] == ids[suspect])
+        assert hit_default["secondary_vasp_contacts"] == []
+
+
+def test_secondary_vasp_reach_terminates_on_a_cycle_back_to_an_already_visited_wallet(tmp_path):
+    """A -> B -> C -> B: C's own edge back to B (already visited at hop 1)
+    must not re-queue B, loop, or block C's OTHER edge from being walked. The
+    global `visited` set -- not a per-path set -- is what makes this a graph
+    BFS rather than a path enumeration that could recurse forever on a real
+    chain's cycles; a wallet paying back into an address upstream of it is an
+    ordinary real shape, not a fixture contrivance."""
+    a = _synth_btc("cycle-a")
+    b = _synth_btc("cycle-b")
+    c = _synth_btc("cycle-c")
+    vasp_addr = _synth_btc("cycle-vasp")
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        assert label_exchange(store, a, "VASP A") is not None
+        assert label_exchange(store, vasp_addr, "VASP B") is not None
+        a_id = _traced(store, a, {"counterparty_addresses": [b]})
+        _traced(store, b, {"counterparty_addresses": [c]})
+        # C's edges: back to B (the cycle) and on to the VASP.
+        _traced(store, c, {"counterparty_addresses": [b], "sent_to_addresses": [vasp_addr]})
+
+        hit = next(w for w in wallet_exchange_paths(store, max_hops=6)
+                   if w["entity_id"] == a_id)
+        assert [ct["exchange"] for ct in hit["secondary_vasp_contacts"]] == ["vasp b"]
+        assert hit["secondary_vasp_contacts"][0]["hops"] == 3
+
+
+def test_secondary_vasp_reach_deduplicates_two_paths_to_the_same_vasp(tmp_path):
+    """A -> B -> VASP and A -> C -> VASP, the SAME brand reached by two
+    different 2-hop routes: secondary_vasp_contacts must report it once, not
+    once per path. `found` is keyed by brand, and the global `visited` set
+    stops the second route's own edge into the VASP address before it is
+    even considered as an alternate path to compare."""
+    a = _synth_btc("diamond-a")
+    b = _synth_btc("diamond-b")
+    c = _synth_btc("diamond-c")
+    vasp_addr = _synth_btc("diamond-vasp")
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        assert label_exchange(store, a, "VASP A") is not None
+        assert label_exchange(store, vasp_addr, "VASP B") is not None
+        a_id = _traced(store, a, {"counterparty_addresses": [b, c]})
+        _traced(store, b, {"sent_to_addresses": [vasp_addr]})
+        _traced(store, c, {"sent_to_addresses": [vasp_addr]})
+
+        hit = next(w for w in wallet_exchange_paths(store, max_hops=4)
+                   if w["entity_id"] == a_id)
+        assert len(hit["secondary_vasp_contacts"]) == 1
+        contact = hit["secondary_vasp_contacts"][0]
+        assert contact["exchange"] == "vasp b"
+        assert contact["hops"] == 2
+        assert contact["path"][0] == a_id
+        assert contact["path"][-1] == store.find_entity("BTC_ADDRESS", vasp_addr)
+
+
+def test_secondary_vasp_reach_does_not_walk_through_a_vasp_attributed_node(tmp_path):
+    """A VASP-attributed address is a dead end for this traversal, never a
+    thoroughfare it walks through: a real hot wallet has enormous further fan
+    -out (endpoint_shared_by's own comment measures one real address at
+    1,191,656 transactions), and without this cutoff one VASP relationship
+    would explode into every one of that wallet's own counterparties. Here
+    VASP_X's own further edge reaches a SECOND, otherwise-genuine VASP
+    (VASP_Y) one hop past it, well within budget -- and it must never appear,
+    because the traversal never walks past VASP_X to see it."""
+    a = _synth_btc("terminal-a")
+    w1 = _synth_btc("terminal-w1")
+    vasp_x = _synth_btc("terminal-vaspx")
+    w2 = _synth_btc("terminal-w2")
+    vasp_y = _synth_btc("terminal-vaspy")
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        assert label_exchange(store, a, "VASP A") is not None
+        assert label_exchange(store, vasp_x, "VASP X") is not None
+        assert label_exchange(store, vasp_y, "VASP Y") is not None
+        a_id = _traced(store, a, {"counterparty_addresses": [w1]})
+        _traced(store, w1, {"sent_to_addresses": [vasp_x]})
+        # VASP_X's OWN further edge -- exactly what a real hot wallet has --
+        # must be a dead end for this suspect's traversal, not one hop further.
+        _traced(store, vasp_x, {"counterparty_addresses": [w2]})
+        _traced(store, w2, {"sent_to_addresses": [vasp_y]})
+
+        hit = next(w for w in wallet_exchange_paths(store, max_hops=6)
+                   if w["entity_id"] == a_id)
+        found_brands = {ct["exchange"] for ct in hit["secondary_vasp_contacts"]}
+        assert found_brands == {"vasp x"}
+        assert "vasp y" not in found_brands
+
+
+def test_secondary_vasp_contacts_reports_multiple_distinct_vasps_independently(tmp_path):
+    """AT_VASP suspect -> W0, branching into W0->W1->VASP B (3 hops) and
+    W0->W2->W3->VASP C (4 hops): two genuinely different VASPs, so both must
+    be reported, each with its own correct hops/path -- neither replacing nor
+    merging with the other -- while the primary self-attribution (VASP A)
+    stays the hop-0 finding regardless."""
+    a = _synth_btc("multi-a")
+    w0 = _synth_btc("multi-w0")
+    w1 = _synth_btc("multi-w1")
+    vasp_b = _synth_btc("multi-vaspb")
+    w2 = _synth_btc("multi-w2")
+    w3 = _synth_btc("multi-w3")
+    vasp_c = _synth_btc("multi-vaspc")
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        assert label_exchange(store, a, "VASP A") is not None
+        assert label_exchange(store, vasp_b, "VASP B") is not None
+        assert label_exchange(store, vasp_c, "VASP C") is not None
+        a_id = _traced(store, a, {"counterparty_addresses": [w0]})
+        _traced(store, w0, {"counterparty_addresses": [w1, w2]})
+        _traced(store, w1, {"sent_to_addresses": [vasp_b]})
+        _traced(store, w2, {"counterparty_addresses": [w3]})
+        _traced(store, w3, {"sent_to_addresses": [vasp_c]})
+
+        hit = next(w for w in wallet_exchange_paths(store, max_hops=4)
+                   if w["entity_id"] == a_id)
+        assert hit["exchange"] == "vasp a"          # primary attribution unchanged
+        by_brand = {ct["exchange"]: ct for ct in hit["secondary_vasp_contacts"]}
+        assert set(by_brand) == {"vasp b", "vasp c"}
+        assert by_brand["vasp b"]["hops"] == 3
+        assert by_brand["vasp c"]["hops"] == 4
+        # sorted by hops -- nearest brand first.
+        assert [ct["exchange"] for ct in hit["secondary_vasp_contacts"]] == ["vasp b", "vasp c"]
 
 
 def test_the_real_binance_deposit_infers_no_ownership_or_operator_candidate(tmp_path):

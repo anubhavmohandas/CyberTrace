@@ -9,13 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from cybertrace.evidence import EvidenceStore, _ingest_enrichment, ingest, label_exchange
+from cybertrace.correlate import wallet_exchange_paths
+from cybertrace.evidence import EvidenceStore, _ingest_enrichment, enrich_bitcoin, ingest, label_exchange
 from cybertrace.modules.base import ModuleResult
 from cybertrace.monitor import (
     run_watch, wallet_deltas, wallet_targets, watch_narrative,
 )
 
-from .test_correlate import BINANCE_HOT, BTC_OTHER
+from .test_correlate import BINANCE_HOT, BTC_OTHER, _synth_btc, _traced
 from .test_evidence import BTC_VALID
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -144,6 +145,189 @@ class TestWalletDeltas:
         un-found by a re-check that simply did not run this session."""
         before = {"e1": dict(self.ROW)}
         assert wallet_deltas(before, []) == []
+
+
+def _direct_contact(exchange, attribution="TAG_ATTESTED", direction="TO_VASP"):
+    """Shaped like a wallet_exchange_paths direct_vasp_contacts entry: hop 1
+    is implied by the field itself, so real entries never carry a "hops"
+    key (see correlate.py's `secondary` list)."""
+    return {"peer_entity_id": f"peer-{exchange}", "exchange": exchange,
+            "attribution": attribution, "attribution_source": "test",
+            "direction": direction, "evidence_ids": [1]}
+
+
+def _secondary_contact(exchange, hops=2, attribution="TAG_ATTESTED", direction="TO_VASP"):
+    """Shaped like a wallet_exchange_paths secondary_vasp_contacts entry:
+    always carries an explicit "hops" (see correlate.py's
+    _secondary_vasp_reach)."""
+    return {"peer_entity_id": f"peer-{exchange}", "exchange": exchange,
+            "attribution": attribution, "attribution_source": "test",
+            "hops": hops, "path": ["e1", "mid", f"peer-{exchange}"],
+            "direction": direction, "evidence_ids": [1]}
+
+
+class TestVaspContactDeltas:
+    """Loop 31: direct_vasp_contacts/secondary_vasp_contacts (Loop 28/30,
+    AT_VASP-only) now participate in wallet_deltas' MOVED/NEW comparison the
+    same way proximity/hops/exchange/attribution/direction already did --
+    see _vasp_contacts in monitor.py. DIRECT/INDIRECT rows, which never
+    carry either key, must remain exactly as safe as TestWalletDeltas above
+    already pins."""
+
+    ROW = {"value": BTC_VALID, "proximity": "AT_VASP", "hops": 0,
+          "exchange": "VASP A", "attribution": "ANALYST_ASSERTED",
+          "direction": "UNKNOWN", "direct_vasp_contacts": [],
+          "secondary_vasp_contacts": []}
+
+    def test_a_new_direct_vasp_contact_is_a_moved_delta(self):
+        before = {"e1": dict(self.ROW)}
+        after = [{"entity_id": "e1", **self.ROW,
+                  "direct_vasp_contacts": [_direct_contact("VASP B")]}]
+        out = wallet_deltas(before, after)
+        assert len(out) == 1 and out[0]["change"] == "MOVED"
+        assert out[0]["before"]["vasp_contacts"] == []
+        assert [c["exchange"] for c in out[0]["after"]["vasp_contacts"]] == ["VASP B"]
+
+    def test_a_new_secondary_vasp_contact_is_a_moved_delta(self):
+        before = {"e1": dict(self.ROW)}
+        after = [{"entity_id": "e1", **self.ROW,
+                  "secondary_vasp_contacts": [_secondary_contact("VASP B")]}]
+        out = wallet_deltas(before, after)
+        assert len(out) == 1 and out[0]["change"] == "MOVED"
+        assert [c["exchange"] for c in out[0]["after"]["vasp_contacts"]] == ["VASP B"]
+
+    def test_an_unchanged_vasp_contact_across_cycles_produces_no_delta(self):
+        row = {**self.ROW, "direct_vasp_contacts": [_direct_contact("VASP B")]}
+        before = {"e1": dict(row)}
+        assert wallet_deltas(before, [{"entity_id": "e1", **row}]) == []
+
+    def test_direct_and_indirect_rows_without_contact_fields_are_unaffected(self):
+        """A watched wallet that never reaches AT_VASP carries neither key at
+        all -- must not KeyError, and the missing-field default (empty
+        contact set) must not manufacture a false delta."""
+        row = {"value": BTC_VALID, "proximity": "DIRECT", "hops": 1,
+              "exchange": "Binance", "attribution": "TAG_ATTESTED", "direction": "TO_VASP"}
+        before = {"e1": dict(row)}
+        assert wallet_deltas(before, [{"entity_id": "e1", **row}]) == []
+        out = wallet_deltas({}, [{"entity_id": "e1", **row}])
+        assert len(out) == 1 and out[0]["vasp_contacts"] == []
+
+    def test_only_the_newly_added_contact_changes_the_reported_set(self):
+        before = {"e1": {**self.ROW, "direct_vasp_contacts": [_direct_contact("VASP B")]}}
+        after = [{"entity_id": "e1", **self.ROW,
+                  "direct_vasp_contacts": [_direct_contact("VASP B"), _direct_contact("VASP C")]}]
+        out = wallet_deltas(before, after)
+        assert len(out) == 1
+        assert {c["exchange"] for c in out[0]["before"]["vasp_contacts"]} == {"VASP B"}
+        assert {c["exchange"] for c in out[0]["after"]["vasp_contacts"]} == {"VASP B", "VASP C"}
+
+    def test_a_contact_disappearing_is_reported_moved_not_a_new_gone_type(self):
+        """No enforced removal-prevention for contacts, unlike the primary
+        relationship's append-only guarantee (see wallet_deltas' own
+        docstring) -- a brand present before and absent after is compared by
+        plain inequality like any other tracked field, and surfaces as
+        MOVED, never a new delta type invented for this loop."""
+        before = {"e1": {**self.ROW, "direct_vasp_contacts": [_direct_contact("VASP B")]}}
+        after = [{"entity_id": "e1", **self.ROW}]
+        out = wallet_deltas(before, after)
+        assert len(out) == 1 and out[0]["change"] == "MOVED"
+        assert out[0]["after"]["vasp_contacts"] == []
+
+    def test_an_evidence_only_change_produces_no_delta(self):
+        """path/evidence_ids are excluded from the comparison, matching
+        FIELDS' own omission of both for the primary relationship."""
+        contact_v1 = {"peer_entity_id": "p1", "exchange": "VASP B",
+                     "attribution": "TAG_ATTESTED", "attribution_source": "test",
+                     "direction": "TO_VASP", "evidence_ids": [1]}
+        contact_v2 = {**contact_v1, "evidence_ids": [1, 2, 3]}
+        before = {"e1": {**self.ROW, "direct_vasp_contacts": [contact_v1]}}
+        after = [{"entity_id": "e1", **self.ROW, "direct_vasp_contacts": [contact_v2]}]
+        assert wallet_deltas(before, after) == []
+
+    def test_a_direct_brand_and_a_different_secondary_brand_both_surface_without_duplication(self):
+        """wallet_exchange_paths itself guarantees a brand lands in only one
+        of the two fields (its own direct_brands guard) -- confirm the
+        delta layer reports each exactly once when they're already split
+        across the two fields, never twice."""
+        row = {**self.ROW, "direct_vasp_contacts": [_direct_contact("VASP B")],
+              "secondary_vasp_contacts": [_secondary_contact("VASP C")]}
+        out = wallet_deltas({}, [{"entity_id": "e1", **row}])
+        assert len(out) == 1
+        assert [c["exchange"] for c in out[0]["vasp_contacts"]] == ["VASP B", "VASP C"]
+
+
+class TestVaspContactWatchCycle:
+    """Phase 6: a real, two-cycle wallet_exchange_paths() diff -- the exact
+    shape recheck() feeds wallet_deltas cycle to cycle (see recheck's
+    wallets_before/wallets_after in monitor.py) -- proving a newly
+    discovered VASP relationship is now visible to monitoring, and that a
+    pre-existing one is never re-reported as newly discovered."""
+
+    def test_a_secondary_vasp_discovered_between_cycles_produces_a_delta(self):
+        suspect_addr = BTC_VALID
+        w1, w2 = _synth_btc("m31-w1"), _synth_btc("m31-w2")
+        vasp_b = _synth_btc("m31-vaspb")
+        with EvidenceStore(":memory:") as s:
+            assert label_exchange(s, suspect_addr, "VASP A") is not None
+            suspect = _traced(s, suspect_addr, {})
+
+            # Cycle 1: no secondary VASP.
+            cycle1 = [p for p in wallet_exchange_paths(s) if p["entity_id"] == suspect]
+            assert cycle1[0]["proximity"] == "AT_VASP"
+            assert cycle1[0]["secondary_vasp_contacts"] == []
+            before = {p["entity_id"]: p for p in cycle1}
+
+            # Cycle 2: suspect -> w1 -> w2 -> VASP B appears.
+            _traced(s, suspect_addr, {"counterparty_addresses": [w1]})
+            _traced(s, w1, {"counterparty_addresses": [w2]})
+            _traced(s, w2, {"sent_to_addresses": [vasp_b]})
+            assert label_exchange(s, vasp_b, "VASP B") is not None
+
+            after = [p for p in wallet_exchange_paths(s) if p["entity_id"] == suspect]
+            deltas = wallet_deltas(before, after)
+
+        assert len(after[0]["secondary_vasp_contacts"]) == 1
+        assert after[0]["secondary_vasp_contacts"][0]["exchange"] == "vasp b"
+
+        assert len(deltas) == 1 and deltas[0]["change"] == "MOVED"
+        assert deltas[0]["before"]["vasp_contacts"] == []
+        assert [c["exchange"] for c in deltas[0]["after"]["vasp_contacts"]] == ["vasp b"]
+
+    def test_a_preexisting_direct_vasp_is_not_rereported_when_a_secondary_vasp_appears(self):
+        suspect_addr, vasp_b = BTC_VALID, BTC_OTHER
+        w1, vasp_c = _synth_btc("m31b-w1"), _synth_btc("m31b-vaspc")
+        with EvidenceStore(":memory:") as s:
+            assert label_exchange(s, suspect_addr, "VASP A") is not None
+            suspect = _traced(s, suspect_addr,
+                              {"counterparty_addresses": [vasp_b], "sent_to_addresses": [vasp_b]})
+            assert label_exchange(s, vasp_b, "VASP B") is not None
+
+            # Cycle 1: the suspect already directly reaches VASP B.
+            cycle1 = [p for p in wallet_exchange_paths(s) if p["entity_id"] == suspect]
+            assert [c["exchange"] for c in cycle1[0]["direct_vasp_contacts"]] == ["vasp b"]
+            before = {p["entity_id"]: p for p in cycle1}
+
+            # Cycle 2: a NEW secondary VASP C appears one hop further out.
+            # counterparty_addresses is cumulative (a real re-search reports
+            # a wallet's full on-chain history, not just what's new -- see
+            # test_a_wallet_that_newly_reaches_a_labeled_exchange_is_reported
+            # above), so vasp_b is repeated here alongside the new w1 hop.
+            _traced(s, suspect_addr, {"counterparty_addresses": [vasp_b, w1],
+                                      "sent_to_addresses": [vasp_b]})
+            _traced(s, w1, {"sent_to_addresses": [vasp_c]})
+            assert label_exchange(s, vasp_c, "VASP C") is not None
+
+            after = [p for p in wallet_exchange_paths(s) if p["entity_id"] == suspect]
+            deltas = wallet_deltas(before, after)
+
+        assert [c["exchange"] for c in after[0]["direct_vasp_contacts"]] == ["vasp b"]
+        assert [c["exchange"] for c in after[0]["secondary_vasp_contacts"]] == ["vasp c"]
+
+        assert len(deltas) == 1 and deltas[0]["change"] == "MOVED"
+        before_brands = {c["exchange"] for c in deltas[0]["before"]["vasp_contacts"]}
+        after_brands = {c["exchange"] for c in deltas[0]["after"]["vasp_contacts"]}
+        assert before_brands == {"vasp b"}
+        assert after_brands == {"vasp b", "vasp c"}
 
 
 class _FakeChainModule:

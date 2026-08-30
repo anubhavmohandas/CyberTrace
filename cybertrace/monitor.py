@@ -142,6 +142,44 @@ def _wallet_verdict(store: EvidenceStore, target_id: str) -> str:
     return LIVE_CHANGED if json.loads(snap["diff_summary"]).get("changed") else LIVE_SAME
 
 
+def _vasp_contacts(row: dict) -> List[dict]:
+    """Every OTHER VASP an AT_VASP row itself reaches -- direct_vasp_contacts
+    (Loop 28, hop 1) and secondary_vasp_contacts (Loop 30, hop 2+) -- reduced
+    to a list of {exchange, hops, attribution, direction}: the same shape
+    FIELDS below already tracks for the primary relationship, so a brand's
+    arrival, or a real change in how it's reached, deltas the same way a
+    primary-path change already does.
+
+    Both source keys exist only on AT_VASP (hop 0) rows, never on
+    DIRECT/INDIRECT ones (see wallet_exchange_paths) -- row.get(f, []) reads
+    that absence as "reaches no other VASP", same as an AT_VASP row that
+    genuinely has none, rather than the KeyError a bare row[f] would raise.
+    This is a narrowly scoped normalization for these two optional,
+    list-valued fields only -- FIELDS below still indexes every watched row
+    with plain row[f], unchanged, because proximity/hops/exchange/attribution
+    /direction are present on every row regardless of proximity.
+
+    A brand can only ever land in one of the two source lists --
+    wallet_exchange_paths' own direct_brands guard excludes a hop-1 brand
+    from secondary_vasp_contacts -- so concatenating them can't double-count
+    one relationship under two entries (Phase 3E / Test 8).
+
+    path and evidence_ids are left out on purpose, matching FIELDS' own
+    omission of both for the primary relationship: this tracks "does a VASP
+    relationship exist, and how" (brand, hop count, attribution, flow
+    direction), not "did the BFS re-walk the same conclusion over one more
+    piece of evidence" -- so a path- or evidence-only change produces no
+    delta, same as it already does not for the primary relationship.
+
+    Sorted by (exchange, hops) so two calls over the same contacts in a
+    different order compare equal.
+    """
+    contacts = row.get("direct_vasp_contacts", []) + row.get("secondary_vasp_contacts", [])
+    return sorted(({"exchange": c["exchange"], "hops": c.get("hops", 1),
+                    "attribution": c["attribution"], "direction": c["direction"]}
+                   for c in contacts), key=lambda c: (c["exchange"], c["hops"]))
+
+
 def wallet_deltas(before: Dict[str, dict], after: List[dict]) -> List[dict]:
     """What a wallet re-check changed about its reachability to a VASP.
 
@@ -151,18 +189,17 @@ def wallet_deltas(before: Dict[str, dict], after: List[dict]) -> List[dict]:
     diffing against every wallet in the whole case -- most of them not even
     re-checked this run -- would report "changed" for wallets nothing touched.
 
-    No GONE case: the evidence store is append-only, so a path that existed
-    before a re-check cannot vanish because one ran -- only gain hops, an
-    endpoint or a direction it did not have, never lose one.
+    No GONE case for the primary relationship: the evidence store is
+    append-only, so a path that existed before a re-check cannot vanish
+    because one ran -- only gain hops, an endpoint or a direction it did not
+    have, never lose one. direct_vasp_contacts/secondary_vasp_contacts (see
+    _vasp_contacts) do not get that same guarantee specially enforced --
+    relationships live behind status='ACTIVE' in wallet_exchange_paths'
+    adjacency query, so a brand a prior cycle reported could in principle be
+    suppressed later. Rather than invent removal semantics this loop has no
+    evidence are needed for, a contact set change is compared like any other
+    FIELDS change: plain inequality, in either direction.
     """
-    # direct_vasp_contacts (wallet_exchange_paths' secondary-VASP-contact field)
-    # is deliberately excluded here, not forgotten: it only exists on AT_VASP
-    # (hop 0) rows, never on DIRECT/INDIRECT ones (see wallet_exchange_paths),
-    # while every name below is read with cur[f]/prev[f] on ALL watched rows
-    # regardless of proximity. Adding it would KeyError on any watched wallet
-    # that isn't itself AT_VASP -- the fix would be a broader indexing change
-    # to this function, not a one-line tuple edit, so a newly-discovered
-    # secondary contact does not raise a MOVED delta between watch cycles.
     FIELDS = ("proximity", "hops", "exchange", "attribution", "direction")
     after_by_id = {p["entity_id"]: p for p in after}
     out = []
@@ -170,14 +207,16 @@ def wallet_deltas(before: Dict[str, dict], after: List[dict]) -> List[dict]:
         cur = after_by_id.get(entity_id)
         if cur is None:
             continue
-        if tuple(cur[f] for f in FIELDS) != tuple(prev[f] for f in FIELDS):
+        cur_contacts, prev_contacts = _vasp_contacts(cur), _vasp_contacts(prev)
+        if (tuple(cur[f] for f in FIELDS) != tuple(prev[f] for f in FIELDS)
+                or cur_contacts != prev_contacts):
             out.append({"change": "MOVED", "entity_id": entity_id, "value": cur["value"],
-                       "before": {f: prev[f] for f in FIELDS},
-                       "after": {f: cur[f] for f in FIELDS}})
+                       "before": {**{f: prev[f] for f in FIELDS}, "vasp_contacts": prev_contacts},
+                       "after": {**{f: cur[f] for f in FIELDS}, "vasp_contacts": cur_contacts}})
     for entity_id, cur in after_by_id.items():
         if entity_id not in before:
             out.append({"change": "NEW", "entity_id": entity_id, "value": cur["value"],
-                       **{f: cur[f] for f in FIELDS}})
+                       **{f: cur[f] for f in FIELDS}, "vasp_contacts": _vasp_contacts(cur)})
     return out
 
 
