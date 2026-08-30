@@ -13,7 +13,7 @@ import pytest
 from cybertrace.correlate import (
     FUNNELS, SHARED_ARTIFACTS,
     COMMON_ARTIFACT_FLOOR, EXCHANGE_HOP_DECAY, LEAD_FLOOR, REGULATORY_ATTESTED,
-    RETIRED_ASSESSMENT, VASP_DISCLOSED,
+    RETIRED_ASSESSMENT, TAG_ATTESTED, TO_VASP, VASP_DISCLOSED,
     SUCCESSOR_SIGNALS, UNJOINED_CONTEXT,
     canonical_entity_key, candidate_infra, candidate_ips, candidate_operators,
     confidence_level, contradiction_anchor, contradictions_from_identity,
@@ -3216,41 +3216,68 @@ def test_a_real_ofac_designated_suspects_actual_deposits_are_captured_as_evidenc
         assert rel["status"] == "ACTIVE"
 
 
-def test_wallet_exchange_paths_reports_the_suspects_own_designation_not_the_real_deposit(tmp_path):
+def test_wallet_exchange_paths_reports_the_suspects_own_designation_and_the_real_deposit_as_a_secondary_contact(tmp_path):
     """Boundary case, pinned with real data. OFAC_POLYANIN is itself
     REGULATORY_ATTESTED (his own address is OFAC-designated), so
-    wallet_exchange_paths resolves him AT_VASP on HIMSELF at hop 0 (the
-    nearest-endpoint design) -- and, because a BFS start that is already an
-    exchange_of key never walks its own edges (correlate.py:862-871), the
-    real 8-transaction Binance deposit this same real data contains is NOT a
-    second entry in wallet_exchange_paths, and therefore never reaches
-    wallet_path_flags, the CLI table, the dossier, or the markdown brief.
-    Confirmed here, not assumed: the previous test proves the SENT_FUNDS_TO
-    edge and its evidence exist in the graph; this one proves the summary
-    layer that every investigator-facing renderer reads does not surface it
-    once the suspect is already self-attributed -- a named reporting-
-    completeness gap in the nearest-endpoint design, not an implementation
-    defect this test fixes."""
+    wallet_exchange_paths still resolves him AT_VASP on HIMSELF at hop 0 (the
+    nearest-endpoint design, unchanged) -- and the BFS still never walks a
+    self-attributed start's own edges, so nothing reaches Binance via a
+    second, hop>0 row (the DIRECT/INDIRECT "nearest VASP only" behavior is
+    untouched). What changed: the primary row's own direct adjacency now also
+    carries `direct_vasp_contacts`, so the real 8-transaction Binance deposit
+    this same real data contains -- fully evidenced, previously invisible to
+    every investigator-facing renderer once the suspect was self-attributed
+    -- is now a secondary entry on that same row, and wallet_path_flags now
+    cites it."""
     _skip_unless_real_sources_available()
     with EvidenceStore(str(tmp_path / "polyanin_boundary.db")) as store:
         suspect_id = _real_polyanin_case(store)
         paths = {w["entity_id"]: w for w in wallet_exchange_paths(store)}
 
         hit = paths[suspect_id]
+        # Primary self-attribution: unchanged.
         assert hit["attribution"] == REGULATORY_ATTESTED
+        assert hit["attribution_source"] == "OFAC SDN: profile 33858"
         assert hit["proximity"] == "AT_VASP"
         assert hit["hops"] == 0
+        assert hit["confidence"] == 1.0
+        assert hit["path"] == [suspect_id]
         assert "Polyanin" in hit["exchange"]
-        assert hit["exchange"] != "binance.com"  # the real deposit is not what's reported here
+        assert hit["exchange"] != "binance.com"  # the primary field still names Polyanin, not Binance
 
         binance_id = store.find_entity("BTC_ADDRESS", BINANCE_HOT)
         assert binance_id in paths          # Binance still resolves AT_VASP on itself...
         assert paths[binance_id]["hops"] == 0
         assert not any(w["hops"] and w["exchange"] == "binance.com"
-                       for w in paths.values())  # ...but nothing reaches it via a hop
+                       for w in paths.values())  # ...and nothing reaches it via a hop row
+
+        # Secondary contact: the real, direct Binance deposit, now surfaced.
+        assert len(hit["direct_vasp_contacts"]) == 1
+        contact = hit["direct_vasp_contacts"][0]
+        assert contact["peer_entity_id"] == binance_id
+        assert contact["exchange"] == "binance.com"
+        assert contact["attribution"] == TAG_ATTESTED
+        assert "binance" in contact["attribution_source"].lower()
+        assert contact["direction"] == TO_VASP  # 8 real deposits, 0 payouts
+        assert contact["evidence_ids"]           # resolves through evidence_chain, not asserted bare
 
         flags_text = " ".join(wallet_path_flags(store, hit))
-        assert "binance" not in flags_text.lower()  # the real deposit is invisible here too
+        assert "binance" in flags_text.lower()          # the real deposit is now visible here
+        assert "Polyanin" in flags_text                 # ...alongside the primary designation, not instead of it
+
+
+def test_direct_vasp_contacts_is_empty_when_the_self_attributed_suspect_has_no_other_direct_vasp_relationship(tmp_path):
+    """The [] case is the common one, not a corner: a self-attributed suspect
+    with no on-chain history recorded in this store has no adjacency edges at
+    all, so there is nothing for direct_vasp_contacts to report -- and it must
+    say so as an empty list, not omit the key or invent a relationship."""
+    _skip_unless_real_sources_available()
+    with EvidenceStore(str(tmp_path / "empty_secondary.db")) as store:
+        addr = _traced(store, OFAC_SUEX, {})
+        hit = next(w for w in wallet_exchange_paths(store) if w["entity_id"] == addr)
+        assert hit["attribution"] == REGULATORY_ATTESTED
+        assert hit["proximity"] == "AT_VASP"
+        assert hit["direct_vasp_contacts"] == []
 
 
 def test_the_real_binance_deposit_infers_no_ownership_or_operator_candidate(tmp_path):

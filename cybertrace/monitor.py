@@ -155,6 +155,14 @@ def wallet_deltas(before: Dict[str, dict], after: List[dict]) -> List[dict]:
     before a re-check cannot vanish because one ran -- only gain hops, an
     endpoint or a direction it did not have, never lose one.
     """
+    # direct_vasp_contacts (wallet_exchange_paths' secondary-VASP-contact field)
+    # is deliberately excluded here, not forgotten: it only exists on AT_VASP
+    # (hop 0) rows, never on DIRECT/INDIRECT ones (see wallet_exchange_paths),
+    # while every name below is read with cur[f]/prev[f] on ALL watched rows
+    # regardless of proximity. Adding it would KeyError on any watched wallet
+    # that isn't itself AT_VASP -- the fix would be a broader indexing change
+    # to this function, not a one-line tuple edit, so a newly-discovered
+    # secondary contact does not raise a MOVED delta between watch cycles.
     FIELDS = ("proximity", "hops", "exchange", "attribution", "direction")
     after_by_id = {p["entity_id"]: p for p in after}
     out = []

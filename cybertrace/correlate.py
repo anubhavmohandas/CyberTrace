@@ -645,6 +645,19 @@ REGULATORY_ATTESTED = "REGULATORY_ATTESTED"     # OFAC SDN digital-currency-addr
 VASP_DISCLOSED = "VASP_DISCLOSED"               # the VASP's own verified published wallet list
 TAG_ATTESTED = "TAG_ATTESTED"                   # a third party's public tagpack entry
 
+# wallet_path_flags' per-tier phrasing -- module level so a secondary
+# direct_vasp_contacts entry cites its attribution with the exact same wording
+# as a primary row's, never a near-identical rephrasing of the same tier.
+_ATTRIBUTION_SOURCE_PHRASE = {
+    ANALYST_ASSERTED: "analyst-asserted",
+    REGULATORY_ATTESTED: "an OFAC SDN designation, a government determination -- "
+                         "not this engine's own finding",
+    VASP_DISCLOSED: "the VASP's own published wallet disclosure, independently "
+                    "corroborated -- not proof this address's other counterparties "
+                    "are its customers",
+    TAG_ATTESTED: "third-party tag, not verified by CyberTrace",
+}
+
 # How far the suspect address is from the VASP-attributed address. Named rather
 # than left as a bare hop count because "direct" is the word a disclosure or
 # freezing request turns on, and 1 hop and 3 hops are not the same request.
@@ -663,6 +676,22 @@ TO_VASP, FROM_VASP, DIRECTION_UNKNOWN = "TO_VASP", "FROM_VASP", "UNKNOWN"
 # data: OFAC-designated addresses that reach a VASP commonly both deposit into
 # and are paid by the same endpoint.
 BOTH_WAYS = "BOTH_WAYS"
+
+
+def _direction_phrase(exchange: str, direction: str) -> str:
+    """wallet_path_flags' final-hop wording -- factored out so a primary row
+    and a direct_vasp_contacts entry describe their own final hop identically."""
+    return {
+        TO_VASP: f"value moved TOWARD {exchange} on the final hop "
+                 f"— consistent with a deposit",
+        FROM_VASP: f"value moved FROM {exchange} on the final hop "
+                   f"— a payout, not a deposit",
+        BOTH_WAYS: f"value moved BOTH ways with {exchange} on the final "
+                   f"hop — deposits and payouts are both present, so this is "
+                   f"not a one-way deposit",
+        DIRECTION_UNKNOWN: "fund-flow direction on the final hop was never "
+                           "recorded — this is reachability, not a deposit",
+    }[direction]
 
 
 def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, dict]:
@@ -862,12 +891,33 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
     for start in values:
         if start in exchange_of:
             end = exchange_of[start]
+            # A self-attributed suspect's own adjacency edges are otherwise never
+            # walked (the BFS below short-circuits before it starts) -- so a real,
+            # direct VASP relationship the suspect also has (Polyanin -> Binance:
+            # REGULATORY_ATTESTED on himself, TAG_ATTESTED direct deposits into
+            # Binance, both true) was fully evidenced but invisible to every
+            # investigator-facing renderer. Reuses adjacency/exchange_of/_direction
+            # already in scope here -- no second BFS, no new row: PS2 2.3c/PS3 3.3.
+            # Only a genuinely different VASP than the suspect's own self-
+            # attribution counts -- never a duplicate of the primary row.
+            secondary = []
+            for peer, (hop_obs, flows) in sorted(adjacency.get(start, {}).items()):
+                peer_end = exchange_of.get(peer)
+                if peer_end is None or peer_end["exchange"] == end["exchange"]:
+                    continue
+                secondary.append({"peer_entity_id": peer,
+                                  "exchange": peer_end["exchange"],
+                                  "attribution": peer_end["attribution"],
+                                  "attribution_source": peer_end["attribution_source"],
+                                  "direction": _direction(flows),
+                                  "evidence_ids": hop_obs + peer_end["evidence_ids"]})
             out.append({"entity_id": start, "value": values[start],
                         "exchange": end["exchange"], "hops": 0, "confidence": 1.0,
                         "path": [start], "evidence_ids": end["evidence_ids"],
                         "attribution": end["attribution"],
                         "attribution_source": end["attribution_source"],
-                        "proximity": AT_VASP, "direction": DIRECTION_UNKNOWN})
+                        "proximity": AT_VASP, "direction": DIRECTION_UNKNOWN,
+                        "direct_vasp_contacts": secondary})
             continue
 
         visited = {start}
@@ -1014,28 +1064,12 @@ def wallet_path_flags(store: EvidenceStore, hit: Optional[dict],
         # a VASP at all, and calling it one would assert a business-type
         # claim OFAC's own record does not make.
         endpoint_kind = "OFAC-designated entity" if hit["attribution"] == REGULATORY_ATTESTED else "VASP"
-        source = {ANALYST_ASSERTED: "analyst-asserted",
-                  REGULATORY_ATTESTED: "an OFAC SDN designation, a government "
-                                        "determination -- not this engine's own finding",
-                  VASP_DISCLOSED: "the VASP's own published wallet disclosure, "
-                                  "independently corroborated -- not proof this "
-                                  "address's other counterparties are its customers",
-                  TAG_ATTESTED: "third-party tag, not verified by CyberTrace"}[hit["attribution"]]
+        source = _ATTRIBUTION_SOURCE_PHRASE[hit["attribution"]]
         flags.append(f"{hit['proximity']}: {proximity} {hit['exchange']} "
                      f"({hit['hops']} hop(s), reachability confidence "
                      f"{hit['confidence']:.2f})")
         flags.append(f"{endpoint_kind} attribution is {source}: {hit['attribution_source']}")
-        flags.append({
-            TO_VASP: f"value moved TOWARD {hit['exchange']} on the final hop "
-                     f"— consistent with a deposit",
-            FROM_VASP: f"value moved FROM {hit['exchange']} on the final hop "
-                       f"— a payout, not a deposit",
-            BOTH_WAYS: f"value moved BOTH ways with {hit['exchange']} on the final "
-                       f"hop — deposits and payouts are both present, so this is "
-                       f"not a one-way deposit",
-            DIRECTION_UNKNOWN: "fund-flow direction on the final hop was never "
-                               "recorded — this is reachability, not a deposit",
-        }[hit["direction"]])
+        flags.append(_direction_phrase(hit["exchange"], hit["direction"]))
         shared = hit.get("endpoint_shared_by", 1)
         if shared > 1:
             flags.append(
@@ -1051,6 +1085,23 @@ def wallet_path_flags(store: EvidenceStore, hit: Optional[dict],
                 f"itself disclosed — a shared/omnibus disclosed wallet SET, not one "
                 f"shared address, so this is not evidence this address is "
                 f"{hit['exchange']}'s customer")
+        # direct_vasp_contacts: an AT_VASP suspect's OWN direct relationship with a
+        # second, genuinely different VASP -- e.g. an OFAC-designated address that
+        # also paid Binance directly. Same per-tier wording as the primary finding
+        # above (never new phrasing), so "OFAC designation ≠ VASP claim" and
+        # "third-party tag, not verified by CyberTrace" read identically whichever
+        # finding on this wallet they attach to.
+        for contact in hit.get("direct_vasp_contacts", []):
+            peer_kind = ("OFAC-designated entity" if contact["attribution"] == REGULATORY_ATTESTED
+                        else "VASP")
+            flags.append(
+                f"also transacted directly with a separate {peer_kind}: "
+                f"{contact['exchange']} (1 hop) -- distinct from the {endpoint_kind} "
+                f"this address is itself attributed to")
+            flags.append(f"{peer_kind} attribution is "
+                         f"{_ATTRIBUTION_SOURCE_PHRASE[contact['attribution']]}: "
+                         f"{contact['attribution_source']}")
+            flags.append(_direction_phrase(contact["exchange"], contact["direction"]))
     return flags
 
 
