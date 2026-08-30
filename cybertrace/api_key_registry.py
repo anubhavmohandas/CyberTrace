@@ -86,15 +86,24 @@ class APIKeys:
 
     # ── Cryptocurrency / Blockchain ───────────────────────────────────────────
     etherscan: Optional[str] = None
-    # https://etherscan.io — Etherscan API V2: one key covers Ethereum, BNB
-    # Smart Chain, Polygon, and 50+ other EVM chains via a `chainid` query
-    # param (see bitcoin_module._EVM_CHAIN_IDS). BscScan/PolygonScan's own
-    # separate free-tier keys and domains are retired — confirmed live,
-    # both now answer "switch to Etherscan API V2" regardless of any key —
-    # so there is no separate bscscan/polygonscan field here any more.
+    # https://etherscan.io — Etherscan API V2: one key covers Ethereum,
+    # Polygon, and 50+ other EVM chains via a `chainid` query param (see
+    # bitcoin_module._EVM_CHAIN_IDS). BscScan/PolygonScan's own separate
+    # free-tier keys and domains are retired — confirmed live, both now
+    # answer "switch to Etherscan API V2" regardless of any key — so there
+    # is no separate bscscan/polygonscan field here any more.
     # Free tier: 5 calls/sec, Ethereum + Polygon; BNB Smart Chain (chainid
-    # 56) is gated behind a paid Etherscan plan even under V2 (confirmed
-    # live: "Free API access is not supported for this chain").
+    # 56) is gated behind a PAID Etherscan plan even under V2 (confirmed
+    # live: "Free API access is not supported for this chain") — see
+    # `nodereal` below for the free BNB path this codebase actually uses.
+
+    nodereal: Optional[str] = None
+    # https://dashboard.nodereal.io — MegaNode: BNB Smart Chain's free
+    # transaction-history source (Etherscan V2's free tier does not cover
+    # BNB — see `etherscan` above). Different protocol from every other key
+    # here: JSON-RPC 2.0 POST to https://bsc-mainnet.nodereal.io/v1/{key}
+    # (`nr_getTransactionByAddress`), not the REST module=account&action=...
+    # shape. Free tier: 3 API keys, 100M monthly compute units, no card.
 
     chainabuse: Optional[str] = None
     # https://docs.chainabuse.com — community-reported scam/abuse address database
@@ -144,6 +153,7 @@ class APIKeys:
             twilio_token=os.getenv('TWILIO_TOKEN'),
             # Crypto
             etherscan=os.getenv('ETHERSCAN_API_KEY'),
+            nodereal=os.getenv('NODEREAL_API_KEY'),
             chainabuse=os.getenv('CHAINABUSE_API_KEY'),
             trongrid=os.getenv('TRONGRID_API_KEY'),
             # Social
@@ -177,7 +187,7 @@ class APIKeys:
             'Email':                  ['emailrep', 'hunter'],
             'Breach Databases':       ['hibp', 'dehashed', 'leakcheck'],
             'Phone':                  ['numverify', 'twilio_sid', 'twilio_token'],
-            'Crypto / Blockchain':    ['etherscan', 'chainabuse', 'trongrid'],
+            'Crypto / Blockchain':    ['etherscan', 'nodereal', 'chainabuse', 'trongrid'],
             'Social & Identity':      ['github', 'telegram_bot'],
             'Automation':             ['twocaptcha'],
         }

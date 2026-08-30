@@ -304,18 +304,19 @@ class TestBitcoinModuleEvmChainDisambiguation:
     def test_bnb_override_switches_target_type_and_sources(self):
         """No key configured -> both BNB sources fail fast (no network call,
         same key-gate _check_evm_transactions/_check_evm_token_transfers open
-        with) -- this pins dispatch/target_type, not live data."""
+        with) -- this pins dispatch/target_type, not live data. BNB is gated
+        on `nodereal`, not `etherscan` -- see _fetch_nodereal_txs."""
         import asyncio
         module = BitcoinModule()
-        original = module.config.api_keys.etherscan
-        module.config.api_keys.etherscan = None
+        original = module.config.api_keys.nodereal
+        module.config.api_keys.nodereal = None
         try:
             result = asyncio.run(module.search(self.EVM_ADDR, target_type='bnb'))
             assert result.target_type == 'bnb'
             assert set(result.sources.keys()) == {'bnb_transactions', 'bnb_token_transfers'}
             assert all(not r.success for r in result.sources.values())
         finally:
-            module.config.api_keys.etherscan = original
+            module.config.api_keys.nodereal = original
 
     def test_polygon_override_switches_target_type_and_sources(self):
         import asyncio
@@ -343,10 +344,15 @@ class TestBitcoinModuleEvmChainDisambiguation:
 
 
 class TestBitcoinModuleEvmChainSources:
-    """BNB/Polygon native + token-transfer sources -- same Etherscan-family
-    request/response shape as _check_etherscan_transactions/
-    _check_etherscan_token_transfers, exercised through the shared
-    _check_evm_transactions/_check_evm_token_transfers helpers."""
+    """BNB/Polygon native + token-transfer sources, exercised through the
+    shared _check_evm_transactions/_check_evm_token_transfers helpers.
+    Polygon shares Ethereum's Etherscan-family request/response shape (see
+    _fetch_evm_account_txs); BNB is a different protocol entirely --
+    NodeReal MegaNode's JSON-RPC 2.0 `nr_getTransactionByAddress`, because
+    Etherscan's free tier does not cover BNB Smart Chain (confirmed live --
+    see test_a_plan_restricted_chain_surfaces_etherscans_own_error_text
+    below, now pinned on Polygon since BNB no longer reaches that code path
+    at all)."""
 
     ADDR = "0x742d35Cc6634C0532925a3b844Bc9e7595f12345"
     PEER = "0x000000000000000000000000000000000000dead"
@@ -357,24 +363,42 @@ class TestBitcoinModuleEvmChainSources:
         original = module.config.api_keys.etherscan
         module.config.api_keys.etherscan = None
         try:
-            result = asyncio.run(module._check_evm_transactions(self.ADDR, 'bnb'))
+            result = asyncio.run(module._check_evm_transactions(self.ADDR, 'polygon'))
             assert result.success is False
             assert 'ETHERSCAN_API_KEY' in result.error
         finally:
             module.config.api_keys.etherscan = original
 
-    def test_bnb_native_transactions_via_etherscan_v2(self):
+    def test_bnb_no_key_configured_degrades_gracefully(self):
         import asyncio
         module = BitcoinModule()
-        original = module.config.api_keys.etherscan
-        module.config.api_keys.etherscan = 'testkey'
+        original = module.config.api_keys.nodereal
+        module.config.api_keys.nodereal = None
+        try:
+            result = asyncio.run(module._check_evm_transactions(self.ADDR, 'bnb'))
+            assert result.success is False
+            assert 'NODEREAL_API_KEY' in result.error
+        finally:
+            module.config.api_keys.nodereal = original
+
+    def test_bnb_native_transactions_via_nodereal(self):
+        import asyncio
+        module = BitcoinModule()
+        original = module.config.api_keys.nodereal
+        module.config.api_keys.nodereal = 'testkey'
         try:
             async def fake_fetch_json(url, **kwargs):
-                assert url == 'https://api.etherscan.io/v2/api'
-                assert kwargs['params']['chainid'] == 56
-                assert kwargs['params']['action'] == 'txlist'
-                return {'status': '1', 'result': [
-                    {'from': self.ADDR, 'to': self.PEER, 'timeStamp': '1700000000'}]}
+                assert url == 'https://bsc-mainnet.nodereal.io/v1/testkey'
+                assert kwargs['method'] == 'POST'
+                body = kwargs['json']
+                assert body['method'] == 'nr_getTransactionByAddress'
+                params = body['params'][0]
+                assert params['category'] == ['external']
+                assert params['address'] == self.ADDR
+                assert 'fromBlock' not in params and 'toBlock' not in params
+                return {'jsonrpc': '2.0', 'id': 1, 'result': {'pageKey': '', 'transfers': [
+                    {'from': self.ADDR, 'to': self.PEER, 'blockTimeStamp': 1700000000,
+                     'asset': 'BNB'}]}}
             module.fetch_json = fake_fetch_json
             result = asyncio.run(module._check_evm_transactions(self.ADDR, 'bnb'))
             assert result.success is True
@@ -382,7 +406,61 @@ class TestBitcoinModuleEvmChainSources:
             assert result.data['sent_to_addresses'] == [self.PEER]
             assert result.data['tx_count'] == 1
         finally:
-            module.config.api_keys.etherscan = original
+            module.config.api_keys.nodereal = original
+
+    def test_bnb_token_transfers_via_nodereal(self):
+        import asyncio
+        module = BitcoinModule()
+        original = module.config.api_keys.nodereal
+        module.config.api_keys.nodereal = 'testkey'
+        try:
+            async def fake_fetch_json(url, **kwargs):
+                params = kwargs['json']['params'][0]
+                assert params['category'] == ['20']
+                return {'jsonrpc': '2.0', 'id': 1, 'result': {'pageKey': '', 'transfers': [
+                    {'from': self.ADDR, 'to': self.PEER, 'blockTimeStamp': 1700000000,
+                     'asset': 'BUSD'}]}}
+            module.fetch_json = fake_fetch_json
+            result = asyncio.run(module._check_evm_token_transfers(self.ADDR, 'bnb'))
+            assert result.success is True
+            assert result.source == 'bnb_token_transfers'
+            assert result.data['sent_to_addresses'] == [self.PEER]
+            assert result.data['token_symbols'] == ['BUSD']
+        finally:
+            module.config.api_keys.nodereal = original
+
+    def test_bnb_nodereal_json_rpc_error_surfaces_its_own_message(self):
+        """A bad/expired NodeReal key returns a JSON-RPC error body -- must
+        read as that reason, not a generic 'no data'."""
+        import asyncio
+        module = BitcoinModule()
+        original = module.config.api_keys.nodereal
+        module.config.api_keys.nodereal = 'badkey'
+        try:
+            async def fake_fetch_json(url, **kwargs):
+                return {'jsonrpc': '2.0', 'id': None,
+                       'error': {'code': -32000, 'message': 'Unauthorized'}}
+            module.fetch_json = fake_fetch_json
+            result = asyncio.run(module._check_evm_transactions(self.ADDR, 'bnb'))
+            assert result.success is False
+            assert 'Unauthorized' in result.error
+        finally:
+            module.config.api_keys.nodereal = original
+
+    def test_bnb_nodereal_empty_transfers_is_success_not_failure(self):
+        import asyncio
+        module = BitcoinModule()
+        original = module.config.api_keys.nodereal
+        module.config.api_keys.nodereal = 'testkey'
+        try:
+            async def fake_fetch_json(url, **kwargs):
+                return {'jsonrpc': '2.0', 'id': 1, 'result': {'pageKey': '', 'transfers': []}}
+            module.fetch_json = fake_fetch_json
+            result = asyncio.run(module._check_evm_transactions(self.ADDR, 'bnb'))
+            assert result.success is True
+            assert result.data['tx_count'] == 0
+        finally:
+            module.config.api_keys.nodereal = original
 
     def test_polygon_token_transfers_via_etherscan_v2(self):
         import asyncio
@@ -407,9 +485,14 @@ class TestBitcoinModuleEvmChainSources:
             module.config.api_keys.etherscan = original
 
     def test_a_plan_restricted_chain_surfaces_etherscans_own_error_text(self):
-        """A chain a free-tier key cannot reach (BNB, right now) must not read
-        the same as 'no data' -- Etherscan's own explanation is the whole
-        point of a PARTIAL/BLOCKED status, not something to discard."""
+        """A chain a free-tier key cannot reach must not read the same as
+        'no data' -- Etherscan's own explanation is the whole point of a
+        PARTIAL/BLOCKED status, not something to discard. Pinned on Polygon
+        as a stand-in shape: BNB was the chain this was discovered against
+        live, but BNB no longer calls _fetch_evm_account_txs at all (see
+        the NodeReal tests above) -- the passthrough behavior itself is
+        chain-agnostic and still worth locking down on whichever Etherscan-
+        routed chain exercises it."""
         import asyncio
         module = BitcoinModule()
         original = module.config.api_keys.etherscan
@@ -420,7 +503,7 @@ class TestBitcoinModuleEvmChainSources:
                        'result': 'Free API access is not supported for this chain. '
                                  'Please upgrade your api plan for full chain coverage.'}
             module.fetch_json = fake_fetch_json
-            result = asyncio.run(module._check_evm_transactions(self.ADDR, 'bnb'))
+            result = asyncio.run(module._check_evm_transactions(self.ADDR, 'polygon'))
             assert result.success is False
             assert 'upgrade your api plan' in result.error
         finally:

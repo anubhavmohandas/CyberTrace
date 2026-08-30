@@ -593,36 +593,91 @@ class BitcoinModule(BaseModule):
     
     # Etherscan/BscScan/PolygonScan used to be separately keyed, separately
     # hosted instances of the same explorer codebase. As of Etherscan API V2,
-    # all of it (Ethereum, BNB Smart Chain, Polygon, and 50+ other EVM
-    # chains) is served from ONE endpoint under ETHERSCAN_API_KEY, picked
-    # apart only by a `chainid` query param -- see api_key_registry.py's
-    # etherscan field comment. Confirmed live: the old per-chain domains
-    # (api.bscscan.com, api.polygonscan.com) and the old api.etherscan.io/api
-    # (no /v2/) all now answer `{"status":"0","message":"NOTOK","result":
-    # "You are using a deprecated V1 endpoint, switch to Etherscan API
-    # V2..."}` regardless of any key, and api.bscscan.com/apis now redirects
-    # straight to Etherscan's own pricing page -- there is no separate
+    # Ethereum, Polygon, and 50+ other EVM chains are served from ONE
+    # endpoint under ETHERSCAN_API_KEY, picked apart only by a `chainid`
+    # query param -- see api_key_registry.py's etherscan field comment.
+    # Confirmed live: the old per-chain domains (api.bscscan.com, api.
+    # polygonscan.com) and the old api.etherscan.io/api (no /v2/) all now
+    # answer `{"status":"0","message":"NOTOK","result":"You are using a
+    # deprecated V1 endpoint, switch to Etherscan API V2..."}` regardless of
+    # any key, and api.bscscan.com/apis now redirects straight to
+    # Etherscan's own pricing page -- there is no separate
     # BSCSCAN_API_KEY/POLYGONSCAN_API_KEY to configure any more.
     #
-    # BNB Smart Chain specifically (chainid 56) is gated behind a paid
+    # BNB Smart Chain specifically (chainid 56) is gated behind a PAID
     # Etherscan plan even under V2 -- confirmed live: a free-tier key gets
-    # `"Free API access is not supported for this chain. Please upgrade
-    # your api plan..."`. Polygon (chainid 137) is free-tier-accessible.
-    # Both route through the exact same call below; a plan-restricted chain
-    # just degrades the same way a missing key does, with Etherscan's own
-    # reason surfaced as the SourceResult error (see _fetch_evm_account_txs).
+    # "Free API access is not supported for this chain. Please upgrade your
+    # api plan...". BNB is therefore routed through NodeReal MegaNode
+    # instead (see _fetch_nodereal_txs and api_key_registry.py's `nodereal`
+    # field) -- a genuinely free tier, but a different protocol (JSON-RPC
+    # 2.0, not Etherscan's module=account&action=... REST shape), so it gets
+    # its own fetch method rather than folding into _fetch_evm_account_txs.
+    # Polygon (chainid 137) stays on Etherscan V2, free-tier-accessible.
     #
     # A bare 0x address auto-detects 'ethereum' (detect_input_type cannot tell
     # the three chains apart -- see detector.chain_caveat), so BNB/Polygon are
     # only ever reached via an explicit --type bnb/--type polygon override;
     # see search() below.
-    _EVM_CHAIN_IDS = {'ethereum': 1, 'bnb': 56, 'polygon': 137}
+    _EVM_CHAIN_IDS = {'ethereum': 1, 'polygon': 137}
 
-    async def _fetch_evm_account_txs(self, address: str, chainid: int,
+    # nr_getTransactionByAddress category value per action -- 'external' is
+    # native BNB transfers (txlist's counterpart), '20' is BEP-20/ERC-20
+    # Transfer events (tokentx's counterpart). Confirmed live against
+    # NodeReal's real API, not assumed from docs alone.
+    _NODEREAL_CATEGORY = {'txlist': 'external', 'tokentx': '20'}
+
+    async def _fetch_nodereal_txs(self, address: str,
+                                  action: str) -> Tuple[Optional[List[dict]], Optional[str]]:
+        """BNB Smart Chain's free transaction-history source: NodeReal
+        MegaNode's `nr_getTransactionByAddress`, JSON-RPC 2.0 over POST.
+
+        Confirmed live: omitting fromBlock/toBlock entirely returns full
+        history newest-first; passing an explicit wide range (e.g.
+        fromBlock=0x0, toBlock=latest) silently returns an EMPTY result
+        instead of an error -- NodeReal's documented 1000-block max range
+        applies once you specify a range at all, so this deliberately never
+        sets one. `maxCount` mirrors the `offset: 20` sampling depth
+        Etherscan's own calls use elsewhere in this module, for the same
+        shallow-sample-not-full-history reasoning.
+
+        Returns (txs, error) in the same shape as _fetch_evm_account_txs:
+        `txs` translated into Etherscan-shape dicts (from/to/timeStamp/
+        tokenSymbol) so _parse_evm_txs needs no BNB-specific branch at all.
+        """
+        key = self.config.api_keys.get('nodereal')
+        if not key:
+            return None, 'no NodeReal API key configured (set NODEREAL_API_KEY)'
+        data = await self.fetch_json(
+            f'https://bsc-mainnet.nodereal.io/v1/{key}',
+            method='POST',
+            json={
+                'jsonrpc': '2.0', 'id': 1, 'method': 'nr_getTransactionByAddress',
+                'params': [{
+                    'category': [self._NODEREAL_CATEGORY[action]],
+                    'address': address, 'order': 'desc', 'maxCount': '0x14',
+                }],
+            },
+        )
+        if not data:
+            return None, 'No data returned'
+        if 'error' in data:
+            return None, str(data['error'].get('message') or data['error'])
+        transfers = (data.get('result') or {}).get('transfers')
+        if not isinstance(transfers, list):
+            return None, 'No data returned'
+        return [
+            {'from': t.get('from'), 'to': t.get('to'),
+             'timeStamp': t.get('blockTimeStamp'),
+             'tokenSymbol': t.get('asset') if action == 'tokentx' else None}
+            for t in transfers
+        ], None
+
+    async def _fetch_evm_account_txs(self, address: str, chain: str,
                                      action: str) -> Tuple[Optional[List[dict]], Optional[str]]:
-        """One `account` module call against Etherscan API V2 for `chainid`.
-        `action` is 'txlist' (native transfers) or 'tokentx' (ERC-20/BEP-20
-        Transfer events).
+        """One `account` module call against Etherscan API V2 for `chain`
+        ('ethereum' or 'polygon' -- 'bnb' routes to _fetch_nodereal_txs
+        instead, see the class-level comment above). `action` is 'txlist'
+        (native transfers) or 'tokentx' (ERC-20/BEP-20 Transfer events).
 
         Returns (txs, error). `txs` is a list -- possibly EMPTY, a wallet
         with zero transactions on this chain is a real, valid result, not a
@@ -634,13 +689,15 @@ class BitcoinModule(BaseModule):
         genuinely empty, valid result -- status '0', message "No
         transactions found" -- as a failure).
         """
+        if chain == 'bnb':
+            return await self._fetch_nodereal_txs(address, action)
         key = self.config.api_keys.get('etherscan')
         if not key:
             return None, 'no Etherscan API key configured (set ETHERSCAN_API_KEY)'
         data = await self.fetch_json(
             'https://api.etherscan.io/v2/api',
             params={
-                'chainid': chainid, 'module': 'account', 'action': action,
+                'chainid': self._EVM_CHAIN_IDS[chain], 'module': 'account', 'action': action,
                 'address': address, 'startblock': 0, 'endblock': 99999999,
                 'page': 1, 'offset': 20, 'sort': 'desc', 'apikey': key,
             },
@@ -709,8 +766,7 @@ class BitcoinModule(BaseModule):
         Requires an Etherscan API key (free tier, 5 req/sec) -- degrades the
         same way chainabuse does without one.
         """
-        txs, error = await self._fetch_evm_account_txs(
-            address, self._EVM_CHAIN_IDS['ethereum'], 'txlist')
+        txs, error = await self._fetch_evm_account_txs(address, 'ethereum', 'txlist')
         if txs is None:
             return SourceResult(source='etherscan_transactions', success=False, error=error)
         return SourceResult(source='etherscan_transactions', success=True,
@@ -725,8 +781,7 @@ class BitcoinModule(BaseModule):
         field. A suspect who moves funds as USDT/USDC rather than native ETH
         was previously invisible to wallet_exchange_paths entirely.
         """
-        txs, error = await self._fetch_evm_account_txs(
-            address, self._EVM_CHAIN_IDS['ethereum'], 'tokentx')
+        txs, error = await self._fetch_evm_account_txs(address, 'ethereum', 'tokentx')
         if txs is None:
             return SourceResult(source='etherscan_token_transfers', success=False, error=error)
         return SourceResult(source='etherscan_token_transfers', success=True,
@@ -736,8 +791,7 @@ class BitcoinModule(BaseModule):
         """Native-transfer counterpart of _check_etherscan_transactions, for
         chain in ('bnb', 'polygon')."""
         source = f'{chain}_transactions'
-        txs, error = await self._fetch_evm_account_txs(
-            address, self._EVM_CHAIN_IDS[chain], 'txlist')
+        txs, error = await self._fetch_evm_account_txs(address, chain, 'txlist')
         if txs is None:
             return SourceResult(source=source, success=False, error=error)
         return SourceResult(source=source, success=True,
@@ -747,8 +801,7 @@ class BitcoinModule(BaseModule):
         """ERC-20/BEP-20 counterpart of _check_etherscan_token_transfers, for
         chain in ('bnb', 'polygon')."""
         source = f'{chain}_token_transfers'
-        txs, error = await self._fetch_evm_account_txs(
-            address, self._EVM_CHAIN_IDS[chain], 'tokentx')
+        txs, error = await self._fetch_evm_account_txs(address, chain, 'tokentx')
         if txs is None:
             return SourceResult(source=source, success=False, error=error)
         return SourceResult(source=source, success=True,
