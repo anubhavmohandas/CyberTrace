@@ -23,6 +23,14 @@ from .social_module import SocialModule
 MODULE_REGISTRY: Dict[str, Type[BaseModule]] = {
     'bitcoin': BitcoinModule,
     'ethereum': BitcoinModule,   # Same module handles both
+    # Only reachable via an explicit --type bnb/--type polygon override -- a
+    # bare 0x address auto-detects 'ethereum' by construction (detect_input_
+    # type cannot tell the three EVM chains apart from the string alone; see
+    # detector.chain_caveat). Same BitcoinModule, which reads target_type off
+    # its own search() options to pick the right explorer -- see that
+    # method's docstring.
+    'bnb': BitcoinModule,
+    'polygon': BitcoinModule,
     'tron': TronModule,
     'domain': DomainModule,
     'username': UsernameModule,
@@ -59,6 +67,8 @@ TYPE_TO_MODULE: Dict[str, str] = {
     'btc_legacy': 'bitcoin',
     'btc_bech32': 'bitcoin',
     'ethereum': 'ethereum',
+    'bnb': 'bnb',
+    'polygon': 'polygon',
     'tron': 'tron',
     # Dark Web
     'onion': 'darkweb',

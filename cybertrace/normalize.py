@@ -522,11 +522,32 @@ def norm_xmr(addr: str) -> Optional[str]:
     return f"XMR:{addr}"
 
 
-def norm_eth(addr: str) -> Optional[str]:
+def _norm_evm(prefix: str, addr: str) -> Optional[str]:
     """occam: lowercased, EIP-55 mixed-case checksum unverified — same Keccak
-    cost as XMR above. 0x + 40 hex is already a tight filter."""
+    cost as XMR above. 0x + 40 hex is already a tight filter.
+
+    `prefix` is only this normalized value's own dedup namespace, not a chain
+    claim -- upsert_entity already dedups on (etype, normalized_value), so
+    ETH_ADDRESS/BNB_ADDRESS/POLYGON_ADDRESS entities for the identical string
+    never collide regardless of this prefix. It exists so a raw DB read never
+    shows a BNB address normalized as "ETH:0x..." -- see norm_bnb/norm_polygon
+    and detector.chain_caveat for why the string alone can never say which of
+    the three chains a 0x address is actually on.
+    """
     addr = addr.strip().lower()
-    return f"ETH:{addr}" if re.fullmatch(r"0x[0-9a-f]{40}", addr) else None
+    return f"{prefix}:{addr}" if re.fullmatch(r"0x[0-9a-f]{40}", addr) else None
+
+
+def norm_eth(addr: str) -> Optional[str]:
+    return _norm_evm("ETH", addr)
+
+
+def norm_bnb(addr: str) -> Optional[str]:
+    return _norm_evm("BNB", addr)
+
+
+def norm_polygon(addr: str) -> Optional[str]:
+    return _norm_evm("POLYGON", addr)
 
 
 def norm_tron(addr: str) -> Optional[str]:
@@ -928,6 +949,8 @@ NORMALIZERS = {
     "BTC_ADDRESS": norm_btc,
     "XMR_ADDRESS": norm_xmr,
     "ETH_ADDRESS": norm_eth,
+    "BNB_ADDRESS": norm_bnb,
+    "POLYGON_ADDRESS": norm_polygon,
     "TRX_ADDRESS": norm_tron,
     "EMAIL": norm_email,
     "IP": norm_ip,

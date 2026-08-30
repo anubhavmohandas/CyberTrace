@@ -40,12 +40,13 @@ class BitcoinModule(BaseModule):
     Supports:
     - Bitcoin (legacy and bech32)
     - Ethereum
+    - BNB Chain, Polygon (explicit --type only -- see search() below)
     """
-    
+
     name = "bitcoin"
     description = "Cryptocurrency address analysis"
-    supported_types = {'bitcoin', 'ethereum'}
-    
+    supported_types = {'bitcoin', 'ethereum', 'bnb', 'polygon'}
+
     async def search(self, target: str, **options) -> ModuleResult:
         """Search cryptocurrency address across blockchain explorers.
 
@@ -54,12 +55,23 @@ class BitcoinModule(BaseModule):
         counterparty/direction evidence from one page to _TX_DEEP_PAGES pages
         -- see the constants above for why depth, not source count, is what
         that flag buys here for Bitcoin.
+
+        `target_type`, when the caller passes one (the CLI's --type, threaded
+        through by resolve_module_for_target), overrides auto-detection for
+        'bnb'/'polygon' only. _detect_crypto_type cannot tell those two apart
+        from Ethereum -- a 0x address is valid on all three -- so without an
+        explicit override every 0x string is traced as Ethereum mainnet only
+        (see detector.chain_caveat). A 'bitcoin'/'ethereum' override is a
+        no-op: the shape already says which of those two it is.
         """
         deep = bool(options.get('deep'))
+        detected = self._detect_crypto_type(target)
+        override = options.get('target_type')
+        target_type = override if (detected == 'ethereum' and override in ('bnb', 'polygon')) else detected
 
         result = ModuleResult(
             target=target,
-            target_type=self._detect_crypto_type(target),
+            target_type=target_type,
             module=self.name,
         )
 
@@ -78,8 +90,24 @@ class BitcoinModule(BaseModule):
                 ('blockchair_eth', self._check_blockchair(target, 'ethereum')),
                 ('ethplorer', self._check_ethplorer(target)),
                 ('etherscan_transactions', self._check_etherscan_transactions(target)),
+                ('etherscan_token_transfers', self._check_etherscan_token_transfers(target)),
                 ('chainabuse', self._check_chainabuse(target, 'ETH')),
                 ('exchange_tags', self._check_exchange_tags(target, 'ETH')),
+            ]
+        elif result.target_type in ('bnb', 'polygon'):
+            # No blockchair_eth/ethplorer equivalent (neither indexes BNB
+            # Chain or Polygon) and chainabuse/exchange_tags are left out too
+            # -- the shipped GraphSense TagPacks corpus has zero BSC/Polygon
+            # tags (checked against the real local index, not assumed) and
+            # Chainabuse's asset-filter contract for these two chains cannot
+            # be confirmed without a live key. Native + token transfers are
+            # the two sources wallet_exchange_paths/VASP attribution actually
+            # need; see Loop 34 Module 2/3.
+            sources = [
+                (f'{result.target_type}_transactions',
+                 self._check_evm_transactions(target, result.target_type)),
+                (f'{result.target_type}_token_transfers',
+                 self._check_evm_token_transfers(target, result.target_type)),
             ]
         else:
             sources = []
@@ -563,6 +591,118 @@ class BitcoinModule(BaseModule):
             data=parsed,
         )
     
+    # Etherscan/BscScan/PolygonScan are the same explorer codebase deployed
+    # per EVM chain -- identical `account` module, identical txlist/tokentx
+    # request and response shape. Kept as data + two small shared helpers
+    # (_fetch_evm_account_txs/_parse_evm_txs) rather than a third near-copy of
+    # _check_etherscan_transactions/_check_etherscan_token_transfers: those two
+    # stay untouched (still Ethereum-only, still what their own pinned tests
+    # exercise), and BNB/Polygon reuse the same parsing rather than duplicate
+    # the whole module -- see Loop 34 Module 2/3.
+    #
+    # A bare 0x address auto-detects 'ethereum' (detect_input_type cannot tell
+    # the three chains apart -- see detector.chain_caveat), so BNB/Polygon are
+    # only ever reached via an explicit --type bnb/--type polygon override;
+    # see search() below.
+    _EVM_EXPLORERS = {
+        'bnb':     ('bscscan', 'https://api.bscscan.com/api', 'BSCSCAN_API_KEY'),
+        'polygon': ('polygonscan', 'https://api.polygonscan.com/api', 'POLYGONSCAN_API_KEY'),
+    }
+
+    async def _fetch_evm_account_txs(self, address: str, base_url: str, api_key: str,
+                                     action: str) -> Optional[List[dict]]:
+        """One `account` module call against an Etherscan-family explorer.
+        `action` is 'txlist' (native transfers) or 'tokentx' (ERC-20/BEP-20
+        Transfer events) -- same params either way."""
+        data = await self.fetch_json(
+            base_url,
+            params={
+                'module': 'account', 'action': action, 'address': address,
+                'startblock': 0, 'endblock': 99999999, 'page': 1, 'offset': 20,
+                'sort': 'desc', 'apikey': api_key,
+            },
+        )
+        if not data or data.get('status') != '1' or not isinstance(data.get('result'), list):
+            return None
+        return data['result']
+
+    def _parse_evm_txs(self, txs: List[dict], address: str, token: bool) -> Dict[str, Any]:
+        """Shared from/to/timestamp/direction parsing behind
+        _check_etherscan_transactions, _check_etherscan_token_transfers, and
+        _check_evm_transactions/_check_evm_token_transfers -- account-based
+        chains all carry direction explicitly (from/to), unlike Bitcoin's
+        UTXO inputs/outputs."""
+        counterparties: set = set()
+        sent_to: set = set()
+        received_from: set = set()
+        symbols: set = set()
+        me = address.lower()
+        first_seen = last_seen = None
+        for tx in txs:
+            ts = tx.get('timeStamp')
+            if ts:
+                iso = datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+                first_seen = iso if first_seen is None else min(first_seen, iso)
+                last_seen = iso if last_seen is None else max(last_seen, iso)
+            frm = (tx.get('from') or '').lower()
+            to = (tx.get('to') or '').lower()
+            if token and tx.get('tokenSymbol'):
+                symbols.add(tx['tokenSymbol'])
+            if frm == me and to and to != me:
+                sent_to.add(to)
+            elif to == me and frm and frm != me:
+                received_from.add(frm)
+            for peer in (tx.get('from'), tx.get('to')):
+                if peer and peer.lower() != me:
+                    counterparties.add(peer.lower())
+
+        peers = sorted(counterparties)[:20]
+        out = {
+            'first_seen': first_seen, 'last_seen': last_seen,
+            'counterparty_addresses': peers,
+            'sent_to_addresses': sorted(sent_to)[:20],
+            'received_from_addresses': sorted(received_from)[:20],
+            'connected_addresses': peers,
+        }
+        if token:
+            out['token_tx_count'] = len(txs)
+            out['token_symbols'] = sorted(symbols)
+        else:
+            out['tx_count'] = len(txs)
+        return out
+
+    async def _check_evm_transactions(self, address: str, chain: str) -> SourceResult:
+        """Native-transfer counterpart of _check_etherscan_transactions, for
+        chain in ('bnb', 'polygon')."""
+        key_name, base_url, env_name = self._EVM_EXPLORERS[chain]
+        source = f'{chain}_transactions'
+        key = self.config.api_keys.get(key_name)
+        if not key:
+            return SourceResult(
+                source=source, success=False,
+                error=f'no {key_name} API key configured (set {env_name})')
+        txs = await self._fetch_evm_account_txs(address, base_url, key, 'txlist')
+        if txs is None:
+            return SourceResult(source=source, success=False, error='No data returned')
+        return SourceResult(source=source, success=True,
+                            data=self._parse_evm_txs(txs, address, token=False))
+
+    async def _check_evm_token_transfers(self, address: str, chain: str) -> SourceResult:
+        """ERC-20/BEP-20 counterpart of _check_etherscan_token_transfers, for
+        chain in ('bnb', 'polygon')."""
+        key_name, base_url, env_name = self._EVM_EXPLORERS[chain]
+        source = f'{chain}_token_transfers'
+        key = self.config.api_keys.get(key_name)
+        if not key:
+            return SourceResult(
+                source=source, success=False,
+                error=f'no {key_name} API key configured (set {env_name})')
+        txs = await self._fetch_evm_account_txs(address, base_url, key, 'tokentx')
+        if txs is None:
+            return SourceResult(source=source, success=False, error='No data returned')
+        return SourceResult(source=source, success=True,
+                            data=self._parse_evm_txs(txs, address, token=True))
+
     async def _check_etherscan_transactions(self, address: str) -> SourceResult:
         """Recent transactions via Etherscan's txlist endpoint, for counterparty
         extraction. Ethereum is account-based like TRON -- no UTXO/co-spend
@@ -642,6 +782,87 @@ class BitcoinModule(BaseModule):
             },
         )
 
+    async def _check_etherscan_token_transfers(self, address: str) -> SourceResult:
+        """ERC-20 Transfer events via Etherscan's tokentx endpoint.
+
+        _check_etherscan_transactions above only sees native ETH transfers --
+        `txlist` does not include ERC-20 movements, which travel as event logs
+        inside a contract call rather than as the transaction's own value
+        field. A suspect who moves funds as USDT/USDC rather than native ETH
+        was previously invisible to wallet_exchange_paths entirely. Same
+        account-based direction contract as the native-tx source (from/to are
+        explicit), so this reuses the exact same
+        sent_to/received_from/counterparty_addresses shape -- see
+        _build_summary's merge of the two ETH sources below and
+        evidence.enrich_bitcoin, which is chain- and token-agnostic.
+        """
+        key = self.config.api_keys.get('etherscan')
+        if not key:
+            return SourceResult(
+                source='etherscan_token_transfers',
+                success=False,
+                error='no Etherscan API key configured (set ETHERSCAN_API_KEY)',
+            )
+
+        data = await self.fetch_json(
+            'https://api.etherscan.io/api',
+            params={
+                'module': 'account',
+                'action': 'tokentx',
+                'address': address,
+                'startblock': 0,
+                'endblock': 99999999,
+                'page': 1,
+                'offset': 20,
+                'sort': 'desc',
+                'apikey': key,
+            },
+        )
+        if not data or data.get('status') != '1' or not isinstance(data.get('result'), list):
+            return SourceResult(
+                source='etherscan_token_transfers', success=False,
+                error='No data returned',
+            )
+
+        txs = data['result']
+        counterparties: set = set()
+        sent_to: set = set()
+        received_from: set = set()
+        symbols: set = set()
+        me = address.lower()
+        first_seen = last_seen = None
+        for tx in txs:
+            ts = tx.get('timeStamp')
+            if ts:
+                iso = datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+                first_seen = iso if first_seen is None else min(first_seen, iso)
+                last_seen = iso if last_seen is None else max(last_seen, iso)
+            frm = (tx.get('from') or '').lower()
+            to = (tx.get('to') or '').lower()
+            if tx.get('tokenSymbol'):
+                symbols.add(tx['tokenSymbol'])
+            if frm == me and to and to != me:
+                sent_to.add(to)
+            elif to == me and frm and frm != me:
+                received_from.add(frm)
+            for peer in (tx.get('from'), tx.get('to')):
+                if peer and peer.lower() != me:
+                    counterparties.add(peer.lower())
+
+        peers = sorted(counterparties)[:20]
+        return SourceResult(
+            source='etherscan_token_transfers', success=True, data={
+                'token_tx_count': len(txs),
+                'token_symbols': sorted(symbols),
+                'first_seen': first_seen,
+                'last_seen': last_seen,
+                'counterparty_addresses': peers,
+                'sent_to_addresses': sorted(sent_to)[:20],
+                'received_from_addresses': sorted(received_from)[:20],
+                'connected_addresses': peers,
+            },
+        )
+
     def _build_summary(self, result: ModuleResult) -> Dict[str, Any]:
         """Build summary from all source results."""
         summary = {
@@ -675,8 +896,26 @@ class BitcoinModule(BaseModule):
             # analyst can see, not silent. None for a target with no
             # blockchain.com source (e.g. ethereum) or no tx history.
             'tx_sample_size': None,
+            # ERC-20 Transfer-event context -- None/empty for non-ETH targets
+            # and for ETH targets with no token activity. See
+            # _check_etherscan_token_transfers.
+            'token_tx_count': None,
+            'token_symbols': [],
         }
-        
+
+        # These four accumulate across every source that reports them rather
+        # than the last-source-wins overwrite this loop used to do -- with
+        # only one ETH flow source (etherscan_transactions) that was a no-op,
+        # but adding etherscan_token_transfers as a second source made it a
+        # real bug: whichever source's data dict came later in dict-iteration
+        # order would silently discard the other's peers. Sets dedupe a peer
+        # reachable both natively and via a token transfer.
+        connected: set = set()
+        cospend: set = set()
+        counterparty: set = set()
+        sent_to: set = set()
+        received_from: set = set()
+
         # Aggregate from sources
         for source, res in result.sources.items():
             if not res.success:
@@ -737,20 +976,37 @@ class BitcoinModule(BaseModule):
                 summary['exchange_tag_packs'] = data.get('packs')
                 summary['exchange_tag_is_exchange'] = data.get('is_exchange_tagged')
 
-            # Connected addresses
+            # Connected/cospend/counterparty/flow addresses -- unioned across
+            # sources (see the comment above the accumulator sets).
             if 'connected_addresses' in data:
-                summary['connected_addresses'] = data['connected_addresses']
-                # Add to related for further investigation
+                connected.update(data['connected_addresses'])
                 result.related.extend(data['connected_addresses'][:5])
             if data.get('cospend_addresses'):
-                summary['cospend_addresses'] = data['cospend_addresses']
+                cospend.update(data['cospend_addresses'])
             if data.get('counterparty_addresses'):
-                summary['counterparty_addresses'] = data['counterparty_addresses']
+                counterparty.update(data['counterparty_addresses'])
             if data.get('sent_to_addresses'):
-                summary['sent_to_addresses'] = data['sent_to_addresses']
+                sent_to.update(data['sent_to_addresses'])
             if data.get('received_from_addresses'):
-                summary['received_from_addresses'] = data['received_from_addresses']
+                received_from.update(data['received_from_addresses'])
             if source == 'blockchain.com' and data.get('tx_sample_size') is not None:
                 summary['tx_sample_size'] = data['tx_sample_size']
+            # Covers etherscan_token_transfers/bnb_token_transfers/
+            # polygon_token_transfers -- every source _parse_evm_txs(token=True)
+            # backs, by construction of that shared suffix.
+            if source.endswith('_token_transfers') and data.get('token_tx_count') is not None:
+                summary['token_tx_count'] = data['token_tx_count']
+                summary['token_symbols'] = data.get('token_symbols') or []
+
+        if connected:
+            summary['connected_addresses'] = sorted(connected)
+        if cospend:
+            summary['cospend_addresses'] = sorted(cospend)
+        if counterparty:
+            summary['counterparty_addresses'] = sorted(counterparty)
+        if sent_to:
+            summary['sent_to_addresses'] = sorted(sent_to)
+        if received_from:
+            summary['received_from_addresses'] = sorted(received_from)
 
         return summary

@@ -40,7 +40,9 @@ CHECK_FAILED = "CHECK_FAILED"
 # Not detector.detect_input_type: the address's chain is already known (it is
 # the entity's own etype), so re-detecting from the string would just be a
 # second, redundant way to get the same answer wrong if it ever disagreed.
-_CHAIN_MODULE_TYPE = {"BTC_ADDRESS": "bitcoin", "ETH_ADDRESS": "ethereum", "TRX_ADDRESS": "tron"}
+_CHAIN_MODULE_TYPE = {"BTC_ADDRESS": "bitcoin", "ETH_ADDRESS": "ethereum",
+                      "BNB_ADDRESS": "bnb", "POLYGON_ADDRESS": "polygon",
+                      "TRX_ADDRESS": "tron"}
 
 
 def watch_targets(store: EvidenceStore) -> List[dict]:
@@ -87,7 +89,7 @@ def wallet_targets(store: EvidenceStore) -> List[dict]:
         "JOIN observations o ON o.entity_id = e.entity_id "
         "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
         "JOIN targets t ON t.target_id = s.target_id "
-        "WHERE e.etype IN ('BTC_ADDRESS','ETH_ADDRESS','TRX_ADDRESS') "
+        "WHERE e.etype IN ('BTC_ADDRESS','ETH_ADDRESS','BNB_ADDRESS','POLYGON_ADDRESS','TRX_ADDRESS') "
         "AND o.extraction_method LIKE '%:enrichment' "
         "ORDER BY t.last_seen DESC")
     return [{"entity_id": r["entity_id"], "etype": r["etype"], "address": r["address"],
@@ -118,15 +120,23 @@ async def _visit(module, url: str) -> dict:
     }
 
 
-async def _visit_wallet(module, address: str, deep: bool = False) -> dict:
+async def _visit_wallet(module, address: str, deep: bool = False,
+                        module_type: Optional[str] = None) -> dict:
     """One live re-search of a wallet, through the same chain module and the
     same `search()` a fresh `cybertrace search <address>` would use -- no
     wallet-monitoring-specific client, so a re-check and a first look apply
     the identical safety bounds (the `_TX_DEEP_PAGES` cap, and uncapped-but-
     bounded relationship output).
+
+    `module_type` is passed through as `target_type` for BNB/Polygon: the
+    entity's own etype already says which of the two it is (see
+    _CHAIN_MODULE_TYPE's docstring on why this is not re-detected from the
+    address string), but BitcoinModule.search() cannot recover that from a
+    bare 0x address on its own -- without this, a watched BNB wallet would
+    silently re-search as Ethereum every cycle.
     """
     async with module:
-        result = await module.search(address, deep=deep)
+        result = await module.search(address, deep=deep, target_type=module_type)
     return result.to_dict()
 
 
@@ -307,7 +317,7 @@ async def recheck(store: EvidenceStore, urls: Optional[List[str]] = None,
         if chain_module is None:
             continue                        # etype without a chain module: nothing to re-run
         chain_module.show_progress = False
-        result = await _visit_wallet(chain_module, w["address"], deep=deep)
+        result = await _visit_wallet(chain_module, w["address"], deep=deep, module_type=module_type)
         has_data = bool(result.get("summary"))
         if has_data:
             ingest(result, store)

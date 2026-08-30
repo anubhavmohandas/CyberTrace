@@ -176,7 +176,8 @@ ENTITY_TYPES = {
     "MARKET", "ONION_ADDRESS", "PAGE", "DOCUMENT",
     "OPERATOR_CANDIDATE", "USERNAME", "EMAIL", "PGP_KEY", "PHONE",
     "TELEGRAM", "SESSION_ID",
-    "BTC_ADDRESS", "XMR_ADDRESS", "ETH_ADDRESS", "TRX_ADDRESS", "CRYPTO_CLUSTER", "EXCHANGE",
+    "BTC_ADDRESS", "XMR_ADDRESS", "ETH_ADDRESS", "BNB_ADDRESS", "POLYGON_ADDRESS",
+    "TRX_ADDRESS", "CRYPTO_CLUSTER", "EXCHANGE",
     "IP", "ASN", "HOSTING_PROVIDER", "VPN_PROVIDER", "DOMAIN",
     "NAMESERVER", "CERTIFICATE", "FAVICON", "HTTP_FINGERPRINT", "ANALYTICS_ID",
     "SOCIAL_ACCOUNT", "FORUM_ACCOUNT", "BREACH_RECORD",
@@ -1581,9 +1582,15 @@ def enrich_bitcoin(store: EvidenceStore, snapshot_id: str, addr_id: str, summary
 ANALYST_TARGET = "analyst.assertion.local"
 
 
+_LABEL_EXCHANGE_ETYPES = {"bitcoin": "BTC_ADDRESS", "ethereum": "ETH_ADDRESS",
+                          "bnb": "BNB_ADDRESS", "polygon": "POLYGON_ADDRESS",
+                          "tron": "TRX_ADDRESS"}
+
+
 def label_exchange(store: EvidenceStore, address: str, exchange_name: str,
                    analyst: Optional[str] = None, note: Optional[str] = None,
-                   observed_at: Optional[str] = None) -> Optional[str]:
+                   observed_at: Optional[str] = None,
+                   chain: Optional[str] = None) -> Optional[str]:
     """Record an analyst's own knowledge that `address` belongs to `exchange_name`.
 
     This is a fact about the world the analyst is asserting -- a public report,
@@ -1595,25 +1602,32 @@ def label_exchange(store: EvidenceStore, address: str, exchange_name: str,
     downstream, and correlate.wallet_exchange_paths is the only reader.
 
     Chain is detected from the address shape (BTC/ETH/TRX -- same detector.
-    detect_input_type every module dispatch already goes through), so a VASP's
-    Ethereum or TRON hot wallet labels the same way a Bitcoin one always could.
-    Anything that doesn't classify as one of those three is still tried against
+    detect_input_type every module dispatch already goes through) unless the
+    caller passes `chain` explicitly. A bare 0x address auto-detects
+    'ethereum' by construction (detect_input_type cannot tell Ethereum, BNB
+    Chain and Polygon apart from the string alone -- see
+    detector.chain_caveat), so labeling a VASP's BNB or Polygon hot wallet
+    needs the investigator's own say-so via `chain='bnb'`/`'polygon'`, the
+    same way search already requires --type for those two. Anything that
+    doesn't classify as one of the known chains is still tried against
     BTC_ADDRESS, matching this function's original BTC-only contract.
 
     Returns the relationship id, or None if `address` fails normalization for
-    its detected chain (the same "no artifact" contract as upsert_entity).
+    its chain (the same "no artifact" contract as upsert_entity).
     """
-    from .detector import detect_input_type
-    specific, chain = detect_input_type(address)
-    if chain == "unsupported_chain":
-        # A Litecoin or Bitcoin Cash address is base58 like Bitcoin's, so the
-        # old `.get(chain, "BTC_ADDRESS")` default stored it as a BTC_ADDRESS
-        # and the analyst's label then pointed at an address that does not
-        # exist on Bitcoin. Refusing is the same "no artifact" contract
-        # upsert_entity already has for a value that fails normalization.
-        return None
-    etype = {"bitcoin": "BTC_ADDRESS", "ethereum": "ETH_ADDRESS",
-            "tron": "TRX_ADDRESS"}.get(chain, "BTC_ADDRESS")
+    if chain is not None:
+        etype = _LABEL_EXCHANGE_ETYPES.get(chain, "BTC_ADDRESS")
+    else:
+        from .detector import detect_input_type
+        specific, detected_chain = detect_input_type(address)
+        if detected_chain == "unsupported_chain":
+            # A Litecoin or Bitcoin Cash address is base58 like Bitcoin's, so the
+            # old `.get(chain, "BTC_ADDRESS")` default stored it as a BTC_ADDRESS
+            # and the analyst's label then pointed at an address that does not
+            # exist on Bitcoin. Refusing is the same "no artifact" contract
+            # upsert_entity already has for a value that fails normalization.
+            return None
+        etype = _LABEL_EXCHANGE_ETYPES.get(detected_chain, "BTC_ADDRESS")
     addr_id = store.upsert_entity(etype, address, observed_at=observed_at)
     if addr_id is None:
         return None
@@ -1656,6 +1670,8 @@ _ENRICHERS = {
     "email":    ("EMAIL", enrich_email),
     "bitcoin":  ("BTC_ADDRESS", enrich_bitcoin),
     "ethereum": ("ETH_ADDRESS", enrich_bitcoin),
+    "bnb":      ("BNB_ADDRESS", enrich_bitcoin),
+    "polygon":  ("POLYGON_ADDRESS", enrich_bitcoin),
     "tron":     ("TRX_ADDRESS", enrich_bitcoin),
 }
 

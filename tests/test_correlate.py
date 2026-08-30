@@ -13,7 +13,7 @@ import pytest
 
 from cybertrace.correlate import (
     FUNNELS, SHARED_ARTIFACTS,
-    COMMON_ARTIFACT_FLOOR, EXCHANGE_HOP_DECAY, LEAD_FLOOR, REGULATORY_ATTESTED,
+    COMMON_ARTIFACT_FLOOR, DIRECT, EXCHANGE_HOP_DECAY, INDIRECT, LEAD_FLOOR, REGULATORY_ATTESTED,
     RETIRED_ASSESSMENT, TAG_ATTESTED, TO_VASP, VASP_DISCLOSED,
     SUCCESSOR_SIGNALS, UNJOINED_CONTEXT,
     canonical_entity_key, candidate_infra, candidate_ips, candidate_operators,
@@ -1311,6 +1311,27 @@ def test_wallet_trace_report_surfaces_a_defi_tag_with_no_vasp_path_at_all(tmp_pa
         assert "DeFi service" in " ".join(report["flags"])
 
 
+def test_wallet_trace_report_surfaces_a_defi_lending_tag(tmp_path):
+    """Loop 34 Module 7: defi_lending (Compound-style lending protocols) is a
+    distinct GraphSense category from defi/defi_dex/mixing_service/coinjoin --
+    "bridge"/"cross-chain swap" have no category in this corpus at all (see
+    exchange_tags._SERVICE_CATEGORIES), so defi_lending is the one real
+    addition this loop found evidence for."""
+    from cybertrace.integrations import exchange_tags
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+    lending_addr = "0xe65cdb6479bac1e22340e4e755fae7e509ecd06c"   # compound_cAAVE: defi_lending only
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr_id = store.upsert_entity("ETH_ADDRESS", lending_addr)
+        sid = store.insert_snapshot(store.upsert_target("eth:" + lending_addr), {}, "ethereum")
+        enrich_bitcoin(store, sid, addr_id, {"address": lending_addr}, "ethereum")
+
+        report = wallet_trace_report(store, lending_addr)
+        assert report["service_tags"][0]["category"] == "defi_lending"
+        assert report["service_tags"][0]["label"] == "compound_cAAVE"
+        assert "DeFi lending service" in " ".join(report["flags"])
+
+
 def test_wallet_trace_report_surfaces_a_defi_dex_tag(tmp_path):
     from cybertrace.integrations import exchange_tags
     if not (exchange_tags.available() and exchange_tags.index_available()):
@@ -1477,6 +1498,105 @@ def test_ofac_designation_outranks_a_third_party_tag_on_one_address(tmp_path):
         assert len(hits) == 1
         assert hits[0]["attribution"] == REGULATORY_ATTESTED
         assert "OFAC SDN" in hits[0]["attribution_source"]
+
+
+# --- BNB Chain / Polygon (Loop 34 Module 2/3) -------------------------------
+
+BNB_SUSPECT = "0x000000000000000000000000000000000000beef"
+# Real OFAC SDN ground truth, not a fixture: Sim Hyon Sop, profile 42498,
+# designated for DPRK crypto-laundering activity, digital-currency-address
+# FeatureType "BNB" in the local sdn_advanced.xml -- the same address
+# detector.chain_caveat's own docstring cites as OFAC-listed under BOTH
+# Arbitrum and BNB Chain. Confirmed present via ofac.lookup_address below so
+# a future dataset refresh silently dropping it fails loudly rather than this
+# test quietly passing on an address that is no longer actually designated.
+BNB_OFAC_DESIGNATED = "0x4f47bc496083c727c5fbe3ce9cdf2b0f6496270c"
+
+
+def test_wallet_trace_report_traces_a_bnb_wallet_to_a_real_ofac_designation(tmp_path):
+    """End-to-end BNB Chain: search -> enrich_bitcoin (etype=BNB_ADDRESS,
+    same enricher Bitcoin/ETH/TRON already share) -> wallet_trace_report with
+    chain='bnb' (the CLI's --chain, required because a bare 0x string always
+    auto-detects 'ethereum' -- see detect_input_type/chain_caveat) -> the real
+    Sim Hyon Sop OFAC designation, reached the same REGULATORY_ATTESTED way
+    Blender.io is reached for Bitcoin above. Exercises the _ASSET_TO_CURRENCY
+    'BNB'/'BSC' addition in integrations/ofac.py and _TAG_CURRENCY's
+    'BNB_ADDRESS' addition in correlate.py together, against the real local
+    index -- not a synthetic VASP label."""
+    from cybertrace.integrations import ofac
+    if not (ofac.available() and ofac.index_available()):
+        pytest.skip("OFAC SDN not downloaded/indexed in this checkout")
+    assert ofac.lookup_address(BNB_OFAC_DESIGNATED, "BNB"), \
+        "fixture address no longer OFAC-designated on BNB -- dataset refreshed?"
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BNB_ADDRESS", BNB_SUSPECT)
+        sid = store.insert_snapshot(store.upsert_target("bnb:" + BNB_SUSPECT), {}, "bnb")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": BNB_SUSPECT, "sent_to_addresses": [BNB_OFAC_DESIGNATED],
+                        "counterparty_addresses": [BNB_OFAC_DESIGNATED]}, "bnb")
+
+        report = wallet_trace_report(store, BNB_SUSPECT, chain="bnb")
+        assert report is not None
+        assert report["hops"] == 1
+        assert report["proximity"] == DIRECT
+        assert report["direction"] == TO_VASP
+        assert report["attribution"] == REGULATORY_ATTESTED
+        assert "OFAC SDN" in report["attribution_source"]
+        assert report["exchange"] == "Sim Hyon Sop"
+        # The EVM-ambiguity caveat must not fire -- chain was given explicitly.
+        assert not any("Ethereum mainnet only" in f for f in report["flags"])
+
+        # Same boundary REGULATORY_ATTESTED already holds for every chain:
+        # reachable, never an edge, never an EXCHANGE entity.
+        assert store._all("SELECT 1 FROM relationships WHERE rtype='EXCHANGE_DEPOSIT'") == []
+
+
+def test_bnb_and_ethereum_entities_never_collide_on_the_same_address_string(tmp_path):
+    """Global safety invariant: 'same address string -> same actor' must
+    never happen across chains. The identical 0x string, searched once as
+    ethereum and once as bnb, must produce two distinct entities with two
+    independent SENT_FUNDS_TO histories -- not one merged node."""
+    shared_string = "0x000000000000000000000000000000000000beef"
+    eth_vasp = "0x000000000000000000000000000000000000dead"
+    bnb_vasp = "0x0000000000000000000000000000000000f00d1e"
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        eth_id = store.upsert_entity("ETH_ADDRESS", shared_string)
+        sid_e = store.insert_snapshot(store.upsert_target("eth:" + shared_string), {}, "ethereum")
+        enrich_bitcoin(store, sid_e, eth_id,
+                       {"address": shared_string, "sent_to_addresses": [eth_vasp]}, "ethereum")
+
+        bnb_id = store.upsert_entity("BNB_ADDRESS", shared_string)
+        sid_b = store.insert_snapshot(store.upsert_target("bnb:" + shared_string), {}, "bnb")
+        enrich_bitcoin(store, sid_b, bnb_id,
+                       {"address": shared_string, "sent_to_addresses": [bnb_vasp]}, "bnb")
+
+        assert eth_id != bnb_id
+        assert label_exchange(store, eth_vasp, "ETH VASP") is not None
+        assert label_exchange(store, bnb_vasp, "BNB VASP", chain="bnb") is not None
+
+        eth_hit = next(w for w in wallet_exchange_paths(store) if w["entity_id"] == eth_id)
+        bnb_hit = next(w for w in wallet_exchange_paths(store) if w["entity_id"] == bnb_id)
+        assert eth_hit["exchange"] == "eth vasp"
+        assert bnb_hit["exchange"] == "bnb vasp"
+
+
+def test_label_exchange_chain_override_labels_a_polygon_address(tmp_path):
+    """Polygon has no OFAC/GraphSense ground truth in the local corpora (see
+    ofac.py's _ASSET_TO_CURRENCY comment), so this pins the one attribution
+    path Polygon does have end-to-end: an analyst's own label_exchange(...,
+    chain='polygon')."""
+    polygon_addr = "0x0000000000000000000000000000000000005e11"
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        rel = label_exchange(store, polygon_addr, "Polygon VASP", chain="polygon")
+        assert rel is not None
+        assert store.find_entity("POLYGON_ADDRESS", polygon_addr) is not None
+        assert store.find_entity("ETH_ADDRESS", polygon_addr) is None
+
+        paths = wallet_exchange_paths(store)
+        row = next(w for w in paths if w["value"] == polygon_addr)
+        assert row["hops"] == 0
+        assert row["exchange"] == "polygon vasp"
 
 
 # --- VASP_DISCLOSED -----------------------------------------------------
@@ -1672,6 +1792,92 @@ def test_wallet_exchange_paths_direct_hit_tron(tmp_path):
         assert paths[0]["value"] == TRX_VALID
         assert paths[0]["value"] != f"trx:{TRX_VALID.lower()}"
         assert paths[0]["hops"] == 0
+
+
+ETH_VALID = "0x742d35Cc6634C0532925a3b844Bc9e7595f12345"
+ETH_INTERMEDIATE = "0x000000000000000000000000000000000000beef"
+ETH_VASP = "0x000000000000000000000000000000000000dead"
+
+
+def test_wallet_exchange_paths_eth_wallet_to_wallet_to_vasp(tmp_path):
+    """Native ETH: suspect -> SENT_FUNDS_TO -> labeled VASP, one hop. Pins
+    that _TRACE_CHAIN_ETYPES/wallet_exchange_paths' ETH_ADDRESS entity query
+    (already generic) actually resolves an ETH source's sent_to_addresses
+    into a DIRECT, correctly-directioned hop -- see
+    _check_etherscan_transactions."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("ETH_ADDRESS", ETH_VALID)
+        target = store.upsert_target("eth:" + ETH_VALID)
+        sid = store.insert_snapshot(target, {}, "ethereum")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": ETH_VALID, "sent_to_addresses": [ETH_VASP],
+                        "counterparty_addresses": [ETH_VASP]}, "ethereum")
+        assert label_exchange(store, ETH_VASP, "Test VASP") is not None
+
+        paths = wallet_exchange_paths(store)
+        row = next(w for w in paths if w["entity_id"] == addr)
+        assert row["hops"] == 1
+        assert row["proximity"] == DIRECT
+        assert row["direction"] == TO_VASP
+        assert row["evidence_ids"]
+        assert row["path"] == [addr, store.find_entity("ETH_ADDRESS", ETH_VASP)]
+
+
+def test_wallet_exchange_paths_eth_wallet_to_erc20_transfer_to_vasp(tmp_path):
+    """ERC-20 (USDT/USDC-style) transfer, not native ETH: same one-hop DIRECT
+    shape, sourced from _check_etherscan_token_transfers' sent_to_addresses
+    rather than the native-tx source -- the exact gap that made a suspect
+    moving funds as an ERC-20 token invisible before this source existed."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("ETH_ADDRESS", ETH_VALID)
+        target = store.upsert_target("eth:" + ETH_VALID)
+        sid = store.insert_snapshot(target, {}, "ethereum")
+        # Mirrors what BitcoinModule._build_summary now unions from the two
+        # ETH sources (native txlist + tokentx) into one summary dict.
+        enrich_bitcoin(store, sid, addr,
+                       {"address": ETH_VALID, "sent_to_addresses": [ETH_VASP],
+                        "counterparty_addresses": [ETH_VASP],
+                        "token_symbols": ["USDT"]}, "ethereum")
+        assert label_exchange(store, ETH_VASP, "Test VASP") is not None
+
+        paths = wallet_exchange_paths(store)
+        row = next(w for w in paths if w["entity_id"] == addr)
+        assert row["hops"] == 1
+        assert row["proximity"] == DIRECT
+        assert row["direction"] == TO_VASP
+
+
+def test_wallet_exchange_paths_eth_wallet_to_intermediate_to_erc20_to_vasp(tmp_path):
+    """Two hops: suspect -> intermediate wallet (native ETH) -> intermediate
+    -> VASP (ERC-20 transfer). Confirms multi-hop traversal crosses a chain
+    boundary between a native-ETH edge and an ERC-20 edge without special
+    casing -- both write the same SENT_FUNDS_TO rtype, so the BFS in
+    wallet_exchange_paths never needs to know which kind of transfer it was."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr_a = store.upsert_entity("ETH_ADDRESS", ETH_VALID)
+        target_a = store.upsert_target("eth:" + ETH_VALID)
+        sid_a = store.insert_snapshot(target_a, {}, "ethereum")
+        enrich_bitcoin(store, sid_a, addr_a,
+                       {"address": ETH_VALID, "sent_to_addresses": [ETH_INTERMEDIATE],
+                        "counterparty_addresses": [ETH_INTERMEDIATE]}, "ethereum")
+
+        addr_b = store.find_entity("ETH_ADDRESS", ETH_INTERMEDIATE)
+        target_b = store.upsert_target("eth:" + ETH_INTERMEDIATE)
+        sid_b = store.insert_snapshot(target_b, {}, "ethereum")
+        enrich_bitcoin(store, sid_b, addr_b,
+                       {"address": ETH_INTERMEDIATE, "sent_to_addresses": [ETH_VASP],
+                        "counterparty_addresses": [ETH_VASP],
+                        "token_symbols": ["USDC"]}, "ethereum")
+
+        assert label_exchange(store, ETH_VASP, "Test VASP") is not None
+
+        paths = wallet_exchange_paths(store)
+        row = next(w for w in paths if w["entity_id"] == addr_a)
+        assert row["hops"] == 2
+        assert row["proximity"] == INDIRECT
+        assert row["direction"] == TO_VASP
+        assert row["path"] == [addr_a, addr_b, store.find_entity("ETH_ADDRESS", ETH_VASP)]
+        assert row["evidence_ids"]
 
 
 def test_wallet_exchange_paths_one_hop_via_transacted_with(tmp_path):

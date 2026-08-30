@@ -36,8 +36,8 @@ class TestModuleRegistry:
         assert len(MODULE_REGISTRY) > 0
 
     def test_all_modules_registered(self):
-        expected = ['bitcoin', 'ethereum', 'tron', 'domain', 'username', 'email',
-                   'darkweb', 'indian']
+        expected = ['bitcoin', 'ethereum', 'bnb', 'polygon', 'tron', 'domain', 'username',
+                   'email', 'darkweb', 'indian']
         for name in expected:
             assert name in MODULE_REGISTRY
 
@@ -76,6 +76,8 @@ class TestBitcoinModule:
         assert module.name == 'bitcoin'
         assert 'bitcoin' in module.supported_types
         assert 'ethereum' in module.supported_types
+        assert 'bnb' in module.supported_types
+        assert 'polygon' in module.supported_types
 
     def test_detect_crypto_type_btc_legacy(self):
         module = BitcoinModule()
@@ -199,6 +201,192 @@ class TestBitcoinModuleEtherscan:
         assert summary['counterparty_addresses'] == [peer]
         assert summary['connected_addresses'] == [peer]
         assert peer in result.related
+
+
+class TestBitcoinModuleErc20TokenTransfers:
+    """ERC-20 Transfer events -- a suspect who moves funds as USDT/USDC never
+    shows up in txlist (native transfers only), so wallet_exchange_paths would
+    silently miss them without this source. See
+    _check_etherscan_token_transfers."""
+
+    ETH_ADDR = "0x742d35Cc6634C0532925a3b844Bc9e7595f12345"
+
+    def test_no_key_configured_degrades_gracefully(self):
+        import asyncio
+        module = BitcoinModule()
+        module.config.api_keys.etherscan = None
+        result = asyncio.run(module._check_etherscan_token_transfers(self.ETH_ADDR))
+        assert result.success is False
+        assert 'ETHERSCAN_API_KEY' in result.error
+
+    def test_token_transfer_yields_counterparty_direction_and_symbol(self):
+        import asyncio
+        module = BitcoinModule()
+        module.config.api_keys.etherscan = 'testkey'
+        vasp = "0x0000000000000000000000000000000000dead"
+        try:
+            async def fake_fetch_json(url, **kwargs):
+                assert url == 'https://api.etherscan.io/api'
+                assert kwargs['params']['action'] == 'tokentx'
+                return {
+                    'status': '1',
+                    'result': [{
+                        'from': self.ETH_ADDR, 'to': vasp,
+                        'timeStamp': '1700000000', 'tokenSymbol': 'USDT',
+                    }],
+                }
+            module.fetch_json = fake_fetch_json
+            result = asyncio.run(module._check_etherscan_token_transfers(self.ETH_ADDR))
+            assert result.success is True
+            assert result.data['sent_to_addresses'] == [vasp]
+            assert result.data['received_from_addresses'] == []
+            assert result.data['token_symbols'] == ['USDT']
+            assert result.data['token_tx_count'] == 1
+        finally:
+            module.config.api_keys.etherscan = None
+
+    def test_native_and_token_peers_both_reach_the_summary_unioned(self):
+        """Regression for the merge bug: two ETH sources both set
+        sent_to_addresses/counterparty_addresses -- _build_summary must union
+        them, not let the later source silently clobber the earlier one."""
+        module = BitcoinModule()
+        result = ModuleResult(target=self.ETH_ADDR, target_type='ethereum', module='bitcoin')
+        native_peer = "0x0000000000000000000000000000000000beef"
+        token_peer = "0x0000000000000000000000000000000000dead"
+        result.sources['etherscan_transactions'] = SourceResult(
+            source='etherscan_transactions', success=True,
+            data={'tx_count': 1, 'sent_to_addresses': [native_peer],
+                 'counterparty_addresses': [native_peer],
+                 'connected_addresses': [native_peer]})
+        result.sources['etherscan_token_transfers'] = SourceResult(
+            source='etherscan_token_transfers', success=True,
+            data={'token_tx_count': 1, 'token_symbols': ['USDT'],
+                 'sent_to_addresses': [token_peer],
+                 'counterparty_addresses': [token_peer],
+                 'connected_addresses': [token_peer]})
+        summary = module._build_summary(result)
+        assert summary['sent_to_addresses'] == sorted([native_peer, token_peer])
+        assert summary['counterparty_addresses'] == sorted([native_peer, token_peer])
+        assert summary['token_symbols'] == ['USDT']
+        assert summary['token_tx_count'] == 1
+
+
+class TestBitcoinModuleEvmChainDisambiguation:
+    """search()'s target_type override -- a bare 0x address auto-detects
+    'ethereum' (the string cannot say which of Ethereum/BNB/Polygon it is on;
+    see detector.chain_caveat), so --type bnb/--type polygon must be the only
+    way to actually reach the BNB/Polygon source list."""
+
+    EVM_ADDR = "0x742d35Cc6634C0532925a3b844Bc9e7595f12345"
+
+    @staticmethod
+    def _no_network(module):
+        """search()'s ethereum/bitcoin branches build real network-calling
+        source coroutines unconditionally (blockchair/ethplorer/blockchain.com
+        need no key at all) -- these two dispatch-only tests care about
+        target_type resolution, not live data, so run_sources is swapped for
+        one that closes each coroutine without awaiting it: no HTTP call, no
+        'coroutine was never awaited' warning either."""
+        async def fake_run_sources(sources, result):
+            for _, coro in sources:
+                coro.close()
+        module.run_sources = fake_run_sources
+
+    def test_no_override_stays_ethereum(self):
+        import asyncio
+        module = BitcoinModule()
+        self._no_network(module)
+        result = asyncio.run(module.search(self.EVM_ADDR))
+        assert result.target_type == 'ethereum'
+
+    def test_bnb_override_switches_target_type_and_sources(self):
+        """No key configured -> both BNB sources fail fast (no network call,
+        same key-gate _check_evm_transactions/_check_evm_token_transfers open
+        with) -- this pins dispatch/target_type, not live data."""
+        import asyncio
+        module = BitcoinModule()
+        module.config.api_keys.bscscan = None
+        result = asyncio.run(module.search(self.EVM_ADDR, target_type='bnb'))
+        assert result.target_type == 'bnb'
+        assert set(result.sources.keys()) == {'bnb_transactions', 'bnb_token_transfers'}
+        assert all(not r.success for r in result.sources.values())
+
+    def test_polygon_override_switches_target_type_and_sources(self):
+        import asyncio
+        module = BitcoinModule()
+        module.config.api_keys.polygonscan = None
+        result = asyncio.run(module.search(self.EVM_ADDR, target_type='polygon'))
+        assert result.target_type == 'polygon'
+        assert set(result.sources.keys()) == {'polygon_transactions', 'polygon_token_transfers'}
+        assert all(not r.success for r in result.sources.values())
+
+    def test_override_is_ignored_for_a_non_evm_address(self):
+        """A BTC-shaped address passing target_type='bnb' must not be
+        reinterpreted as BNB -- the override only ever resolves an EVM (0x)
+        ambiguity, never overrides what the string actually is."""
+        import asyncio
+        module = BitcoinModule()
+        self._no_network(module)
+        result = asyncio.run(
+            module.search("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", target_type='bnb'))
+        assert result.target_type == 'bitcoin'
+
+
+class TestBitcoinModuleEvmChainSources:
+    """BNB/Polygon native + token-transfer sources -- same Etherscan-family
+    request/response shape as _check_etherscan_transactions/
+    _check_etherscan_token_transfers, exercised through the shared
+    _check_evm_transactions/_check_evm_token_transfers helpers."""
+
+    ADDR = "0x742d35Cc6634C0532925a3b844Bc9e7595f12345"
+    PEER = "0x000000000000000000000000000000000000dead"
+
+    def test_no_key_configured_degrades_gracefully(self):
+        import asyncio
+        module = BitcoinModule()
+        module.config.api_keys.bscscan = None
+        result = asyncio.run(module._check_evm_transactions(self.ADDR, 'bnb'))
+        assert result.success is False
+        assert 'BSCSCAN_API_KEY' in result.error
+
+    def test_bscscan_native_transactions(self):
+        import asyncio
+        module = BitcoinModule()
+        module.config.api_keys.bscscan = 'testkey'
+        try:
+            async def fake_fetch_json(url, **kwargs):
+                assert url == 'https://api.bscscan.com/api'
+                assert kwargs['params']['action'] == 'txlist'
+                return {'status': '1', 'result': [
+                    {'from': self.ADDR, 'to': self.PEER, 'timeStamp': '1700000000'}]}
+            module.fetch_json = fake_fetch_json
+            result = asyncio.run(module._check_evm_transactions(self.ADDR, 'bnb'))
+            assert result.success is True
+            assert result.source == 'bnb_transactions'
+            assert result.data['sent_to_addresses'] == [self.PEER]
+            assert result.data['tx_count'] == 1
+        finally:
+            module.config.api_keys.bscscan = None
+
+    def test_polygonscan_token_transfers(self):
+        import asyncio
+        module = BitcoinModule()
+        module.config.api_keys.polygonscan = 'testkey'
+        try:
+            async def fake_fetch_json(url, **kwargs):
+                assert url == 'https://api.polygonscan.com/api'
+                assert kwargs['params']['action'] == 'tokentx'
+                return {'status': '1', 'result': [
+                    {'from': self.ADDR, 'to': self.PEER, 'timeStamp': '1700000000',
+                     'tokenSymbol': 'USDC'}]}
+            module.fetch_json = fake_fetch_json
+            result = asyncio.run(module._check_evm_token_transfers(self.ADDR, 'polygon'))
+            assert result.success is True
+            assert result.source == 'polygon_token_transfers'
+            assert result.data['sent_to_addresses'] == [self.PEER]
+            assert result.data['token_symbols'] == ['USDC']
+        finally:
+            module.config.api_keys.polygonscan = None
 
 
 class TestBitcoinModuleFundFlowDirection:

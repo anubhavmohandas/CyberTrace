@@ -89,6 +89,15 @@ class APIKeys:
     # https://etherscan.io — Ethereum tx/address/contract data
     # Free tier: 5 calls/sec
 
+    bscscan: Optional[str] = None
+    # https://bscscan.com — BNB Smart Chain tx/address data, same API shape
+    # as Etherscan (separate key, separate site — not covered by an
+    # Etherscan key). Free tier: 5 calls/sec
+
+    polygonscan: Optional[str] = None
+    # https://polygonscan.com — Polygon tx/address data, same API shape as
+    # Etherscan (separate key, separate site). Free tier: 5 calls/sec
+
     chainabuse: Optional[str] = None
     # https://docs.chainabuse.com — community-reported scam/abuse address database
     # Requires an organization API key (no free self-serve tier at signup)
@@ -137,6 +146,8 @@ class APIKeys:
             twilio_token=os.getenv('TWILIO_TOKEN'),
             # Crypto
             etherscan=os.getenv('ETHERSCAN_API_KEY'),
+            bscscan=os.getenv('BSCSCAN_API_KEY'),
+            polygonscan=os.getenv('POLYGONSCAN_API_KEY'),
             chainabuse=os.getenv('CHAINABUSE_API_KEY'),
             trongrid=os.getenv('TRONGRID_API_KEY'),
             # Social
@@ -170,7 +181,7 @@ class APIKeys:
             'Email':                  ['emailrep', 'hunter'],
             'Breach Databases':       ['hibp', 'dehashed', 'leakcheck'],
             'Phone':                  ['numverify', 'twilio_sid', 'twilio_token'],
-            'Crypto / Blockchain':    ['etherscan', 'chainabuse', 'trongrid'],
+            'Crypto / Blockchain':    ['etherscan', 'bscscan', 'polygonscan', 'chainabuse', 'trongrid'],
             'Social & Identity':      ['github', 'telegram_bot'],
             'Automation':             ['twocaptcha'],
         }

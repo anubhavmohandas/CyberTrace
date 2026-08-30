@@ -8,8 +8,8 @@ is openly redistributable; see external_data/exchange_tags/manifest.json.
 
 exchange_labels/vasp_disclosed_labels read category='exchange' only (VASP
 attribution); service_tags reads a disjoint, non-VASP set -- mixing_service,
-defi, defi_dex, coinjoin (see _SERVICE_CATEGORIES) -- kept out of VASP
-attribution entirely, never merged into the same field.
+defi, defi_dex, defi_lending, coinjoin (see _SERVICE_CATEGORIES) -- kept out
+of VASP attribution entirely, never merged into the same field.
 
 SAFETY BOUNDARY -- same class as ellipticpp.py's, applied to a second, public
 dataset: a tag here is a THIRD PARTY's public claim about an address (a
@@ -169,10 +169,16 @@ def lookup_address(address: str, currency: str) -> List[Dict[str, Any]]:
 # Non-VASP service/category intelligence this project surfaces alongside
 # exchange attribution -- GraphSense TagPacks' own category vocabulary, not a
 # taxonomy CyberTrace invented. Any other category this corpus carries (miner,
-# gambling, wallet_service, defi_lending, black_list, ...) is read and dropped
-# in service_tags below on purpose: extend this set, not a caller, once a new
-# category has independently earned investigator surfacing.
-_SERVICE_CATEGORIES = {"mixing_service", "defi", "defi_dex", "coinjoin"}
+# gambling, wallet_service, black_list, ...) is read and dropped in
+# service_tags below on purpose: extend this set, not a caller, once a new
+# category has independently earned investigator surfacing. defi_lending
+# (Compound-style lending protocols -- 548 real tags in the local corpus,
+# checked directly against the index, not assumed) earned that the same way
+# defi_dex did in Loop 33: a distinct, non-mixing, non-exchange service
+# semantic. "bridge"/"cross-chain swap" have NO category in this corpus at
+# all -- there is nothing to extend this set with for those; see Loop 34
+# Module 7/8.
+_SERVICE_CATEGORIES = {"mixing_service", "defi", "defi_dex", "defi_lending", "coinjoin"}
 
 
 def _canon_index(addresses: Dict[str, List[str]]) -> Dict[str, str]:
@@ -262,7 +268,8 @@ _VASP_DISCLOSED_SOURCES: Dict[str, str] = {
 def service_tags(addresses: Dict[str, List[str]]) -> Dict[str, List[Dict[str, Any]]]:
     """{raw address -> [{"category", "label", "pack"}, ...]} for every input
     this corpus tags under a non-VASP service category CyberTrace surfaces --
-    mixing_service, defi, defi_dex, coinjoin (see _SERVICE_CATEGORIES). One
+    mixing_service, defi, defi_dex, defi_lending, coinjoin (see
+    _SERVICE_CATEGORIES). One
     address can carry more than one hit (a coinjoin wallet also flagged by a
     second pack, say), so unlike exchange_labels this returns a list per
     address rather than the first tag.

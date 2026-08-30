@@ -625,7 +625,12 @@ def crypto_clusters(store: EvidenceStore) -> Dict[str, str]:
 EXCHANGE_HOP_DECAY = 0.75  # prior, not calibrated -- see FUNNEL_WEIGHT's own comment
 
 # entity type -> the currency code the GraphSense tagpack corpus indexes it as.
-_TAG_CURRENCY = {"BTC_ADDRESS": "BTC", "ETH_ADDRESS": "ETH", "TRX_ADDRESS": "TRX"}
+_TAG_CURRENCY = {"BTC_ADDRESS": "BTC", "ETH_ADDRESS": "ETH", "BNB_ADDRESS": "BNB",
+                 "TRX_ADDRESS": "TRX"}
+# POLYGON_ADDRESS has no entry: neither the local GraphSense TagPacks corpus
+# nor the local OFAC SDN file carries a Polygon/MATIC-specific record (see
+# ofac.py's _ASSET_TO_CURRENCY comment) -- grouping it into a currency here
+# would query both offline sources for a code that can never match anything.
 
 # How an endpoint of a trace came to be called an exchange -- or, for
 # REGULATORY_ATTESTED, an OFAC-designated entity that is not always a VASP
@@ -771,7 +776,7 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
     raw = {r["entity_id"]: (r["raw_value"] or r["normalized_value"], r["etype"])
            for r in store._all(
                "SELECT entity_id, etype, raw_value, normalized_value FROM entities "
-               "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS','TRX_ADDRESS')")}
+               "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS','BNB_ADDRESS','POLYGON_ADDRESS','TRX_ADDRESS')")}
     by_currency: Dict[str, List[str]] = defaultdict(list)
     for entity_id, (value, etype) in raw.items():
         currency = _TAG_CURRENCY.get(etype)
@@ -830,13 +835,15 @@ _SERVICE_CATEGORY_PHRASE = {
     "mixing_service": "mixing service",
     "defi": "DeFi service",
     "defi_dex": "DeFi DEX",
+    "defi_lending": "DeFi lending service",
     "coinjoin": "CoinJoin service",
 }
 
 
 def _path_service_tags(store: EvidenceStore, path_ids: List[str]) -> Dict[str, List[dict]]:
     """entity_id -> every GraphSense TagPacks hit on a non-VASP service
-    category (mixing_service, defi, defi_dex, coinjoin) for THESE addresses
+    category (mixing_service, defi, defi_dex, defi_lending, coinjoin) for
+    THESE addresses
     only -- scoped to one wallet_exchange_paths() path, or wallet_trace_
     report's single-wallet fallback, the same narrow scoping wallet_path_
     flags already uses for scam/Elliptic++/tagpack metadata below it.
@@ -1012,7 +1019,7 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
     values = {r["entity_id"]: (r["raw_value"] or r["normalized_value"])
               for r in store._all(
         "SELECT entity_id, normalized_value, raw_value FROM entities "
-        "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS','TRX_ADDRESS')")}
+        "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS','BNB_ADDRESS','POLYGON_ADDRESS','TRX_ADDRESS')")}
 
     exchange_of = _vasp_endpoints(store, values)
 
@@ -1158,6 +1165,7 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
 
 
 _TRACE_CHAIN_ETYPES = {"bitcoin": "BTC_ADDRESS", "ethereum": "ETH_ADDRESS",
+                       "bnb": "BNB_ADDRESS", "polygon": "POLYGON_ADDRESS",
                        "tron": "TRX_ADDRESS"}
 
 
@@ -1284,7 +1292,8 @@ def wallet_path_flags(store: EvidenceStore, hit: Optional[dict],
     return flags
 
 
-def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4) -> Optional[dict]:
+def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4,
+                        chain: Optional[str] = None) -> Optional[dict]:
     """One traced wallet's path to the nearest analyst-labeled exchange (see
     wallet_exchange_paths), plus every piece of third-party evidence already
     on record for each address along that path -- dataset labels, abuse
@@ -1307,7 +1316,8 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4) -
     none, and this is silent about it rather than implying absence-of-risk.
 
     `service_tags` is a SEPARATE, non-VASP finding: every GraphSense-tagged
-    mixing_service/defi/defi_dex/coinjoin hit on an address along the path
+    mixing_service/defi/defi_dex/defi_lending/coinjoin hit on an address along
+    the path
     (see _path_service_tags), structured for a caller that wants it without
     parsing `flags`' matching text back out. It never populates `exchange`,
     `attribution`, or any VASP field above -- a mixer/DeFi/CoinJoin tag is
@@ -1317,7 +1327,10 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4) -
     Returns None if `address` was never searched into this store at all.
     """
     from .detector import chain_caveat, detect_input_type
-    specific, chain = detect_input_type(address)
+    specific, detected_chain = detect_input_type(address)
+    explicit_chain = chain is not None
+    if not explicit_chain:
+        chain = detected_chain
     if chain == "unsupported_chain":
         # Previously defaulted to BTC_ADDRESS, found nothing, and returned None
         # -- indistinguishable from "this wallet was never searched" and one
@@ -1332,7 +1345,11 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4) -
                if w["entity_id"] == start_id), None)
     path_ids = hit["path"] if hit else [start_id]
     flags = wallet_path_flags(store, hit, fallback_path_ids=path_ids)
-    caveat = chain_caveat(specific)
+    # The EVM-ambiguity caveat ("0x is Ethereum mainnet only") is about NOT
+    # knowing which chain a bare 0x string is on -- it must not fire when the
+    # caller just told us explicitly (chain='bnb'/'polygon'), or it would
+    # contradict the trace this call actually ran.
+    caveat = "" if explicit_chain else chain_caveat(specific)
     if caveat:
         flags.append(caveat)
 
@@ -1660,7 +1677,7 @@ def _pair_signals(store: EvidenceStore, artifacts: dict, windows: dict,
     # both, which is a financial link between the markets even though neither
     # published the other's address.
     if clusters:
-        for etype in ("BTC_ADDRESS", "XMR_ADDRESS", "ETH_ADDRESS"):
+        for etype in ("BTC_ADDRESS", "XMR_ADDRESS", "ETH_ADDRESS", "BNB_ADDRESS", "POLYGON_ADDRESS"):
             shared = a.get(etype, set()) & b.get(etype, set())
             side_a: Dict[str, Set[str]] = defaultdict(set)
             side_b: Dict[str, Set[str]] = defaultdict(set)
@@ -2464,6 +2481,8 @@ NODE_STYLE = {
     "BTC_ADDRESS":      ("#f39c12", "square", 20),
     "XMR_ADDRESS":      ("#e67e22", "square", 20),
     "ETH_ADDRESS":      ("#d35400", "square", 20),
+    "BNB_ADDRESS":      ("#f0b90b", "square", 20),
+    "POLYGON_ADDRESS":  ("#8247e5", "square", 20),
     "IP":               ("#16a085", "hexagon", 22),
     "DOMAIN":           ("#1abc9c", "dot", 16),
     "HOSTING_PROVIDER": ("#27ae60", "box", 18),

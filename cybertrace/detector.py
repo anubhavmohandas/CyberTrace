@@ -153,8 +153,12 @@ def chain_caveat(specific_type: str) -> str:
     if specific_type == 'ethereum':
         return ("0x addresses are queried against Ethereum mainnet only. The "
                 "same address is valid on BNB Chain, Polygon, Arbitrum and "
-                "other EVM networks, and activity there is NOT searched — "
-                "absence of a VASP path is not evidence of absence.")
+                "other EVM networks, and activity there is NOT searched by "
+                "default — absence of a VASP path is not evidence of "
+                "absence. Re-run with --type bnb or --type polygon if you "
+                "know which of those two this address is really on "
+                "(Arbitrum and other EVM chains are still unsearched either "
+                "way).")
     return ""
 
 

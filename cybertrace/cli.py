@@ -115,7 +115,9 @@ def cli():
 @cli.command()
 @click.argument('target')
 @click.option('--type', '-t', 'input_type', default='auto',
-              help='Target type (auto, email, phone, username, domain, bitcoin, indian)')
+              help='Target type (auto, email, phone, username, domain, bitcoin, ethereum, '
+                   'bnb, polygon, tron, indian). bnb/polygon must be given explicitly -- a '
+                   '0x address auto-detects as ethereum (see chain_caveat).')
 @click.option('--output', '-o', 'output_format', default='table',
               type=click.Choice(['table', 'json', 'rich']),
               help='Output format')
@@ -421,12 +423,16 @@ def feedback(candidate_id: str, db_path: str, outcome: str, note: Optional[str],
               help='Evidence store to record the label against')
 @click.option('--note', default=None, help='Citation: report, filing, or how you know this')
 @click.option('--analyst', default=None, help='Who is recording this')
+@click.option('--chain', default=None,
+              type=click.Choice(['bitcoin', 'ethereum', 'bnb', 'polygon', 'tron']),
+              help='Chain this address is on. Required for bnb/polygon -- a 0x address '
+                   'auto-detects as ethereum otherwise (see chain_caveat).')
 def label_exchange_cmd(address: str, exchange: str, db_path: str,
-                       note: Optional[str], analyst: Optional[str]):
+                       note: Optional[str], analyst: Optional[str], chain: Optional[str]):
     """
-    Record that a Bitcoin, Ethereum, or TRON address is a known deposit/hot-
-    wallet address for an exchange, from an analyst's own knowledge — never
-    inferred by CyberTrace.
+    Record that a Bitcoin, Ethereum, BNB Chain, Polygon, or TRON address is a
+    known deposit/hot-wallet address for an exchange, from an analyst's own
+    knowledge — never inferred by CyberTrace.
 
     This is the only way an EXCHANGE_DEPOSIT edge is created. Once recorded,
     `correlate`/`watch` report the shortest reachable hop count from any traced
@@ -436,14 +442,15 @@ def label_exchange_cmd(address: str, exchange: str, db_path: str,
     \b
       cybertrace label-exchange bc1q... --exchange "Exchange X" --db case.db \\
           --note "publicly documented cold wallet" --analyst jdoe
+      cybertrace label-exchange 0x... --exchange "Exchange X" --chain bnb --db case.db
     """
     from .evidence import EvidenceStore, label_exchange
 
     with EvidenceStore(db_path) as store:
-        rel_id = label_exchange(store, address, exchange, analyst=analyst, note=note)
+        rel_id = label_exchange(store, address, exchange, analyst=analyst, note=note, chain=chain)
         if rel_id is None:
-            click.echo(f"[!] {address!r} is not a valid Bitcoin, Ethereum, or "
-                      f"TRON address", err=True)
+            click.echo(f"[!] {address!r} is not a valid Bitcoin, Ethereum, BNB Chain, "
+                      f"Polygon, or TRON address", err=True)
             sys.exit(1)
         click.echo(f"[+] Recorded {address} as {exchange} ({rel_id})", err=True)
 
@@ -456,7 +463,12 @@ def label_exchange_cmd(address: str, exchange: str, db_path: str,
               help='Furthest layering depth to search for a labeled exchange')
 @click.option('--output', '-o', 'output_format', default='table',
               type=click.Choice(['table', 'json']), help='Output format')
-def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: str):
+@click.option('--chain', default=None,
+              type=click.Choice(['bitcoin', 'ethereum', 'bnb', 'polygon', 'tron']),
+              help='Chain ADDRESS was searched on. Required to trace a bnb/polygon '
+                   'wallet -- a 0x address otherwise looks up ethereum only.')
+def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: str,
+                     chain: Optional[str]):
     """
     Trace a wallet already searched into this case: its path (if any) to the
     nearest VASP-attributed address, and every third-party flag already on
@@ -487,7 +499,7 @@ def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: s
     from .evidence import EvidenceStore
 
     with EvidenceStore(db_path) as store:
-        report = wallet_trace_report(store, address, max_hops=max_hops)
+        report = wallet_trace_report(store, address, max_hops=max_hops, chain=chain)
 
     if report is None:
         click.echo(f"[!] {address!r} was never searched into this case", err=True)

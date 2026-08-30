@@ -26,7 +26,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
-from ..normalize import norm_btc, norm_eth, norm_tron
+from ..normalize import norm_bnb, norm_btc, norm_eth, norm_tron
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "external_data" / "ofac"
 XML_PATH = DATA_DIR / "original" / "sdn_advanced.xml"
@@ -35,10 +35,16 @@ INDEX_PATH = DATA_DIR / "index.sqlite"
 
 # OFAC's own FeatureType label -> the currency code the rest of CyberTrace
 # uses. Only chains CyberTrace has an entity type for -- everything else the
-# SDN schema carries (ARB, BNB, USDT, XMR, ...) is read and dropped at
-# index-build time, same restriction as exchange_tags.py's _NORMALIZERS.
-_ASSET_TO_CURRENCY = {"XBT": "BTC", "ETH": "ETH", "TRX": "TRX"}
-_NORMALIZERS = {"BTC": norm_btc, "ETH": norm_eth, "TRX": norm_tron}
+# SDN schema carries (ARB, USDT, XMR, ...) is read and dropped at index-build
+# time, same restriction as exchange_tags.py's _NORMALIZERS. Confirmed against
+# the real local sdn_advanced.xml (2026-08-30 publication): "BNB" and "BSC"
+# both appear as FeatureType labels for the identical BNB Smart Chain address
+# space, so both map to the one BNB_ADDRESS currency code -- there is no
+# separate "MATIC"/"Polygon" FeatureType anywhere in that file, so Polygon
+# gets no entry here (nothing to map, not an oversight; see docs/LOOP34
+# Module 2/3 report).
+_ASSET_TO_CURRENCY = {"XBT": "BTC", "ETH": "ETH", "BNB": "BNB", "BSC": "BNB", "TRX": "TRX"}
+_NORMALIZERS = {"BTC": norm_btc, "ETH": norm_eth, "BNB": norm_bnb, "TRX": norm_tron}
 
 
 def manifest() -> Dict[str, Any]:
