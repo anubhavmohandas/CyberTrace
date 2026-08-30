@@ -12,6 +12,11 @@ from .modules import get_module, list_modules, resolve_module_for_target, TYPE_T
 from .output import print_result, save_result
 from .safety import is_blocked_query
 
+# Every chain trace-wallet/label-exchange/trace-wallet-batch accept explicitly.
+# bnb/polygon must always be given by name -- a bare 0x address auto-detects
+# as ethereum only (see detector.chain_caveat).
+_WALLET_CHAINS = ('bitcoin', 'ethereum', 'bnb', 'polygon', 'tron')
+
 LOGO = r"""
    ██████╗██╗   ██╗██████╗ ███████╗██████╗ ████████╗██████╗  █████╗  ██████╗███████╗
   ██╔════╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝
@@ -424,7 +429,7 @@ def feedback(candidate_id: str, db_path: str, outcome: str, note: Optional[str],
 @click.option('--note', default=None, help='Citation: report, filing, or how you know this')
 @click.option('--analyst', default=None, help='Who is recording this')
 @click.option('--chain', default=None,
-              type=click.Choice(['bitcoin', 'ethereum', 'bnb', 'polygon', 'tron']),
+              type=click.Choice(_WALLET_CHAINS),
               help='Chain this address is on. Required for bnb/polygon -- a 0x address '
                    'auto-detects as ethereum otherwise (see chain_caveat).')
 def label_exchange_cmd(address: str, exchange: str, db_path: str,
@@ -464,7 +469,7 @@ def label_exchange_cmd(address: str, exchange: str, db_path: str,
 @click.option('--output', '-o', 'output_format', default='table',
               type=click.Choice(['table', 'json']), help='Output format')
 @click.option('--chain', default=None,
-              type=click.Choice(['bitcoin', 'ethereum', 'bnb', 'polygon', 'tron']),
+              type=click.Choice(_WALLET_CHAINS),
               help='Chain ADDRESS was searched on. Required to trace a bnb/polygon '
                    'wallet -- a 0x address otherwise looks up ethereum only.')
 def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: str,
@@ -529,6 +534,213 @@ def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: s
             click.echo(f"  - {flag}")
     else:
         click.echo("Flags: none on record")
+
+
+def _parse_batch_rows(path: str) -> list:
+    """Parse a `trace-wallet-batch` input file: CSV with an `address` column
+    and an optional `chain` column (one of _WALLET_CHAINS). `chain` left
+    blank, or the column omitted entirely, lets the address's own shape
+    decide bitcoin/ethereum/tron -- bnb/polygon can never be auto-detected
+    (a 0x address is valid on all three EVM chains) and must be given.
+
+    One format, not several: kept to exactly the shape the module's own
+    docstring documents rather than guessing at CSV dialects or a headerless
+    one-address-per-line variant nobody asked for.
+    """
+    import csv
+
+    with open(path, newline='') as fh:
+        reader = csv.DictReader(fh)
+        if not reader.fieldnames or 'address' not in reader.fieldnames:
+            raise click.UsageError(
+                "input file needs a header row with an 'address' column "
+                "(and an optional 'chain' column)")
+        rows = []
+        for line in reader:
+            address = (line.get('address') or '').strip()
+            if not address:
+                continue
+            chain = (line.get('chain') or '').strip().lower() or None
+            rows.append({'address': address, 'chain': chain})
+    return rows
+
+
+async def _trace_one_wallet(address: str, chain: Optional[str], store, max_hops: int,
+                            deep: bool, semaphore: 'asyncio.Semaphore') -> dict:
+    """Search + ingest + trace ONE wallet -- reuses exactly what `cybertrace
+    search` -> `cybertrace correlate --db` -> `cybertrace trace-wallet` already
+    do one command at a time (see wallet_trace_report and evidence.ingest); the
+    batch adds only the loop and the concurrency bound around this, never a
+    second tracing implementation.
+
+    Never raises: every failure mode (an unsupported/misspelled chain, an
+    address whose shape no supported chain recognises, a search that raises,
+    a search that comes back with nothing ingestible) becomes a `status` in
+    the returned dict instead, so one bad row cannot abort the wallets
+    around it.
+    """
+    from .correlate import wallet_trace_report
+    from .evidence import ingest
+
+    resolved_chain = chain
+    if resolved_chain is None:
+        specific, detected = detect_input_type(address)
+        if detected not in ('bitcoin', 'ethereum', 'tron'):
+            caveat = chain_caveat(specific)
+            return {'wallet': address, 'chain': None, 'status': 'invalid_address',
+                    'result': None,
+                    'error': caveat or f"could not detect a supported chain for {address!r}"}
+        resolved_chain = detected
+    elif resolved_chain not in _WALLET_CHAINS:
+        return {'wallet': address, 'chain': chain, 'status': 'unsupported_chain',
+                'result': None, 'error': f"unsupported chain: {chain!r}"}
+
+    module = get_module(resolved_chain)
+    if module is None:
+        return {'wallet': address, 'chain': chain, 'status': 'unsupported_chain',
+                'result': None, 'error': f"no module registered for chain: {resolved_chain!r}"}
+
+    async with semaphore:
+        try:
+            async with module:
+                search_result = await module.search(address, deep=deep, target_type=resolved_chain)
+        except Exception as e:
+            return {'wallet': address, 'chain': chain, 'status': 'error',
+                    'result': None, 'error': str(e)}
+
+    try:
+        ingest(search_result, store)
+        report = wallet_trace_report(store, address, max_hops=max_hops, chain=chain)
+    except Exception as e:
+        return {'wallet': address, 'chain': chain, 'status': 'error',
+                'result': None, 'error': str(e)}
+
+    if report is None:
+        return {'wallet': address, 'chain': chain, 'status': 'no_data', 'result': None,
+                'error': 'search produced no ingestible data for this wallet'}
+    return {'wallet': address, 'chain': chain, 'status': 'ok', 'result': report, 'error': None}
+
+
+async def _run_wallet_batch(rows: list, db_path: str, max_hops: int, deep: bool,
+                            concurrency: int) -> list:
+    """Trace every (address, chain) row in `rows` against one shared evidence
+    store.
+
+    Concurrency is bounded by `concurrency` (config.max_concurrent, an
+    existing, previously-unused knob, by default) -- a semaphore around the
+    network half of each wallet only; every DB write happens synchronously on
+    this one coroutine's own turn, so sqlite is never touched from two tasks
+    at once even though their searches overlap.
+
+    Duplicate (address, chain) rows do the network/ingest work once and reuse
+    that wallet's result for every later occurrence, marked `duplicate` --
+    "no duplicate work where safe" without silently dropping the repeated row
+    from the output.
+    """
+    from .evidence import EvidenceStore
+
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+    unique_keys = list(dict.fromkeys((r['address'], r['chain']) for r in rows))
+
+    with EvidenceStore(db_path) as store:
+        outcomes = await asyncio.gather(
+            *(_trace_one_wallet(addr, chain, store, max_hops, deep, semaphore)
+              for addr, chain in unique_keys),
+            return_exceptions=True)
+
+    by_key = {}
+    for (addr, chain), outcome in zip(unique_keys, outcomes):
+        if isinstance(outcome, Exception):
+            outcome = {'wallet': addr, 'chain': chain, 'status': 'error',
+                      'result': None, 'error': str(outcome)}
+        by_key[(addr, chain)] = outcome
+
+    out = []
+    first_seen = set()
+    for row in rows:
+        key = (row['address'], row['chain'])
+        base = by_key[key]
+        if key in first_seen:
+            out.append({**base, 'status': 'duplicate'})
+        else:
+            first_seen.add(key)
+            out.append(dict(base))
+    return out
+
+
+@cli.command('trace-wallet-batch')
+@click.argument('input_file', type=click.Path(exists=True, dir_okay=False))
+@click.option('--db', 'db_path', required=True, type=click.Path(dir_okay=False),
+              help='Evidence store to search into and trace through')
+@click.option('--max-hops', default=4, show_default=True,
+              help='Furthest layering depth to search for a labeled exchange, per wallet')
+@click.option('--concurrency', default=None, type=int,
+              help='Wallets searched at once (default: config.max_concurrent / MAX_CONCURRENT)')
+@click.option('--deep', is_flag=True, help='Widen the transaction-history sample per wallet')
+@click.option('--output', '-o', 'output_format', default='table',
+              type=click.Choice(['table', 'json']), help='Output format')
+def trace_wallet_batch_cmd(input_file: str, db_path: str, max_hops: int,
+                           concurrency: Optional[int], deep: bool, output_format: str):
+    """
+    Search and trace many wallets in one run: bounded-concurrency sibling of
+    `search` + `correlate --db` + `trace-wallet` run once per address in
+    INPUT_FILE, all against one shared evidence store.
+
+    INPUT_FILE is a CSV with an `address` column and an optional `chain`
+    column (bitcoin/ethereum/bnb/polygon/tron). A blank/omitted `chain` lets
+    the address decide bitcoin/ethereum/tron; bnb/polygon must be given
+    explicitly -- same rule as `trace-wallet --chain`.
+
+    \b
+      cybertrace trace-wallet-batch wallets.csv --db case.db
+
+    wallets.csv:
+
+    \b
+      address,chain
+      bc1q...,bitcoin
+      0x...,ethereum
+      T...,tron
+      0x...,bnb
+
+    One wallet's search/API failure does not abort the others. Each result
+    carries `status`: ok, duplicate, invalid_address, unsupported_chain,
+    no_data, or error -- never silently dropped. `result` is exactly a
+    `trace-wallet` report (evidence ids, VASP attribution, service_tags)
+    when status is ok/duplicate, else null with `error` set.
+
+    This does not run the full case correlation pass -- follow with
+    `cybertrace correlate --db case.db --dossier case.html` to fold every
+    newly-traced wallet into the case report.
+    """
+    rows = _parse_batch_rows(input_file)
+    if not rows:
+        click.echo("[!] No addresses found in input file", err=True)
+        sys.exit(1)
+
+    results = asyncio.run(_run_wallet_batch(
+        rows, db_path, max_hops=max_hops, deep=deep,
+        concurrency=concurrency or config.max_concurrent))
+
+    successful = sum(1 for r in results if r['result'] is not None)
+    summary = {'total': len(results), 'successful': successful,
+              'failed': len(results) - successful, 'wallets': results}
+
+    if output_format == 'json':
+        import json as _json
+        click.echo(_json.dumps(summary, indent=2))
+        return
+
+    for r in results:
+        line = f"{r['wallet']} [{r['chain'] or 'auto'}] -> {r['status']}"
+        if r['status'] in ('ok', 'duplicate') and r['result'] and r['result']['exchange']:
+            line += (f" · {r['result']['exchange']} "
+                    f"({r['result']['hops']} hop(s), {r['result']['proximity']})")
+        elif r['error']:
+            line += f" · {r['error']}"
+        click.echo(line)
+    click.echo(f"\n{summary['total']} total · {summary['successful']} successful · "
+              f"{summary['failed']} failed")
 
 
 @cli.command('case')

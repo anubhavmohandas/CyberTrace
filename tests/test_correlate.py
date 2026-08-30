@@ -1400,6 +1400,129 @@ def test_wallet_service_category_is_not_surfaced_as_a_service_tag(tmp_path):
         assert report["exchange"] is None
 
 
+# --- Loop 35 Module B: service intelligence in the full case report (Markdown
+# / HTML / JSON), not just single-wallet trace-wallet -- run_correlation's
+# results["wallet_exchange_paths"] entries each grow their own `service_tags`
+# (see _attach_wallet_service_intelligence), and render_markdown/
+# render_dossier_html add a section for it, kept separate from the VASP
+# section above it.
+
+def test_run_correlation_attaches_service_tags_to_a_wallet_exchange_path(tmp_path):
+    """The case-level sibling of test_wallet_trace_report_surfaces_a_coinjoin_
+    tag_as_intermediate_intelligence above: same 2-hop shape, but read off
+    run_correlation's own results dict rather than a single wallet_trace_report
+    call, proving the Loop 33 finding now survives into the full-case pass."""
+    from cybertrace.integrations import exchange_tags
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+    coinjoin_addr = "bc1qnfu52l5vgg0gf2hw98epfvupveepnq7tg5l75h"   # samourai: coinjoin only
+    binance = "34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo"                  # category=exchange
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        suspect = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        sid1 = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
+        enrich_bitcoin(store, sid1, suspect,
+                       {"address": BTC_VALID, "sent_to_addresses": [coinjoin_addr]}, "bitcoin")
+        coinjoin_id = store.find_entity("BTC_ADDRESS", coinjoin_addr)
+        sid2 = store.insert_snapshot(store.upsert_target("btc:" + coinjoin_addr), {}, "bitcoin")
+        enrich_bitcoin(store, sid2, coinjoin_id,
+                       {"address": coinjoin_addr, "sent_to_addresses": [binance]}, "bitcoin")
+
+        results = run_correlation(store)
+        hit = next(w for w in results["wallet_exchange_paths"] if w["entity_id"] == suspect)
+        assert hit["exchange"] == "Binance.com"
+        assert hit["service_tags"] == [{
+            "entity_id": coinjoin_id, "value": coinjoin_addr, "hop": 1,
+            "category": "coinjoin", "label": "Samourai Wallet",
+            "attribution": TAG_ATTESTED,
+            "attribution_source": "GraphSense tagpack: samourai",
+            "evidence_ids": [],
+        }]
+
+        brief = render_markdown(results["dossiers"], results)
+        assert "## Observed service intelligence" in brief
+        vasp_section, _, service_section = brief.partition("## Observed service intelligence")
+        assert "Binance" in vasp_section          # the VASP section, unaffected
+        assert coinjoin_addr in service_section
+        assert "CoinJoin service" in service_section
+        assert "Samourai Wallet" in service_section
+        # Separation: the exchange endpoint is not restated as a service hit.
+        assert binance not in service_section
+
+        out = tmp_path / "case.html"
+        render_dossier_html(results, str(out))
+        page = out.read_text()
+        assert "Observed service intelligence" in page
+        assert page.index("Wallet") < page.index("Observed service intelligence") \
+            < page.index("<h2>Candidates</h2>")
+        assert coinjoin_addr in page
+        assert "coinjoin" in page.lower()
+
+
+def test_run_correlation_service_intelligence_covers_multiple_categories(tmp_path):
+    """Two independent traced wallets, two different GraphSense categories
+    (coinjoin and defi) in one case -- both must show up as distinct rows,
+    neither collapsing into or replacing the other's VASP endpoint."""
+    from cybertrace.integrations import exchange_tags
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+    coinjoin_addr = "bc1qnfu52l5vgg0gf2hw98epfvupveepnq7tg5l75h"   # coinjoin only
+    binance = "34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo"                  # category=exchange
+    defi_addr = "0xc25167ffa19b4d9d03c7d5aa4682c7063f345b66"        # defi only
+    suspect2 = "0x" + "1" * 39 + "a"
+    labeled_endpoint = "0x" + "2" * 39 + "b"
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        suspect1 = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        sid1 = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
+        enrich_bitcoin(store, sid1, suspect1,
+                       {"address": BTC_VALID, "sent_to_addresses": [coinjoin_addr]}, "bitcoin")
+        coinjoin_id = store.find_entity("BTC_ADDRESS", coinjoin_addr)
+        sid2 = store.insert_snapshot(store.upsert_target("btc:" + coinjoin_addr), {}, "bitcoin")
+        enrich_bitcoin(store, sid2, coinjoin_id,
+                       {"address": coinjoin_addr, "sent_to_addresses": [binance]}, "bitcoin")
+
+        label_exchange(store, labeled_endpoint, "Test Exchange", chain="ethereum")
+        suspect2_id = store.upsert_entity("ETH_ADDRESS", suspect2)
+        sid3 = store.insert_snapshot(store.upsert_target("eth:" + suspect2), {}, "ethereum")
+        enrich_bitcoin(store, sid3, suspect2_id,
+                       {"address": suspect2, "sent_to_addresses": [defi_addr]}, "ethereum")
+        defi_id = store.find_entity("ETH_ADDRESS", defi_addr)
+        sid4 = store.insert_snapshot(store.upsert_target("eth:" + defi_addr), {}, "ethereum")
+        enrich_bitcoin(store, sid4, defi_id,
+                       {"address": defi_addr, "sent_to_addresses": [labeled_endpoint]}, "ethereum")
+
+        results = run_correlation(store)
+        categories = {tag["category"] for w in results["wallet_exchange_paths"]
+                     for tag in w["service_tags"]}
+        assert categories == {"coinjoin", "defi"}
+
+        brief = render_markdown(results["dossiers"], results)
+        service_section = brief.partition("## Observed service intelligence")[2]
+        assert "CoinJoin service" in service_section
+        assert "DeFi service" in service_section
+        assert "Test Exchange" not in service_section     # VASP name, not a service finding
+
+
+def test_render_reports_omit_the_service_section_when_there_is_nothing_to_show(tmp_path):
+    """A plain VASP path with no GraphSense service/category tag on any hop
+    must not grow an empty 'Observed service intelligence' section in either
+    rendering -- the heading is presence-gated, not always printed."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        suspect = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        label_exchange(store, BTC_VALID, "Test Exchange")
+
+        results = run_correlation(store)
+        assert results["wallet_exchange_paths"]
+        assert all(w["service_tags"] == [] for w in results["wallet_exchange_paths"])
+
+        brief = render_markdown(results["dossiers"], results)
+        assert "Wallet" in brief and "nearest VASP" in brief
+        assert "Observed service intelligence" not in brief
+
+        out = tmp_path / "case.html"
+        render_dossier_html(results, str(out))
+        assert "Observed service intelligence" not in out.read_text()
+
+
 def test_an_analyst_label_outranks_a_third_party_tag_on_one_address(tmp_path):
     """Both sources naming the same address must not read as two findings, and
     the analyst -- the one who has to stand behind it -- is the one cited."""

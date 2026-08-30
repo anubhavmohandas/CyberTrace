@@ -952,6 +952,37 @@ def _secondary_vasp_reach(adjacency: Dict[str, Dict[str, tuple]],
     return found
 
 
+def _attach_wallet_service_intelligence(store: EvidenceStore, wallet_paths: List[dict]) -> None:
+    """Case-report-level sibling of wallet_trace_report's per-wallet
+    `service_tags` (see _path_service_tags) -- mutates each entry in an
+    already-computed wallet_exchange_paths() list with its own `service_tags`,
+    so a mixer/DeFi/CoinJoin hit `trace-wallet` already surfaces for a wallet
+    is no longer invisible in the full case Markdown/HTML/JSON report (Loop 33
+    gap). Same non-VASP contract as _path_service_tags: never touches
+    `exchange`/`attribution` on `wallet_paths` itself.
+
+    Batches _path_service_tags over the union of every wallet's path, so this
+    is one query for the whole report, not one per wallet. Only called from
+    run_correlation on its own freshly-computed list -- cli.py's trace-wallet
+    listing and monitor.py's watch diffing call wallet_exchange_paths()
+    independently and are unaffected.
+    """
+    all_path_ids = sorted({eid for w in wallet_paths for eid in w["path"]})
+    tags_by_id = _path_service_tags(store, all_path_ids) if all_path_ids else {}
+    values: Dict[str, str] = {}
+    if tags_by_id:
+        needed = sorted(tags_by_id.keys())
+        marks = ",".join("?" * len(needed))
+        values = {r["entity_id"]: r["raw_value"] for r in store._all(
+            f"SELECT entity_id, raw_value FROM entities WHERE entity_id IN ({marks})",
+            tuple(needed))}
+    for w in wallet_paths:
+        w["service_tags"] = [
+            {"entity_id": eid, "value": values.get(eid, eid), "hop": hop, **tag}
+            for hop, eid in enumerate(w["path"]) for tag in tags_by_id.get(eid, [])
+        ]
+
+
 def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]:
     """For every address with a path to a VASP-attributed address, over
     TRANSACTED_WITH + SENT_FUNDS_TO + PART_OF_CLUSTER edges (undirected for
@@ -2440,6 +2471,21 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
                          f"flow {w['direction']} · reachability {w['confidence']:.2f}")
         lines.append("")
 
+    service_hits = [(w, tag) for w in results.get("wallet_exchange_paths", [])
+                    for tag in w.get("service_tags", [])]
+    if service_hits:
+        lines += ["## Observed service intelligence", "",
+                  "_GraphSense-tagged mixing/DeFi/CoinJoin services observed on a "
+                  "traced wallet's path — third-party category intelligence, never "
+                  "a VASP claim and never evidence of criminality or a customer "
+                  "relationship. Kept separate from the VASP attribution above._", ""]
+        for w, tag in service_hits:
+            phrase = _SERVICE_CATEGORY_PHRASE.get(tag["category"], tag["category"])
+            lines.append(f"- `{w['value']}` → hop {tag['hop']}: `{tag['value']}` "
+                         f"tagged {phrase} ({tag['label']}) · {tag['attribution']} "
+                         f"— {tag['attribution_source']}")
+        lines.append("")
+
     for d in dossiers:
         lines += [f"## {d['candidate_id']} · {d['role']} · {d['confidence_level']} "
                   f"(score {d['score']:.3f})", "",
@@ -2691,6 +2737,27 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
                        f"<td>{w['confidence']:.2f}</td></tr>")
         out.append("</table>")
 
+    service_hits = [(w, tag) for w in results.get("wallet_exchange_paths", [])
+                    for tag in w.get("service_tags", [])]
+    if service_hits:
+        out.append("<h2>Observed service intelligence</h2>"
+                   "<p class=dim>GraphSense-tagged mixing/DeFi/CoinJoin services "
+                   "observed on a traced wallet's path — third-party category "
+                   "intelligence, never a VASP claim and never evidence of "
+                   "criminality or a customer relationship. Kept separate from the "
+                   "VASP attribution above.</p>"
+                   "<table><tr><th>wallet</th><th>hop</th><th>tagged address</th>"
+                   "<th>category</th><th>label</th><th>attributed by</th></tr>")
+        for w, tag in service_hits:
+            phrase = _SERVICE_CATEGORY_PHRASE.get(tag["category"], tag["category"])
+            out.append(f"<tr><td class=mono>{_esc(w['value'])}</td>"
+                       f"<td>{tag['hop']}</td>"
+                       f"<td class=mono>{_esc(tag['value'])}</td>"
+                       f"<td>{_esc(phrase)}</td><td>{_esc(tag['label'])}</td>"
+                       f"<td class=wrap>{_esc(tag['attribution'])} · "
+                       f"{_esc(tag['attribution_source'])}</td></tr>")
+        out.append("</table>")
+
     out.append("<h2>Candidates</h2>")
     if not d:
         out.append("<p class=dim>No candidate cleared the evidence floor. With this "
@@ -2792,6 +2859,7 @@ def run_correlation(store: EvidenceStore, min_conf: float = 0.35,
         "wallet_exchange_paths": wallet_exchange_paths(store),
         "contradictions": flags,
     }
+    _attach_wallet_service_intelligence(store, results["wallet_exchange_paths"])
     dossiers = [build_dossier(store, c, aliases, flags, windows)
                 for c in results["operators"] + results["infra"] + results["ips"]]
     for rank, d in enumerate(dossiers, 1):

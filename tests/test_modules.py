@@ -169,7 +169,8 @@ class TestBitcoinModuleEtherscan:
         peer = "0x0000000000000000000000000000000000dead"
         try:
             async def fake_fetch_json(url, **kwargs):
-                assert url == 'https://api.etherscan.io/api'
+                assert url == 'https://api.etherscan.io/v2/api'
+                assert kwargs['params']['chainid'] == 1
                 assert kwargs['params']['action'] == 'txlist'
                 return {
                     'status': '1',
@@ -226,7 +227,8 @@ class TestBitcoinModuleErc20TokenTransfers:
         vasp = "0x0000000000000000000000000000000000dead"
         try:
             async def fake_fetch_json(url, **kwargs):
-                assert url == 'https://api.etherscan.io/api'
+                assert url == 'https://api.etherscan.io/v2/api'
+                assert kwargs['params']['chainid'] == 1
                 assert kwargs['params']['action'] == 'tokentx'
                 return {
                     'status': '1',
@@ -305,20 +307,28 @@ class TestBitcoinModuleEvmChainDisambiguation:
         with) -- this pins dispatch/target_type, not live data."""
         import asyncio
         module = BitcoinModule()
-        module.config.api_keys.bscscan = None
-        result = asyncio.run(module.search(self.EVM_ADDR, target_type='bnb'))
-        assert result.target_type == 'bnb'
-        assert set(result.sources.keys()) == {'bnb_transactions', 'bnb_token_transfers'}
-        assert all(not r.success for r in result.sources.values())
+        original = module.config.api_keys.etherscan
+        module.config.api_keys.etherscan = None
+        try:
+            result = asyncio.run(module.search(self.EVM_ADDR, target_type='bnb'))
+            assert result.target_type == 'bnb'
+            assert set(result.sources.keys()) == {'bnb_transactions', 'bnb_token_transfers'}
+            assert all(not r.success for r in result.sources.values())
+        finally:
+            module.config.api_keys.etherscan = original
 
     def test_polygon_override_switches_target_type_and_sources(self):
         import asyncio
         module = BitcoinModule()
-        module.config.api_keys.polygonscan = None
-        result = asyncio.run(module.search(self.EVM_ADDR, target_type='polygon'))
-        assert result.target_type == 'polygon'
-        assert set(result.sources.keys()) == {'polygon_transactions', 'polygon_token_transfers'}
-        assert all(not r.success for r in result.sources.values())
+        original = module.config.api_keys.etherscan
+        module.config.api_keys.etherscan = None
+        try:
+            result = asyncio.run(module.search(self.EVM_ADDR, target_type='polygon'))
+            assert result.target_type == 'polygon'
+            assert set(result.sources.keys()) == {'polygon_transactions', 'polygon_token_transfers'}
+            assert all(not r.success for r in result.sources.values())
+        finally:
+            module.config.api_keys.etherscan = original
 
     def test_override_is_ignored_for_a_non_evm_address(self):
         """A BTC-shaped address passing target_type='bnb' must not be
@@ -344,18 +354,24 @@ class TestBitcoinModuleEvmChainSources:
     def test_no_key_configured_degrades_gracefully(self):
         import asyncio
         module = BitcoinModule()
-        module.config.api_keys.bscscan = None
-        result = asyncio.run(module._check_evm_transactions(self.ADDR, 'bnb'))
-        assert result.success is False
-        assert 'BSCSCAN_API_KEY' in result.error
+        original = module.config.api_keys.etherscan
+        module.config.api_keys.etherscan = None
+        try:
+            result = asyncio.run(module._check_evm_transactions(self.ADDR, 'bnb'))
+            assert result.success is False
+            assert 'ETHERSCAN_API_KEY' in result.error
+        finally:
+            module.config.api_keys.etherscan = original
 
-    def test_bscscan_native_transactions(self):
+    def test_bnb_native_transactions_via_etherscan_v2(self):
         import asyncio
         module = BitcoinModule()
-        module.config.api_keys.bscscan = 'testkey'
+        original = module.config.api_keys.etherscan
+        module.config.api_keys.etherscan = 'testkey'
         try:
             async def fake_fetch_json(url, **kwargs):
-                assert url == 'https://api.bscscan.com/api'
+                assert url == 'https://api.etherscan.io/v2/api'
+                assert kwargs['params']['chainid'] == 56
                 assert kwargs['params']['action'] == 'txlist'
                 return {'status': '1', 'result': [
                     {'from': self.ADDR, 'to': self.PEER, 'timeStamp': '1700000000'}]}
@@ -366,15 +382,17 @@ class TestBitcoinModuleEvmChainSources:
             assert result.data['sent_to_addresses'] == [self.PEER]
             assert result.data['tx_count'] == 1
         finally:
-            module.config.api_keys.bscscan = None
+            module.config.api_keys.etherscan = original
 
-    def test_polygonscan_token_transfers(self):
+    def test_polygon_token_transfers_via_etherscan_v2(self):
         import asyncio
         module = BitcoinModule()
-        module.config.api_keys.polygonscan = 'testkey'
+        original = module.config.api_keys.etherscan
+        module.config.api_keys.etherscan = 'testkey'
         try:
             async def fake_fetch_json(url, **kwargs):
-                assert url == 'https://api.polygonscan.com/api'
+                assert url == 'https://api.etherscan.io/v2/api'
+                assert kwargs['params']['chainid'] == 137
                 assert kwargs['params']['action'] == 'tokentx'
                 return {'status': '1', 'result': [
                     {'from': self.ADDR, 'to': self.PEER, 'timeStamp': '1700000000',
@@ -386,7 +404,47 @@ class TestBitcoinModuleEvmChainSources:
             assert result.data['sent_to_addresses'] == [self.PEER]
             assert result.data['token_symbols'] == ['USDC']
         finally:
-            module.config.api_keys.polygonscan = None
+            module.config.api_keys.etherscan = original
+
+    def test_a_plan_restricted_chain_surfaces_etherscans_own_error_text(self):
+        """A chain a free-tier key cannot reach (BNB, right now) must not read
+        the same as 'no data' -- Etherscan's own explanation is the whole
+        point of a PARTIAL/BLOCKED status, not something to discard."""
+        import asyncio
+        module = BitcoinModule()
+        original = module.config.api_keys.etherscan
+        module.config.api_keys.etherscan = 'testkey'
+        try:
+            async def fake_fetch_json(url, **kwargs):
+                return {'status': '0', 'message': 'NOTOK',
+                       'result': 'Free API access is not supported for this chain. '
+                                 'Please upgrade your api plan for full chain coverage.'}
+            module.fetch_json = fake_fetch_json
+            result = asyncio.run(module._check_evm_transactions(self.ADDR, 'bnb'))
+            assert result.success is False
+            assert 'upgrade your api plan' in result.error
+        finally:
+            module.config.api_keys.etherscan = original
+
+    def test_a_genuinely_empty_result_is_success_not_failure(self):
+        """Etherscan reports zero transactions as status='0' too (message
+        'No transactions found') -- a real, valid, empty answer, not the
+        same thing as the plan-restriction error above. Previously
+        misdetected as failure because both carry status != '1'."""
+        import asyncio
+        module = BitcoinModule()
+        original = module.config.api_keys.etherscan
+        module.config.api_keys.etherscan = 'testkey'
+        try:
+            async def fake_fetch_json(url, **kwargs):
+                return {'status': '0', 'message': 'No transactions found', 'result': []}
+            module.fetch_json = fake_fetch_json
+            result = asyncio.run(module._check_evm_transactions(self.ADDR, 'polygon'))
+            assert result.success is True
+            assert result.data['tx_count'] == 0
+            assert result.data['sent_to_addresses'] == []
+        finally:
+            module.config.api_keys.etherscan = original
 
 
 class TestBitcoinModuleFundFlowDirection:

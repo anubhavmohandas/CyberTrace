@@ -6,10 +6,15 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
 
-from cybertrace.api_key_registry import APIKeys, API_KEYS  # noqa: F401
-
-# Load .env from project root
+# Load .env from project root BEFORE api_key_registry's own module-level
+# `API_KEYS = APIKeys.from_env()` singleton reads os.environ -- otherwise
+# that singleton (unused internally, but its own docstring invites "import
+# and use directly anywhere in the codebase") is permanently frozen with
+# pre-.env values, since importing it below is what first imports
+# api_key_registry at all.
 load_dotenv()
+
+from cybertrace.api_key_registry import APIKeys, API_KEYS  # noqa: F401
 
 
 @dataclass
