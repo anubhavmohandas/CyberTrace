@@ -450,3 +450,35 @@ class TestWalletRecheck:
         assert second_snapshot is not None
         assert report["wallets_checked"] == [
             {"address": BTC_VALID, "chain": "BTC_ADDRESS", "status": "CHANGED"}]
+
+
+def test_run_watch_surfaces_a_critical_wallet_as_a_risk_alert(monkeypatch):
+    """Loop 37: high-risk wallet alerts reach the watch/case surface too, not
+    just a one-off `correlate` run -- reusing the same real Polyanin
+    self-designation (CRITICAL, score 80) test_correlate.py's own risk-alert
+    test pins. run_watch's re-check re-confirms the same real deposits (the
+    fake chain module returns the identical payload), then re-correlates;
+    risk_alerts must come through unmodified from that re-correlation, the
+    same way successors/contradictions already do."""
+    import cybertrace.modules as modules_pkg
+
+    from .test_correlate import (
+        OFAC_POLYANIN, OFAC_POLYANIN_REAL_SENT_TO, _skip_unless_real_sources_available,
+    )
+
+    _skip_unless_real_sources_available()
+    with EvidenceStore(":memory:") as s:
+        payload = _wallet_search_result(
+            OFAC_POLYANIN, sent_to_addresses=OFAC_POLYANIN_REAL_SENT_TO, tx_sample_size=19)
+        ingest(payload.to_dict(), s)
+
+        monkeypatch.setattr(modules_pkg, "get_module",
+                            lambda module_type: _FakeChainModule(payload))
+
+        report = run_watch(s, correlate=True)
+
+    assert len(report["risk_alerts"]) == 1
+    alert = report["risk_alerts"][0]
+    assert alert["value"] == OFAC_POLYANIN
+    assert alert["risk"]["risk_level"] == "CRITICAL"
+    assert alert["risk"]["risk_score"] == 80

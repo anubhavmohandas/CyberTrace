@@ -190,8 +190,8 @@ class BitcoinModule(BaseModule):
 
         # Get first and last transaction
         if txs:
-            parsed['first_seen'] = datetime.fromtimestamp(txs[-1].get('time', 0)).isoformat()
-            parsed['last_seen'] = datetime.fromtimestamp(txs[0].get('time', 0)).isoformat()
+            parsed['first_seen'] = datetime.fromtimestamp(txs[-1].get('time', 0), tz=timezone.utc).isoformat()
+            parsed['last_seen'] = datetime.fromtimestamp(txs[0].get('time', 0), tz=timezone.utc).isoformat()
             
             # Two different relations, deliberately kept apart.
             #

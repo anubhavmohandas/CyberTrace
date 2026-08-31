@@ -362,6 +362,13 @@ def watch(db_path: str, targets, discover: bool, output_format: str,
                            f"({row['confidence']}) {row['assessment']}")
             for row in report.get('wallet_deltas', []):
                 click.echo(f"\n  [WALLET-{row['change']}] {row['value']}")
+            for row in report.get('risk_alerts', []):
+                r = row['risk']
+                colour = 'red' if r['risk_level'] == 'CRITICAL' else 'yellow'
+                click.echo(f"\n  [RISK ALERT] "
+                           f"{click.style(r['risk_level'], fg=colour)} "
+                           f"{row['value']} (score {r['risk_score']}, "
+                           f"{', '.join(r['risk_categories'])})")
             if report.get('narrative'):
                 click.echo(f"\n  [ANALYST ALERT] {report['narrative']['answer']}")
             if report.get('discovered'):
@@ -527,6 +534,9 @@ def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: s
         click.echo(f"  proximity:   {report['proximity']} ({report['hops']} hop(s))")
         click.echo(f"  attribution: {report['attribution']} "
                   f"({report['attribution_source']})")
+        if report['wallet_role']:
+            click.echo(f"  wallet role: {report['wallet_role']} "
+                      f"(the VASP's own disclosure, not an inference)")
         click.echo(f"  fund flow:   {report['direction']}")
         click.echo(f"  reachability confidence: {report['exchange_confidence']:.2f} "
                   f"(hop decay, not a probability)")

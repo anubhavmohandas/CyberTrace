@@ -95,6 +95,48 @@ class TestBitcoinModule:
         assert result == 'ethereum'
 
 
+class TestFetchSecretRedaction:
+    """Loop 37: NodeReal's real API embeds the live key in the URL PATH itself
+    (https://bsc-mainnet.nodereal.io/v1/{key} -- see bitcoin_module.py's
+    _fetch_nodereal_txs), and base.fetch/fetch_json log that exact URL (and
+    any exception's own str(), which some aiohttp errors also embed the URL
+    in) on every transient/unexpected HTTP error -- a live key written to the
+    application log on routine rate-limiting. _redact_secrets is the
+    root-cause fix: strip every configured API key value before it can ever
+    reach a log line, covering every current and future URL-embedded-key
+    integration, not just NodeReal."""
+
+    def test_a_url_embedded_key_is_stripped(self, monkeypatch):
+        from cybertrace.config import config
+        from cybertrace.modules.base import _redact_secrets
+        monkeypatch.setattr(config.api_keys, "nodereal", "sk-live-secret-1234")
+        url = "https://bsc-mainnet.nodereal.io/v1/sk-live-secret-1234"
+        redacted = _redact_secrets(url)
+        assert "sk-live-secret-1234" not in redacted
+        assert "[REDACTED]" in redacted
+
+    def test_the_key_is_also_stripped_out_of_an_exceptions_own_message(self, monkeypatch):
+        """Some aiohttp exceptions (e.g. ClientResponseError) embed the full
+        request URL in their own str() -- redacting only the `url` log
+        argument and not str(e) would leave the same secret reachable
+        through the other %s in the same log line."""
+        from cybertrace.config import config
+        from cybertrace.modules.base import _redact_secrets
+        monkeypatch.setattr(config.api_keys, "nodereal", "sk-live-secret-1234")
+        message = "Cannot connect to host bsc-mainnet.nodereal.io:443 " \
+                  "(request: https://bsc-mainnet.nodereal.io/v1/sk-live-secret-1234)"
+        assert "sk-live-secret-1234" not in _redact_secrets(message)
+
+    def test_no_configured_keys_leaves_ordinary_urls_unchanged(self, monkeypatch):
+        import dataclasses
+        from cybertrace.config import config
+        from cybertrace.modules.base import _redact_secrets
+        for f in dataclasses.fields(config.api_keys):
+            monkeypatch.setattr(config.api_keys, f.name, None)
+        url = "https://api.etherscan.io/v2/api?chainid=1&module=account"
+        assert _redact_secrets(url) == url
+
+
 class TestBitcoinModuleChainabuse:
     """Chainabuse rides the same graceful-degradation-without-a-key path as
     Shodan (darkweb_module._favicon_pivot), and the same non-attributive
@@ -593,6 +635,20 @@ class TestBitcoinModuleFundFlowDirection:
         assert data['cospend_addresses'] == [self.PAYER]
         assert self.PAYER not in data['sent_to_addresses']
         assert self.PAYER not in data['received_from_addresses']
+
+    def test_first_seen_and_last_seen_are_utc_aware_like_every_other_chain(self):
+        """Loop 37: _check_blockchain_com's first_seen/last_seen used naive
+        local time (bare datetime.fromtimestamp, no tz=) while the EVM path
+        (_parse_evm_txs) and TRON both use tz=timezone.utc -- on a host not
+        running in UTC, BTC timestamps in the same case report silently
+        disagreed with every other chain's. Real epoch second, so the
+        expected UTC string is unambiguous regardless of the host's own
+        timezone."""
+        data = self._run([{'time': 1700000000,
+                           'inputs': [{'prev_out': {'addr': self.BTC}}],
+                           'out': [{'addr': self.PAYEE}]}])
+        assert data['first_seen'] == '2023-11-14T22:13:20+00:00'
+        assert data['last_seen'] == '2023-11-14T22:13:20+00:00'
 
 
 class TestBitcoinModuleTransactionDepth:

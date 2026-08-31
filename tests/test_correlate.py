@@ -1750,9 +1750,13 @@ def test_a_real_bitfinex_disclosed_address_is_vasp_disclosed_not_an_edge(tmp_pat
         assert hit["attribution"] == VASP_DISCLOSED
         assert hit["exchange"] == "Bitfinex"
         assert "github.com/bitfinexcom" in hit["attribution_source"]
+        # Loop 37: hot-wallet classification, from Bitfinex's own disclosure
+        # text ("bitfinex BTC cold wallet") -- not an inference.
+        assert hit["wallet_role"] == "COLD"
 
         flags = wallet_path_flags(store, hit)
         assert any("own published wallet disclosure" in f for f in flags)
+        assert any("discloses this exact address as a cold wallet" in f for f in flags)
 
         assert store._all("SELECT 1 FROM relationships WHERE rtype='EXCHANGE_DEPOSIT'") == []
         assert store._all("SELECT 1 FROM entities WHERE etype='EXCHANGE'") == []
@@ -1777,6 +1781,10 @@ def test_a_real_bitmex_disclosed_address_is_vasp_disclosed(tmp_path):
         assert hit["attribution"] == VASP_DISCLOSED
         assert hit["exchange"] == "BitMEX"
         assert "public.bitmex.com" in hit["attribution_source"]
+        # BitMEX's own disclosure text is "bitmex reserve wallet" -- a real,
+        # distinct role from Bitfinex's hot/cold vocabulary, classified the
+        # same way (Loop 37).
+        assert hit["wallet_role"] == "RESERVE"
         assert store._all("SELECT 1 FROM relationships WHERE rtype='EXCHANGE_DEPOSIT'") == []
 
 
@@ -3780,6 +3788,58 @@ def test_wallet_exchange_paths_reports_the_suspects_own_designation_and_the_real
         flags_text = " ".join(wallet_path_flags(store, hit))
         assert "binance" in flags_text.lower()          # the real deposit is now visible here
         assert "Polyanin" in flags_text                 # ...alongside the primary designation, not instead of it
+
+
+def test_run_correlation_surfaces_a_critical_wallet_as_a_risk_alert(tmp_path):
+    """Loop 37: high-risk wallet alerts. The real Polyanin self-designation
+    (CRITICAL, score 80 -- see test_risk.py::test_real_data_case_a) must
+    appear in results["risk_alerts"], filtered from the SAME `risk` key
+    _attach_wallet_risk already wrote onto wallet_exchange_paths -- never a
+    second scoring pass -- and both report renderers must surface it in an
+    alert section, not just bury it in the full risk table."""
+    _skip_unless_real_sources_available()
+    with EvidenceStore(str(tmp_path / "polyanin_alert.db")) as store:
+        suspect_id = _real_polyanin_case(store)
+        results = run_correlation(store)
+
+        assert len(results["risk_alerts"]) == 1
+        alert = results["risk_alerts"][0]
+        assert alert["entity_id"] == suspect_id
+        assert alert["risk"]["risk_level"] == "CRITICAL"
+        assert alert["risk"]["risk_score"] == 80
+
+        md = render_markdown(results["dossiers"], results)
+        assert "High-risk wallet alerts" in md
+        assert md.index("High-risk wallet alerts") < md.index("Wallet risk assessment")
+
+        html_path = str(tmp_path / "polyanin_alert.html")
+        render_dossier_html(results, html_path)
+        with open(html_path) as fh:
+            html_out = fh.read()
+        assert "High-risk wallet alerts" in html_out
+
+
+def test_risk_alerts_is_empty_when_nothing_reaches_high_or_critical(tmp_path):
+    """The common case: a wallet with only a LOW-scoring contextual signal
+    (real GraphSense CoinJoin tag, no OFAC hit) must not appear in
+    risk_alerts, and the alert section must not render at all -- an alert
+    list is a filter, not a restatement of every scored wallet."""
+    _skip_unless_real_sources_available()
+    coinjoin_addr = "bc1qnfu52l5vgg0gf2hw98epfvupveepnq7tg5l75h"  # samourai: coinjoin
+    binance = "34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo"                 # category=exchange
+    with EvidenceStore(str(tmp_path / "coinjoin_no_alert.db")) as store:
+        suspect = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        sid1 = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
+        enrich_bitcoin(store, sid1, suspect,
+                       {"address": BTC_VALID, "sent_to_addresses": [coinjoin_addr]}, "bitcoin")
+        coinjoin_id = store.find_entity("BTC_ADDRESS", coinjoin_addr)
+        sid2 = store.insert_snapshot(store.upsert_target("btc:" + coinjoin_addr), {}, "bitcoin")
+        enrich_bitcoin(store, sid2, coinjoin_id,
+                       {"address": coinjoin_addr, "sent_to_addresses": [binance]}, "bitcoin")
+
+        results = run_correlation(store)
+        assert results["risk_alerts"] == []
+        assert "High-risk wallet alerts" not in render_markdown(results["dossiers"], results)
 
 
 def test_direct_vasp_contacts_is_empty_when_the_self_attributed_suspect_has_no_other_direct_vasp_relationship(tmp_path):

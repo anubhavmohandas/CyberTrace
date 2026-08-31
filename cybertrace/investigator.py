@@ -251,14 +251,27 @@ def _wallet_exchange(ctx: dict) -> dict:
     if not paths:
         return _insufficient("No wallet in this case has a recorded path to an "
                              "analyst-labeled exchange address.")
-    claims = [{
-        "text": f"`{_short(w['value'], 32)}` — {w['proximity']} to {w['exchange']} "
-                f"({w['hops']} hop(s), flow {w['direction']}, "
-                f"{w['attribution']}: {w['attribution_source']}, "
-                f"reachability {w['confidence']:.2f}).",
-        "kind": "INFERRED", "evidence_ids": w["evidence_ids"],
-        "candidate_ids": [], "finding_ids": [],
-    } for w in paths]
+    # risk/wallet_role are read off the SAME wallet_exchange_paths rows
+    # run_correlation already attached them to (_attach_wallet_risk) -- no
+    # second score_wallet_risk call, so this answer can never disagree with
+    # the CLI/Markdown/HTML/GUI surfaces reading the identical field (Loop 37
+    # cross-surface consistency: risk was previously invisible to every
+    # natural-language question, even though the data was already here).
+    claims = []
+    for w in paths:
+        role = f", disclosed as a {w['wallet_role'].lower()} wallet" if w.get("wallet_role") else ""
+        r = w.get("risk") or {}
+        risk_phrase = (f" Risk: {r['risk_level']} (score {r['risk_score']}, {r['risk_policy_version']})."
+                       if r.get("risk_score") is not None
+                       else " Risk: INSUFFICIENT_EVIDENCE -- not a finding of low risk.")
+        claims.append({
+            "text": f"`{_short(w['value'], 32)}` — {w['proximity']} to {w['exchange']} "
+                    f"({w['hops']} hop(s), flow {w['direction']}, "
+                    f"{w['attribution']}: {w['attribution_source']}{role}, "
+                    f"reachability {w['confidence']:.2f}).{risk_phrase}",
+            "kind": "INFERRED", "evidence_ids": w["evidence_ids"],
+            "candidate_ids": [], "finding_ids": [],
+        })
     return {"answer": "Nearest VASP-attributed address for each traced wallet:",
             "claims": claims,
             "limitations": [
@@ -270,7 +283,11 @@ def _wallet_exchange(ctx: dict) -> dict:
                 "and none is written as an edge.",
                 "Hop distance is reachability, not proof of an intentional transfer.",
                 "Direction UNKNOWN means the capture never recorded which way value "
-                "moved — it is not evidence of a deposit."]}
+                "moved — it is not evidence of a deposit.",
+                "Wallet role (hot/cold/reserve) is only ever the VASP's own disclosure, "
+                "never an inference from balance or transaction volume.",
+                "Risk is a policy-scored priority signal (risk-v1), not a probability and "
+                "not proof of criminality -- kept separate from VASP attribution above."]}
 
 
 def _boundary(ctx: dict, lead: str = "No. ") -> dict:

@@ -8,7 +8,7 @@ import shutil
 import sys
 import uuid
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as _dataclass_fields
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 from pathlib import Path
@@ -23,6 +23,24 @@ from ..safety import BlockedContent, is_blocked_url, scrub
 # time, and the darkweb operator pivot runs whole sub-module searches inside a
 # source. asyncio is single-threaded here, so a plain flag is enough.
 _display_active = False
+
+
+def _redact_secrets(text: str) -> str:
+    """Strip every configured API key value out of `text` before it can ever
+    reach a log line. Root-cause fix, not a per-caller patch: most APIs take
+    a key as a query param or header (never logged raw here), but a
+    URL-embedded-key scheme (e.g. NodeReal's
+    https://bsc-mainnet.nodereal.io/v1/{key}) puts the live secret directly
+    in the request URL -- and fetch/fetch_json below log that URL (and any
+    exception's own str(), which some aiohttp errors also embed the URL in)
+    on every transient/unexpected error. Scans every APIKeys field rather
+    than special-casing NodeReal, so a future URL-embedded-key integration is
+    covered by construction, not by remembering to add it here."""
+    for f in _dataclass_fields(config.api_keys):
+        value = getattr(config.api_keys, f.name)
+        if value:
+            text = text.replace(value, "[REDACTED]")
+    return text
 
 
 @dataclass
@@ -269,13 +287,14 @@ class BaseModule(ABC):
                         continue
                     return None
             except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
-                logger.debug("fetch transient error [%s] attempt %d/%d: %s", url, attempt + 1, retries + 1, e)
+                logger.debug("fetch transient error [%s] attempt %d/%d: %s",
+                            _redact_secrets(url), attempt + 1, retries + 1, _redact_secrets(str(e)))
                 if attempt < retries:
                     await asyncio.sleep(retry_delay * (2 ** attempt))
                     continue
                 return None
             except Exception as e:
-                logger.warning("fetch unexpected error [%s]: %s", url, e)
+                logger.warning("fetch unexpected error [%s]: %s", _redact_secrets(url), _redact_secrets(str(e)))
                 return None
         return None
 
@@ -308,13 +327,15 @@ class BaseModule(ABC):
                         continue
                     return None
             except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
-                logger.debug("fetch_json transient error [%s] attempt %d/%d: %s", url, attempt + 1, retries + 1, e)
+                logger.debug("fetch_json transient error [%s] attempt %d/%d: %s",
+                            _redact_secrets(url), attempt + 1, retries + 1, _redact_secrets(str(e)))
                 if attempt < retries:
                     await asyncio.sleep(retry_delay * (2 ** attempt))
                     continue
                 return None
             except Exception as e:
-                logger.warning("fetch_json unexpected error [%s]: %s", url, e)
+                logger.warning("fetch_json unexpected error [%s]: %s",
+                               _redact_secrets(url), _redact_secrets(str(e)))
                 return None
         return None
 

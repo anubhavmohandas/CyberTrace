@@ -663,6 +663,44 @@ _ATTRIBUTION_SOURCE_PHRASE = {
     TAG_ATTESTED: "third-party tag, not verified by CyberTrace",
 }
 
+# Loop 37: hot-wallet classification. The ONLY evidence source in this
+# codebase that ever states what kind of wallet a VASP-attributed address
+# is: a VASP_DISCLOSED disclosure's own `role` text (e.g. "bitfinex BTC cold
+# wallet", "bitmex reserve wallet" -- see integrations/exchange_tags.
+# vasp_disclosed_labels). Classified by substring match on the VASP's OWN
+# words, never inferred from balance, transaction volume, or address age --
+# no such behavioral evidence source exists in this codebase (risk.py's
+# CONTEXTUAL_BEHAVIORAL tier is declared unused for the identical reason).
+# None on every other attribution tier: TAG_ATTESTED/REGULATORY_ATTESTED/
+# ANALYST_ASSERTED sources state no wallet role at all, and reporting one
+# would be an inference this evidence does not support.
+WALLET_ROLE_HOT = "HOT"
+WALLET_ROLE_COLD = "COLD"
+WALLET_ROLE_RESERVE = "RESERVE"
+
+# Longest/most specific phrase first: "cold wallet" and "hot wallet" both
+# contain neither other, but a future disclosure source's label could in
+# principle combine words this ordering would otherwise mis-rank.
+_WALLET_ROLE_FROM_DISCLOSURE_LABEL = (
+    ("cold wallet", WALLET_ROLE_COLD),
+    ("hot wallet", WALLET_ROLE_HOT),
+    ("reserve wallet", WALLET_ROLE_RESERVE),
+)
+
+
+def _wallet_role(disclosed_role_label: Optional[str]) -> Optional[str]:
+    """Classify a VASP_DISCLOSED role label into HOT/COLD/RESERVE, or None
+    when there is no label (every non-VASP_DISCLOSED source) or the label
+    doesn't match a known phrase -- reported as unclassified, never guessed."""
+    if not disclosed_role_label:
+        return None
+    lowered = disclosed_role_label.lower()
+    for phrase, role in _WALLET_ROLE_FROM_DISCLOSURE_LABEL:
+        if phrase in lowered:
+            return role
+    return None
+
+
 # How far the suspect address is from the VASP-attributed address. Named rather
 # than left as a bare hop count because "direct" is the word a disclosure or
 # freezing request turns on, and 1 hop and 3 hops are not the same request.
@@ -749,7 +787,10 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
                            see exchange_tags._VASP_DISCLOSED_SOURCES. This
                            names an address the VASP itself published, not
                            every address that later transacts with it -- see
-                           wallet_exchange_paths' vasp_shared_by guard.
+                           wallet_exchange_paths' vasp_shared_by guard. Only
+                           this tier ever carries a non-None `wallet_role`
+                           (HOT/COLD/RESERVE, classified from the disclosure's
+                           own label text -- see _wallet_role).
       TAG_ATTESTED         the local GraphSense TagPacks corpus tags this
                            address category='exchange'. A third party's public
                            claim, read offline, cited by pack name.
@@ -789,7 +830,7 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
             hit = tagged.get(value)
             if hit:
                 out[entity_id] = {"exchange": hit["label"], "evidence_ids": [],
-                                  "attribution": TAG_ATTESTED,
+                                  "attribution": TAG_ATTESTED, "wallet_role": None,
                                   "attribution_source": f"GraphSense tagpack: {hit['pack']}"}
 
         disclosed = vasp_disclosed_labels(dict(by_currency))
@@ -798,9 +839,14 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
             if hit:
                 # "exchange" holds the brand for this tier -- reused as the
                 # vasp_shared_by grouping key in wallet_exchange_paths rather
-                # than carrying a second, redundant brand field.
+                # than carrying a second, redundant brand field. wallet_role
+                # is this same disclosure's own role text, classified -- see
+                # _wallet_role. The raw text stays fully visible in
+                # attribution_source below regardless of whether it matched a
+                # known phrase.
                 out[entity_id] = {"exchange": hit["brand"], "evidence_ids": [],
                                   "attribution": VASP_DISCLOSED,
+                                  "wallet_role": _wallet_role(hit["role"]),
                                   "attribution_source":
                                       f"{hit['brand']} self-disclosure ({hit['role']}): "
                                       f"{hit['source']}"}
@@ -811,7 +857,7 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
             hit = designated.get(value)
             if hit:
                 out[entity_id] = {"exchange": hit["entity_name"], "evidence_ids": [],
-                                  "attribution": REGULATORY_ATTESTED,
+                                  "attribution": REGULATORY_ATTESTED, "wallet_role": None,
                                   "attribution_source":
                                       f"OFAC SDN: profile {hit['profile_id']}"}
 
@@ -821,7 +867,7 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
             "JOIN entities e ON e.entity_id = r.target_entity_id "
             "LEFT JOIN evidence ev ON ev.relationship_id = r.rel_id "
             "WHERE r.rtype='EXCHANGE_DEPOSIT' AND r.status='ACTIVE'"):
-        out[r["addr"]] = {"exchange": r["exchange"],
+        out[r["addr"]] = {"exchange": r["exchange"], "wallet_role": None,
                           "evidence_ids": json.loads(r["observation_ids"] or "[]"),
                           "attribution": ANALYST_ASSERTED,
                           "attribution_source": r["source_label"] or "analyst"}
@@ -917,7 +963,8 @@ def _secondary_vasp_reach(adjacency: Dict[str, Dict[str, tuple]],
     the first recorded occurrence of a brand is its nearest).
 
     Returns brand -> {peer_entity_id, exchange, attribution,
-    attribution_source, hops, path, direction, evidence_ids}. Callers decide
+    attribution_source, wallet_role, hops, path, direction, evidence_ids}.
+    Callers decide
     which of these are genuinely secondary (excluding `start`'s own brand,
     and, in wallet_exchange_paths, excluding hop-1 brands direct_vasp_contacts
     already reports) -- this function only answers "what's reachable".
@@ -941,6 +988,7 @@ def _secondary_vasp_reach(adjacency: Dict[str, Dict[str, tuple]],
                         found[brand] = {"peer_entity_id": peer, "exchange": brand,
                                         "attribution": peer_end["attribution"],
                                         "attribution_source": peer_end["attribution_source"],
+                                        "wallet_role": peer_end["wallet_role"],
                                         "hops": hop, "path": new_path,
                                         "direction": _direction(flows),
                                         "evidence_ids": new_ev + peer_end["evidence_ids"]}
@@ -996,6 +1044,28 @@ def _attach_wallet_risk(store: EvidenceStore, wallet_paths: List[dict]) -> None:
     for w in wallet_paths:
         w["risk"] = score_wallet_risk(store, w["entity_id"], w["value"], w,
                                       w.get("service_tags") or [])
+
+
+def _risk_alerts(wallet_paths: List[dict]) -> List[dict]:
+    """Wallets whose risk.py score reached HIGH or CRITICAL, ranked highest
+    first -- the case-level "surface this" list an investigator (or a cron'd
+    `cybertrace watch`) should see without scanning every row of the full
+    wallet risk assessment. Recomputes nothing: reads the `risk` key
+    _attach_wallet_risk already wrote onto each row, so this can never
+    disagree with risk.py's own verdict -- the alerting layer is a filter on
+    the risk engine's output, never a second scoring pass (see the Loop 37
+    spec's "do not recreate scoring inside the alerting layer").
+
+    Threshold is HIGH/CRITICAL, not CRITICAL alone: risk.py's own
+    CATEGORY_CAP makes a purely contextual (mixer/DeFi-only) wallet
+    structurally incapable of reaching HIGH, so everything in this list
+    already traces to at least one DIRECT-signal finding -- a designation or
+    a fraud report -- never contextual noise alone.
+    """
+    from .risk import CRITICAL, HIGH
+    return sorted(
+        (w for w in wallet_paths if w.get("risk", {}).get("risk_level") in (HIGH, CRITICAL)),
+        key=lambda w: -(w["risk"]["risk_score"] or 0))
 
 
 def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]:
@@ -1091,6 +1161,7 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
                                   "exchange": peer_end["exchange"],
                                   "attribution": peer_end["attribution"],
                                   "attribution_source": peer_end["attribution_source"],
+                                  "wallet_role": peer_end["wallet_role"],
                                   "direction": _direction(flows),
                                   "evidence_ids": hop_obs + peer_end["evidence_ids"]})
             # Same gap, one hop further out: a secondary VASP the suspect never
@@ -1117,6 +1188,7 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
                         "path": [start], "evidence_ids": end["evidence_ids"],
                         "attribution": end["attribution"],
                         "attribution_source": end["attribution_source"],
+                        "wallet_role": end["wallet_role"],
                         "proximity": AT_VASP, "direction": DIRECTION_UNKNOWN,
                         "direct_vasp_contacts": secondary,
                         "secondary_vasp_contacts": secondary_multi})
@@ -1143,6 +1215,7 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
                                  "evidence_ids": new_ev + end["evidence_ids"],
                                  "attribution": end["attribution"],
                                  "attribution_source": end["attribution_source"],
+                                 "wallet_role": end["wallet_role"],
                                  "proximity": DIRECT if hop == 1 else INDIRECT,
                                  "direction": _direction(flows)}
                         break
@@ -1286,6 +1359,14 @@ def wallet_path_flags(store: EvidenceStore, hit: Optional[dict],
                      f"{hit['confidence']:.2f})")
         flags.append(f"{endpoint_kind} attribution is {source}: {hit['attribution_source']}")
         flags.append(_direction_phrase(hit["exchange"], hit["direction"]))
+        # The VASP's OWN disclosure of what kind of wallet this is (Loop 37) --
+        # distinct from, and stronger than, the endpoint_shared_by guard below,
+        # which only INFERS "consistent with an omnibus/hot wallet" from
+        # transaction-count convergence. This is the disclosure's own word.
+        if hit.get("wallet_role"):
+            flags.append(f"{hit['exchange']} discloses this exact address as a "
+                         f"{hit['wallet_role'].lower()} wallet (its own publication, "
+                         f"not an inference from transaction volume)")
         shared = hit.get("endpoint_shared_by", 1)
         if shared > 1:
             flags.append(
@@ -1439,6 +1520,7 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4,
         "exchange_confidence": hit["confidence"] if hit else None,
         "attribution": hit["attribution"] if hit else None,
         "attribution_source": hit["attribution_source"] if hit else None,
+        "wallet_role": hit["wallet_role"] if hit else None,
         "proximity": hit["proximity"] if hit else None,
         "direction": hit["direction"] if hit else None,
         "flags": flags,
@@ -2458,7 +2540,22 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
              f"ip {len(results['ips'])}) · market links {len(asserted)} · "
              f"leads {len(leads)} · refused {len(refused)} · "
              f"clones {len(results['clones'])} · "
-             f"contradictions {len(results['contradictions'])}", ""]
+             f"contradictions {len(results['contradictions'])} · "
+             f"risk alerts {len(results.get('risk_alerts', []))}", ""]
+
+    if results.get("risk_alerts"):
+        lines += ["## High-risk wallet alerts", "",
+                  "_Wallets whose risk-v1 score reached HIGH or CRITICAL, surfaced "
+                  "first at the case's own alert threshold -- a filter on the risk "
+                  "engine below, never a second scoring pass. See \"Wallet risk "
+                  "assessment\" further down for every scored wallet and its full "
+                  "evidence chain._", ""]
+        for w in results["risk_alerts"]:
+            r = w["risk"]
+            lines.append(f"- `{w['value']}` → **{r['risk_level']}** "
+                         f"(score {r['risk_score']}, {r['risk_policy_version']}) · "
+                         f"categories: {', '.join(r['risk_categories'])}")
+        lines.append("")
 
     if asserted or refused:
         lines += ["## Market relationships", ""]
@@ -2496,9 +2593,10 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
                   "that is not a deposit._",
                   ""]
         for w in results["wallet_exchange_paths"]:
+            role = f" · {w['wallet_role']} wallet (VASP-disclosed)" if w.get("wallet_role") else ""
             lines.append(f"- `{w['value']}` → {w['proximity']} · {w['hops']} hop(s) → "
                          f"{w['exchange']} · {w['attribution']} ({w['attribution_source']}) · "
-                         f"flow {w['direction']} · reachability {w['confidence']:.2f}")
+                         f"flow {w['direction']} · reachability {w['confidence']:.2f}{role}")
         lines.append("")
 
     service_hits = [(w, tag) for w in results.get("wallet_exchange_paths", [])
@@ -2726,9 +2824,25 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
                      ("ip", len(results.get("ips", []))),
                      ("market links", len(live_successors)),
                      ("leads", len(leads)),
-                     ("contradictions", len(results.get("contradictions", [])))):
+                     ("contradictions", len(results.get("contradictions", []))),
+                     ("risk alerts", len(results.get("risk_alerts", [])))):
         out.append(f"<div class=stat><b>{n}</b><span>{label}</span></div>")
     out.append("</div>")
+
+    if results.get("risk_alerts"):
+        out.append("<h2>High-risk wallet alerts</h2>"
+                   "<p class=dim>Wallets whose risk-v1 score reached HIGH or CRITICAL, "
+                   "surfaced first at the case's own alert threshold -- a filter on the "
+                   "risk engine below, never a second scoring pass. See \"Wallet risk "
+                   "assessment\" further down for every scored wallet and its full "
+                   "evidence chain.</p>")
+        for w in results["risk_alerts"]:
+            r = w["risk"]
+            out.append(
+                f"<div class=note><span class=mono>{_esc(w['value'])}</span> · "
+                f"<span class='tag {_esc(r['risk_level'])}'>{_esc(r['risk_level'])}"
+                f"</span> · score {r['risk_score']} ({_esc(r['risk_policy_version'])}) "
+                f"· {_esc(', '.join(r['risk_categories']))}</div>")
 
     if results.get("contradictions"):
         out.append("<h2>Contradictions — read before the candidates</h2>")
@@ -2778,12 +2892,14 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
                    "means the capture recorded that a transaction happened and not which way "
                    "value moved: that is not a deposit.</p>"
                    "<table><tr><th>wallet</th><th>proximity</th><th>hops</th><th>flow</th>"
-                   "<th>VASP</th><th>attributed by</th><th>reachability</th></tr>")
+                   "<th>VASP</th><th>wallet role</th><th>attributed by</th>"
+                   "<th>reachability</th></tr>")
         for w in results["wallet_exchange_paths"]:
             out.append(f"<tr><td class=mono>{_esc(w['value'])}</td>"
                        f"<td>{_esc(w['proximity'])}</td><td>{w['hops']}</td>"
                        f"<td>{_esc(w['direction'])}</td>"
                        f"<td>{_esc(w['exchange'])}</td>"
+                       f"<td>{_esc(w['wallet_role']) if w.get('wallet_role') else '—'}</td>"
                        f"<td class=wrap>{_esc(w['attribution'])} · "
                        f"{_esc(w['attribution_source'])}</td>"
                        f"<td>{w['confidence']:.2f}</td></tr>")
@@ -2935,6 +3051,7 @@ def run_correlation(store: EvidenceStore, min_conf: float = 0.35,
     }
     _attach_wallet_service_intelligence(store, results["wallet_exchange_paths"])
     _attach_wallet_risk(store, results["wallet_exchange_paths"])
+    results["risk_alerts"] = _risk_alerts(results["wallet_exchange_paths"])
     dossiers = [build_dossier(store, c, aliases, flags, windows)
                 for c in results["operators"] + results["infra"] + results["ips"]]
     for rank, d in enumerate(dossiers, 1):

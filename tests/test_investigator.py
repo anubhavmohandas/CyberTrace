@@ -183,6 +183,36 @@ def test_deterministic_mode_answers_nearest_exchange(store):
     for claim in result["claims"]:
         for eid in claim["evidence_ids"]:
             assert eid in known_evidence
+    # Loop 37: risk was previously invisible to this natural-language answer
+    # even though run_correlation already attached it to the same rows every
+    # other surface reads. ANALYST_ASSERTED carries no risk rule, so this
+    # must read INSUFFICIENT_EVIDENCE -- never a silently implied LOW.
+    assert any("INSUFFICIENT_EVIDENCE" in c["text"] for c in result["claims"])
+    assert any("not a finding of low risk" in c["text"] for c in result["claims"])
+
+
+def test_deterministic_mode_answers_nearest_exchange_with_a_real_disclosed_wallet_role(store):
+    """Real Bitfinex cold-wallet ground truth (test_correlate.py's own
+    BITFINEX_COLD, independently verified via Bitfinex's own GitHub
+    proof-of-reserves repo) must surface its disclosed role through the same
+    natural-language answer, not just the CLI/report renderers."""
+    from cybertrace.evidence import enrich_bitcoin
+    from cybertrace.integrations import exchange_tags
+
+    from .test_correlate import BITFINEX_COLD
+
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+
+    btc = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+    addr = store.upsert_entity("BTC_ADDRESS", btc)
+    sid = store.insert_snapshot(store.upsert_target("btc:" + btc), {}, "bitcoin")
+    enrich_bitcoin(store, sid, addr, {"address": btc, "sent_to_addresses": [BITFINEX_COLD]},
+                   "bitcoin")
+
+    result = investigator.answer(store, "tortaxi", "which vasp is closest to this wallet")
+    assert result["mode"] == "deterministic"
+    assert any("disclosed as a cold wallet" in c["text"] for c in result["claims"])
 
 
 def test_live_mode_strips_fabricated_wallet_evidence_id(store, monkeypatch):

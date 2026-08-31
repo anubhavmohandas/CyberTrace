@@ -48,6 +48,11 @@ def test_tortaxi_export_matches_gui_shape():
     assert all("snapshot_id" in cap for cap in case["captures"])
     assert case["notes"] == []  # no analyst notes recorded on this fresh store
 
+    # Loop 37: risk_alerts flows through the GUI export the same way
+    # wallet_exchange_paths' own `risk` field already does -- present and
+    # empty here since this fixture has no wallet addresses at all.
+    assert case["risk_alerts"] == []
+
 
 def test_gui_candidates_keep_the_provenance_the_dossier_already_has():
     """The GUI must not be the layer where a cited claim becomes prose.
