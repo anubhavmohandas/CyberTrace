@@ -214,6 +214,7 @@ def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
         "market_relationships": market_relationships,
         "wallet_exchange_paths": results["wallet_exchange_paths"],
         "risk_alerts": results["risk_alerts"],
+        "data_source_status": results["data_source_status"],
         "report_markdown": render_markdown(results["dossiers"], results),
         "notes": [{"note": n["note"], "analyst": n["analyst"] or "", "recorded_at": n["recorded_at"]}
                   for n in store.case_notes()],

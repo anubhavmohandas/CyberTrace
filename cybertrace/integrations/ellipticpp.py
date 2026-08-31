@@ -67,10 +67,11 @@ def available() -> bool:
     genuinely different, worse state than "just needs a rebuild", worth its
     own clearer error rather than collapsing into the same "stale" message);
     (2) this dataset's license_status is UNKNOWN (see manifest.json) and its
-    archive_sha256 exists precisely so a future provenance-verification step
-    could confirm the index traces back to the exact cited file -- nothing
-    in this codebase performs that check yet, so this is a documented option
-    being kept open, not a current invariant anything enforces today.
+    per-file sha256 in manifest()["files"] exists precisely so a
+    provenance-verification step could confirm the index traces back to the
+    exact cited file -- build_index() now runs that check (Loop 39 Section 5)
+    on its real-rebuild path, right before it would otherwise trust these
+    bytes.
     Neither reason is safety-critical the way freshness is; this is
     intentional policy, not leftover storage coupling, but also not a hard
     requirement -- revisit if disk footprint (2GB+ for this dataset alone)
@@ -227,6 +228,18 @@ def build_index(force: bool = False) -> Path:
         if recorded_fp is None:
             _freshness.stamp(INDEX_PATH, current_fp)
             return INDEX_PATH
+    # A real rebuild is about to trust these files' bytes -- verify each
+    # against the manifest's own per-file checksum first (Loop 39 Section 5,
+    # the "future provenance-verification step" this module's available()
+    # docstring already flagged as not yet built). Matched by the manifest's
+    # own `local` path rather than hardcoded per-file, so this stays correct
+    # if _SOURCE_PATHS ever gains a third file.
+    by_local = {f["local"]: f["sha256"] for f in manifest()["files"]}
+    for path in _SOURCE_PATHS:
+        local_key = f"original/{path.name}"
+        expected = by_local.get(local_key)
+        if expected:
+            _freshness.verify_checksum(path, expected)
     with open(ORIGINAL_DIR / "wallets_features_classes_combined.csv",
               newline="", encoding="utf-8") as f:
         header = next(csv.reader(f))

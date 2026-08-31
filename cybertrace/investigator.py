@@ -133,6 +133,7 @@ def build_context(store: EvidenceStore, candidate_id: Optional[str] = None) -> d
         "suppressed_relationships": suppressed_relationships,
         "contradictions": results["contradictions"],
         "wallet_exchange_paths": wallet_exchange_paths,
+        "data_source_status": results.get("data_source_status", {}),
         "memory": memory_ctx,
         "known_ids": {
             "evidence_ids": set(evidence_by_id),
@@ -272,9 +273,14 @@ def _wallet_exchange(ctx: dict) -> dict:
             "kind": "INFERRED", "evidence_ids": w["evidence_ids"],
             "candidate_ids": [], "finding_ids": [],
         })
+    not_fresh = [name for name, state in ctx.get("data_source_status", {}).items()
+                if state != "FRESH"]
     return {"answer": "Nearest VASP-attributed address for each traced wallet:",
             "claims": claims,
-            "limitations": [
+            "limitations": ([
+                f"Data source(s) not fresh: {', '.join(not_fresh)} -- a 'no match' from "
+                f"these does not mean 'checked, clean', it may mean the local corpus is "
+                f"stale or was never downloaded."] if not_fresh else []) + [
                 "ANALYST_ASSERTED endpoints are a human's cited claim; REGULATORY_ATTESTED "
                 "endpoints are an OFAC SDN designation of that address (not always a VASP -- "
                 "some designated parties are a market or a mixer); VASP_DISCLOSED endpoints "

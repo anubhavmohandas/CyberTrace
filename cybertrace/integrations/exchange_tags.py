@@ -149,6 +149,10 @@ def build_index(force: bool = False) -> Path:
         if recorded_fp is None:
             _freshness.stamp(INDEX_PATH, current_fp)
             return INDEX_PATH
+    # A real rebuild is about to trust this file's bytes -- verify against
+    # the manifest's own recorded checksum first (Loop 39 Section 5) so a
+    # corrupted/truncated local zip never silently becomes a queryable index.
+    _freshness.verify_checksum(ZIP_PATH, manifest()["distribution_channel"]["archive_sha256"])
     tmp_path = INDEX_PATH.with_suffix(".sqlite.building")
     tmp_path.unlink(missing_ok=True)
     conn = sqlite3.connect(tmp_path)

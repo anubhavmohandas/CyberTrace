@@ -725,6 +725,68 @@ class TestFetchJsonInBandRetry:
         assert session.call_count == 1
 
 
+class TestFetchJsonRetryableStatuses:
+    """base._RETRYABLE_STATUSES (Loop 39 Section 6): the HTTP-status-code
+    retry branch fetch/fetch_json both share. Blockchair's real API returns
+    a non-standard 430 (not IANA-registered, not in the old hardcoded
+    (429,500,502,503,504) tuple) for its own rate-limit/IP-blacklist
+    condition -- confirmed live against api.blockchair.com, which returns
+    HTTP 430 with body {"context":{"error":"...temporary blacklisted due to
+    exceeding usage..."}} under burst load. Before this, a Blockchair rate
+    limit was never retried and fell straight through to `_check_blockchair`
+    reporting the generic, misleading 'No data returned'."""
+
+    class _StatusResponse:
+        def __init__(self, status, json_body=None):
+            self.status = status
+            self._json_body = json_body if json_body is not None else {}
+
+        async def json(self, content_type=None):
+            return self._json_body
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _StatusSession:
+        def __init__(self, responses):
+            self._responses = list(responses)
+            self.call_count = 0
+
+        def request(self, method, url, **kwargs):
+            self.call_count += 1
+            return TestFetchJsonRetryableStatuses._StatusResponse(*self._responses.pop(0))
+
+    def _module_with_statuses(self, responses):
+        module = BitcoinModule()
+        session = self._StatusSession(responses)
+
+        async def fake_session_for(url):
+            return session
+
+        module._session_for = fake_session_for
+        return module, session
+
+    def test_a_430_is_retried_then_succeeds(self):
+        import asyncio
+        good = {'data': {}}
+        module, session = self._module_with_statuses([(430,), (200, good)])
+        result = asyncio.run(module.fetch_json(
+            'https://api.blockchair.com/x', retries=2, retry_delay=0))
+        assert result == good
+        assert session.call_count == 2
+
+    def test_a_430_gives_up_as_none_after_retries_exhausted(self):
+        import asyncio
+        module, session = self._module_with_statuses([(430,), (430,), (430,)])
+        result = asyncio.run(module.fetch_json(
+            'https://api.blockchair.com/x', retries=2, retry_delay=0))
+        assert result is None
+        assert session.call_count == 3
+
+
 class TestBitcoinModuleFundFlowDirection:
     """Which SIDE of a transaction the address was on. A deposit into a VASP
     and a payout from one are the same counterparty edge and opposite

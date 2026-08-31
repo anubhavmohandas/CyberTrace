@@ -4,12 +4,17 @@ never reach the live EvidenceStore/ingest() path. See
 cybertrace/integrations/*.py docstrings."""
 
 
+import hashlib
 import sqlite3
 import zipfile
 
 import pytest
 
 from cybertrace.integrations import _freshness, ellipticpp, evolution, exchange_tags, ofac
+
+
+def _sha256_hex(path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 class TestEvidenceStoreIsUnreachable:
@@ -378,6 +383,52 @@ class TestFreshnessHelper:
         assert _freshness.is_stale(index, [source]) is True
 
 
+class TestArchiveChecksumVerification:
+    """_freshness.verify_checksum (Loop 39 Section 5): corruption/truncation
+    detection on a downloaded archive, distinct from is_stale()'s stat-based
+    staleness check -- a file can have the exact size+mtime it always had and
+    still be bit-rotted or partially overwritten on disk."""
+
+    def test_matching_checksum_raises_nothing(self, tmp_path):
+        f = tmp_path / "source.bin"
+        f.write_bytes(b"real archive content")
+        _freshness.verify_checksum(f, _sha256_hex(f))  # must not raise
+
+    def test_mismatched_checksum_fails_clearly(self, tmp_path):
+        f = tmp_path / "source.bin"
+        f.write_bytes(b"real archive content")
+        with pytest.raises(RuntimeError, match="checksum mismatch"):
+            _freshness.verify_checksum(f, "0" * 64)
+
+    def test_truncated_file_is_caught_even_with_unchanged_size_expectation(self, tmp_path):
+        # A silent on-disk change that is_stale()'s stat-only fingerprint
+        # cannot see if size happens to land the same is exactly the gap this
+        # exists to close -- so this pins content, not just presence.
+        f = tmp_path / "source.bin"
+        f.write_bytes(b"AAAA")
+        expected = _sha256_hex(f)
+        f.write_bytes(b"BBBB")  # same size, different bytes -- e.g. bit rot
+        with pytest.raises(RuntimeError, match="checksum mismatch"):
+            _freshness.verify_checksum(f, expected)
+
+    def test_a_corrupted_archive_is_refused_before_indexing_real_data(self, monkeypatch, tmp_path):
+        """Adapter-level pin: build_index() must refuse to build from a file
+        whose bytes don't match the manifest's recorded checksum, using ofac
+        as the representative adapter -- never silently produce a queryable
+        index from corrupted source material."""
+        xml_path = tmp_path / "sdn_advanced.xml"
+        index_path = tmp_path / "index.sqlite"
+        xml_path.write_text("<Sanctions>not the real schema, but bytes exist</Sanctions>")
+        monkeypatch.setattr(ofac, "XML_PATH", xml_path)
+        monkeypatch.setattr(ofac, "INDEX_PATH", index_path)
+        monkeypatch.setattr(ofac, "_SOURCE_PATHS", (xml_path,))
+        monkeypatch.setattr(ofac, "manifest",
+                            lambda: {"distribution_channel": {"archive_sha256": "f" * 64}})
+        with pytest.raises(RuntimeError, match="checksum mismatch"):
+            ofac.build_index()
+        assert not index_path.exists()  # no partial/corrupt index left behind
+
+
 class TestOfacFreshness:
     """ofac.build_index()'s freshness short-circuit, over a tiny synthetic
     SDN-shaped XML rather than the real 126MB corpus -- fast enough to
@@ -410,6 +461,12 @@ class TestOfacFreshness:
         monkeypatch.setattr(ofac, "XML_PATH", xml_path)
         monkeypatch.setattr(ofac, "INDEX_PATH", index_path)
         monkeypatch.setattr(ofac, "_SOURCE_PATHS", (xml_path,))
+        # Computed live off xml_path's CURRENT bytes on every call, not a
+        # value frozen at patch time -- test_changed_source_triggers_a_real_
+        # rebuild rewrites xml_path mid-test and still expects the real
+        # rebuild that follows to pass checksum verification.
+        monkeypatch.setattr(ofac, "manifest",
+                            lambda: {"distribution_channel": {"archive_sha256": _sha256_hex(xml_path)}})
         return xml_path, index_path
 
     def test_legacy_index_is_stamped_not_rebuilt(self, monkeypatch, tmp_path):
@@ -470,6 +527,8 @@ class TestExchangeTagsFreshness:
         monkeypatch.setattr(exchange_tags, "ZIP_PATH", zip_path)
         monkeypatch.setattr(exchange_tags, "INDEX_PATH", index_path)
         monkeypatch.setattr(exchange_tags, "_SOURCE_PATHS", (zip_path,))
+        monkeypatch.setattr(exchange_tags, "manifest",
+                            lambda: {"distribution_channel": {"archive_sha256": _sha256_hex(zip_path)}})
         return zip_path, index_path
 
     def test_legacy_index_is_stamped_not_rebuilt(self, monkeypatch, tmp_path):
@@ -497,6 +556,61 @@ class TestExchangeTagsFreshness:
         assert exchange_tags.is_stale() is False
 
 
+class TestEvolutionFreshness:
+    """evolution.build_index()'s freshness short-circuit, mirroring
+    TestExchangeTagsFreshness over a tiny synthetic zip -- Evolution was the
+    last offline adapter still on the old "index exists = trust it forever"
+    model (Loop 38); this pins it onto the same _freshness mechanism as
+    ofac/exchange_tags/ellipticpp."""
+
+    def _write_zip(self, path, vid="v1", username="vendor1", pgp_key=""):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("market/vendors.tsv",
+                       f"vid\tusername\tpgp_key\n{vid}\t{username}\t{pgp_key}\n")
+
+    def _patched(self, monkeypatch, tmp_path):
+        zip_path = tmp_path / "data-and-readme.zip"
+        index_path = tmp_path / "index.sqlite"
+        monkeypatch.setattr(evolution, "ZIP_PATH", zip_path)
+        monkeypatch.setattr(evolution, "INDEX_PATH", index_path)
+        monkeypatch.setattr(evolution, "_SOURCE_PATHS", (zip_path,))
+        monkeypatch.setattr(evolution, "manifest", lambda: {"files": [
+            {"local": "original/data-and-readme.zip", "sha256_local": _sha256_hex(zip_path)}]})
+        return zip_path, index_path
+
+    def test_legacy_index_is_stamped_not_rebuilt(self, monkeypatch, tmp_path):
+        zip_path, index_path = self._patched(monkeypatch, tmp_path)
+        self._write_zip(zip_path)
+        evolution.build_index()
+        conn = sqlite3.connect(index_path)
+        conn.execute("DROP TABLE _freshness")
+        conn.commit()
+        conn.close()
+        assert evolution.is_stale() is True
+        evolution.build_index()  # should stamp, not rebuild
+        assert evolution.is_stale() is False
+
+    def test_changed_source_triggers_a_real_rebuild(self, monkeypatch, tmp_path):
+        import time
+        zip_path, index_path = self._patched(monkeypatch, tmp_path)
+        self._write_zip(zip_path)
+        evolution.build_index()
+        assert evolution.is_stale() is False
+        time.sleep(0.01)
+        self._write_zip(zip_path)  # rewritten -- new mtime, same logical content
+        assert evolution.is_stale() is True
+        evolution.build_index()
+        assert evolution.is_stale() is False
+
+    def test_force_rebuilds_even_when_fresh(self, monkeypatch, tmp_path):
+        zip_path, index_path = self._patched(monkeypatch, tmp_path)
+        self._write_zip(zip_path)
+        evolution.build_index()
+        evolution.build_index(force=True)
+        assert evolution.is_stale() is False
+
+
 class TestEllipticppFreshness:
     """ellipticpp.build_index()'s freshness short-circuit, over tiny
     synthetic CSVs (header rows only -- lookup correctness against the real
@@ -515,11 +629,15 @@ class TestEllipticppFreshness:
     def _patched(self, monkeypatch, tmp_path):
         original_dir = tmp_path / "original"
         index_path = tmp_path / "index.sqlite"
+        combined = original_dir / "wallets_features_classes_combined.csv"
+        edges = original_dir / "AddrAddr_edgelist.csv"
         monkeypatch.setattr(ellipticpp, "ORIGINAL_DIR", original_dir)
         monkeypatch.setattr(ellipticpp, "INDEX_PATH", index_path)
-        monkeypatch.setattr(ellipticpp, "_SOURCE_PATHS",
-                            (original_dir / "wallets_features_classes_combined.csv",
-                             original_dir / "AddrAddr_edgelist.csv"))
+        monkeypatch.setattr(ellipticpp, "_SOURCE_PATHS", (combined, edges))
+        monkeypatch.setattr(ellipticpp, "manifest", lambda: {"files": [
+            {"local": "original/wallets_features_classes_combined.csv", "sha256": _sha256_hex(combined)},
+            {"local": "original/AddrAddr_edgelist.csv", "sha256": _sha256_hex(edges)},
+        ]})
         return original_dir, index_path
 
     def test_legacy_index_is_stamped_not_rebuilt(self, monkeypatch, tmp_path):

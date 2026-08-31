@@ -43,6 +43,18 @@ def _redact_secrets(text: str) -> str:
     return text
 
 
+# HTTP statuses treated as transient and worth a retry. 430 is not an IANA-
+# registered code, but Blockchair uses it live for its own rate-limit/IP-
+# blacklist condition (confirmed live: api.blockchair.com returns 430 with
+# body {"context":{"error":"...temporary blacklisted due to exceeding usage
+# of API resources..."}} under burst load) -- without it here, a Blockchair
+# rate limit was never retried and fetch/fetch_json's next line (`return
+# None`) let it fall straight through to "no data returned", indistinguishable
+# from the address genuinely having no data. Shared by fetch and fetch_json
+# so both retry paths stay in sync rather than drifting as two literal tuples.
+_RETRYABLE_STATUSES = (429, 430, 500, 502, 503, 504)
+
+
 def _safe_predicate(predicate, body) -> bool:
     """Run a caller-supplied retryable_body predicate defensively: a
     predicate written against one API's error shape (dict with an 'error'
@@ -293,7 +305,7 @@ class BaseModule(ABC):
                     if resp.status in ok_statuses:
                         return scrub(await resp.text(), url)
                     # Retry on rate limit or server errors
-                    if resp.status in (429, 500, 502, 503, 504) and attempt < retries:
+                    if resp.status in _RETRYABLE_STATUSES and attempt < retries:
                         await asyncio.sleep(retry_delay * (2 ** attempt))
                         continue
                     return None
@@ -352,7 +364,7 @@ class BaseModule(ABC):
                             await asyncio.sleep(retry_delay * (2 ** attempt))
                             continue
                         return body
-                    if resp.status in (429, 500, 502, 503, 504) and attempt < retries:
+                    if resp.status in _RETRYABLE_STATUSES and attempt < retries:
                         await asyncio.sleep(retry_delay * (2 ** attempt))
                         continue
                     return None

@@ -199,7 +199,7 @@ def test_batch_output_schema_matches_the_documented_shape(tmp_path, monkeypatch)
     assert set(entry["result"].keys()) == {
         "entity_id", "address", "path", "hops", "exchange", "exchange_confidence",
         "attribution", "attribution_source", "wallet_role", "proximity", "direction",
-        "flags", "evidence_ids", "service_tags", "risk",
+        "flags", "evidence_ids", "service_tags", "risk", "data_source_status",
     }
 
 

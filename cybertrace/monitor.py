@@ -392,5 +392,6 @@ def run_watch(store: EvidenceStore, urls: Optional[List[str]] = None,
         report["successors"] = [s for s in results["successors"] if not s["suppressed"]]
         report["contradictions"] = results["contradictions"]
         report["risk_alerts"] = results["risk_alerts"]
+        report["data_source_status"] = results["data_source_status"]
         report["narrative"] = watch_narrative(store, case_id or "case", report["deltas"])
     return report

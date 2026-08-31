@@ -765,6 +765,31 @@ def _direction(flows: set) -> str:
     return DIRECTION_UNKNOWN
 
 
+def data_source_status() -> Dict[str, str]:
+    """FRESH / STALE / UNAVAILABLE for each offline dataset adapter
+    _vasp_endpoints reads (OFAC, GraphSense exchange_tags, Elliptic++).
+
+    Exists because ofac_labels()/exchange_labels() both return {} -- never
+    raise -- when their archive or index is missing (see ofac.py's own
+    docstring), so a wallet report with zero regulatory/tag hits reads
+    identically whether that means "checked, no match" or "corpus stale/
+    unavailable, nothing was actually checked". Without this, a stale local
+    OFAC download would silently understate a case's risk forever. Called
+    once per case report (run_correlation) and once per single-wallet report
+    (wallet_trace_report) -- each call is a handful of file stats plus one
+    indexed sqlite read, not a corpus scan.
+    """
+    from .integrations import ellipticpp, exchange_tags, ofac
+
+    def _status(mod) -> str:
+        if not (mod.available() and mod.index_available()):
+            return "UNAVAILABLE"
+        return "STALE" if mod.is_stale() else "FRESH"
+
+    return {"ofac": _status(ofac), "exchange_tags": _status(exchange_tags),
+            "ellipticpp": _status(ellipticpp)}
+
+
 def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, dict]:
     """entity_id -> the VASP (or, for REGULATORY_ATTESTED, OFAC-designated
     entity) attributed to that address, and how.
@@ -1461,6 +1486,10 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4,
     service/category intelligence, not a VASP claim and not proof of illicit
     activity, ownership, or a customer relationship.
 
+    `data_source_status` (see data_source_status()) is FRESH/STALE/UNAVAILABLE
+    per offline adapter this report's attribution reads -- so a reader never
+    mistakes "no OFAC/tag hit" for "OFAC/tag corpus wasn't actually checked".
+
     Returns None if `address` was never searched into this store at all.
     """
     from .detector import chain_caveat, detect_input_type
@@ -1530,6 +1559,7 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4,
         "evidence_ids": hit["evidence_ids"] if hit else [],
         "service_tags": service_tags,
         "risk": risk,
+        "data_source_status": data_source_status(),
     }
 
 
@@ -2546,6 +2576,14 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
              f"contradictions {len(results['contradictions'])} · "
              f"risk alerts {len(results.get('risk_alerts', []))}", ""]
 
+    status = results.get("data_source_status")
+    if status:
+        not_fresh = [name for name, state in status.items() if state != "FRESH"]
+        stale_note = (f" -- **not fresh: {', '.join(not_fresh)}**, a 'no match' "
+                      f"from these does not mean 'checked, clean'" if not_fresh else "")
+        lines += [f"_Data sources: {', '.join(f'{n}={s}' for n, s in status.items())}"
+                 f"{stale_note}_", ""]
+
     if results.get("risk_alerts"):
         lines += ["## High-risk wallet alerts", "",
                   "_Wallets whose risk-v1 score reached HIGH or CRITICAL, surfaced "
@@ -2819,8 +2857,16 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
            f"<title>{_esc(title)}</title><style>{DOSSIER_CSS}</style></head><body>",
            f"<h1>{_esc(title)}</h1>",
            f"<div class=sub>generated {_esc(utcnow())} · scores are ranked priors, "
-           f"not calibrated probabilities</div>",
-           "<div class=grid>"]
+           f"not calibrated probabilities</div>"]
+    status = results.get("data_source_status")
+    if status:
+        parts = [f"<span class='{'ok' if s == 'FRESH' else 'bad'}'>{_esc(n)}={_esc(s)}</span>"
+                for n, s in status.items()]
+        not_fresh = [n for n, s in status.items() if s != "FRESH"]
+        warn = (" — <span class=bad>not fresh: a 'no match' from these does not "
+               "mean 'checked, clean'</span>" if not_fresh else "")
+        out.append(f"<div class=sub>data sources: {' · '.join(parts)}{warn}</div>")
+    out.append("<div class=grid>")
     for label, n in (("candidates", len(d)),
                      ("operator", len(results.get("operators", []))),
                      ("infra", len(results.get("infra", []))),
@@ -3055,6 +3101,7 @@ def run_correlation(store: EvidenceStore, min_conf: float = 0.35,
     _attach_wallet_service_intelligence(store, results["wallet_exchange_paths"])
     _attach_wallet_risk(store, results["wallet_exchange_paths"])
     results["risk_alerts"] = _risk_alerts(results["wallet_exchange_paths"])
+    results["data_source_status"] = data_source_status()
     dossiers = [build_dossier(store, c, aliases, flags, windows)
                 for c in results["operators"] + results["infra"] + results["ips"]]
     for rank, d in enumerate(dossiers, 1):

@@ -37,12 +37,14 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+from . import _freshness
 from ..normalize import pgp_fingerprint
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "external_data" / "evolution"
 ZIP_PATH = DATA_DIR / "original" / "data-and-readme.zip"
 MANIFEST_PATH = DATA_DIR / "manifest.json"
 INDEX_PATH = DATA_DIR / "index.sqlite"
+_SOURCE_PATHS = (ZIP_PATH,)
 
 # Python's csv default field limit (131072 bytes) is too small for real rows
 # in this dataset -- measured: some forum/post.tsv posts (long PGP-signed
@@ -194,6 +196,16 @@ def index_available() -> bool:
     return INDEX_PATH.exists()
 
 
+def is_stale() -> bool:
+    """True if the index doesn't match data-and-readme.zip's current
+    size/mtime -- including an index built before this tracking existed, or
+    one with no index at all. See _freshness.py and ofac.is_stale (same
+    mechanism, DOI-pinned archive here instead of a periodically republished
+    one -- staleness in practice means "the local zip was replaced", not
+    "Zenodo published a new version")."""
+    return _freshness.is_stale(INDEX_PATH, _SOURCE_PATHS)
+
+
 def build_index(force: bool = False) -> Path:
     """Build a local read-only SQLite index of vendor PGP fingerprints, so a
     live-crawl lookup (darkweb_module._extract_pgp_keys, one call per key
@@ -208,12 +220,35 @@ def build_index(force: bool = False) -> Path:
     fallback to the O(n) scan would make the "efficient lookup" this index
     exists for invisible until a live crawl stalled on it.
 
+    force=False (the default) mirrors ofac/exchange_tags/ellipticpp: an index
+    whose recorded fingerprint still matches the zip's current size/mtime is
+    returned as-is; one with no recorded fingerprint (built before freshness
+    tracking existed) is stamped in place rather than re-parsed -- the data
+    hasn't changed, only the tracking is new. Only a fingerprint that has
+    actually changed triggers a real rebuild. force=True always rebuilds.
+
     The index itself stays local context (external_data/evolution/, already
     gitignored, and *.sqlite is gitignored globally) -- a cache over the
     dataset, not a copy of it into CyberTrace's own evidence.db.
     """
+    current_fp = _freshness.source_fingerprint(_SOURCE_PATHS)
     if INDEX_PATH.exists() and not force:
-        return INDEX_PATH
+        recorded_fp = _freshness.read_fingerprint(INDEX_PATH)
+        if recorded_fp == current_fp:
+            return INDEX_PATH
+        if recorded_fp is None:
+            _freshness.stamp(INDEX_PATH, current_fp)
+            return INDEX_PATH
+    # A real rebuild is about to trust this file's bytes -- verify against
+    # the manifest's own recorded checksum first (Loop 39 Section 5) so a
+    # corrupted/truncated local zip never silently becomes a queryable index.
+    # Zenodo's own published md5 sits alongside this in the manifest but is
+    # not re-checked here -- sha256_local is what was actually measured
+    # against THIS local file at download time, the same integrity claim
+    # is_stale's fingerprint makes, just content- instead of stat-based.
+    expected = next(f["sha256_local"] for f in manifest()["files"]
+                    if f["local"] == "original/data-and-readme.zip")
+    _freshness.verify_checksum(ZIP_PATH, expected)
     tmp_path = INDEX_PATH.with_suffix(".sqlite.building")
     tmp_path.unlink(missing_ok=True)
     conn = sqlite3.connect(tmp_path)
@@ -235,6 +270,7 @@ def build_index(force: bool = False) -> Path:
         conn.commit()
     finally:
         conn.close()
+    _freshness.stamp(tmp_path, current_fp)
     tmp_path.replace(INDEX_PATH)
     return INDEX_PATH
 

@@ -19,6 +19,7 @@ staleness this exists to prevent.
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from pathlib import Path
 from typing import Iterable, Optional
@@ -71,6 +72,35 @@ def read_fingerprint(index_path: Path) -> Optional[str]:
         return None  # no _freshness table at all: pre-dates this mechanism
     finally:
         conn.close()
+
+
+def verify_checksum(path: Path, expected_sha256: str) -> None:
+    """Raise RuntimeError if `path`'s actual SHA-256 doesn't match
+    `expected_sha256` -- corruption/truncation detection (Loop 39 Section 5),
+    a different concern from is_stale()'s cheap stat-based staleness check.
+
+    A real, not merely aspirational, integrity check: every one of these
+    archives is read-only after download and gitignored (never touched by
+    git), so a mismatch means the file changed on disk without going through
+    this project's own download step -- corruption, a partial write, or
+    tampering, not a newer publication (that is what is_stale's fingerprint
+    already tracks). Deliberately NOT called from is_stale/index_available's
+    fast paths (legacy-adopt, already-fresh) -- only from the real-rebuild
+    path each adapter's build_index() already takes when it is about to read
+    and trust the whole file's bytes, so this piggybacks on I/O the rebuild
+    was already paying for rather than adding a second full read on every
+    call.
+    """
+    actual = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            actual.update(chunk)
+    digest = actual.hexdigest()
+    if digest != expected_sha256:
+        raise RuntimeError(
+            f"{path.name}: checksum mismatch (manifest expects {expected_sha256}, "
+            f"local file is {digest}) -- the archive may be corrupted or "
+            f"truncated on disk. Re-download it before building an index from it.")
 
 
 def is_stale(index_path: Path, paths: Iterable[Path]) -> bool:

@@ -334,6 +334,18 @@ window.__resources = {
                 <div style="font-size:12px;color:#5a6367">suspect wallet → hop → counterparty → service/VASP → wallet role → risk</div>
               </div>
 
+              <sc-if value="{{ hasDataSources }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 0;font:400 11px/1 'IBM Plex Mono',monospace">
+                  <span style="color:#5a6367;letter-spacing:1px">DATA SOURCES</span>
+                  <sc-for list="{{ dataSources }}" as="d" hint-placeholder-count="3">
+                    <span style="color:{{ d.isFresh ? '#4a9d7f' : '#d97a6c' }}">{{ d.name }}={{ d.state }}</span>
+                  </sc-for>
+                  <sc-if value="{{ hasStaleDataSource }}" hint-placeholder-val="{{ false }}">
+                    <span style="color:#d97a6c">— not fresh: a "no match" above does not mean "checked, clean"</span>
+                  </sc-if>
+                </div>
+              </sc-if>
+
               <sc-if value="{{ hasWallets }}" hint-placeholder-val="{{ true }}">
                 <sc-for list="{{ wallets }}" as="w" hint-placeholder-count="2">
                   <div style="border:1px solid #1c2427;border-top:none;background:#0d1012;padding:20px 22px;display:flex;flex-direction:column;gap:16px">
@@ -843,7 +855,7 @@ const searchUrl = (q) => API_BASE + '/api/search?q=' + encodeURIComponent(q);
 const apiFetch = (url, opts) => fetch(url, window.__CT_API_KEY
   ? { ...opts, headers: { ...(opts && opts.headers), 'X-CT-Api-Key': window.__CT_API_KEY } }
   : opts);
-const EMPTY_CASE = { case_id:'', title:'', stats:[], candidates:[], drawers:{}, evidence:[], timeline:[], captures:[], suppressed:[], markets:[], market_relationships:[], notes:[], wallet_exchange_paths:[], risk_alerts:[] };
+const EMPTY_CASE = { case_id:'', title:'', stats:[], candidates:[], drawers:{}, evidence:[], timeline:[], captures:[], suppressed:[], markets:[], market_relationships:[], notes:[], wallet_exchange_paths:[], risk_alerts:[], data_source_status:{} };
 
 const ETYPE_COLOR = { PGP_KEY:C.violet, EMAIL:C.green, BTC_ADDRESS:C.sand, ONION_ADDRESS:C.cyan, IP:'#4c565a' };
 
@@ -973,12 +985,23 @@ function walletTabVals(cd) {
   const alertIds = new Set((cd.risk_alerts || []).map(w => w.entity_id));
   const wallets = paths.map(w => Object.assign(
     walletRow(w, valueById), { isAlert: alertIds.has(w.entity_id) }));
+  // Loop 39 Section 4: cd.data_source_status is FRESH/STALE/UNAVAILABLE per
+  // offline adapter (correlate.data_source_status()) -- surfaced once here,
+  // not recomputed, so "no OFAC/tag hit" on any card above is never mistaken
+  // for "corpus was actually checked and is clean".
+  const dss = cd.data_source_status || {};
+  const dataSources = Object.keys(dss).map(name => ({
+    name, state: dss[name], isFresh: dss[name] === 'FRESH',
+  }));
   return {
     wallets,
     hasWallets: wallets.length > 0,
     hasNoWallets: wallets.length === 0,
     walletAlerts: wallets.filter(w => w.isAlert),
     hasWalletAlerts: alertIds.size > 0,
+    dataSources,
+    hasDataSources: dataSources.length > 0,
+    hasStaleDataSource: dataSources.some(d => !d.isFresh),
   };
 }
 

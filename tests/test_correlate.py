@@ -19,7 +19,7 @@ from cybertrace.correlate import (
     canonical_entity_key, candidate_infra, candidate_ips, candidate_operators,
     confidence_level, contradiction_anchor, contradictions_from_identity,
     contradictions_from_key_temporal,
-    crypto_clusters, detect_successors,
+    crypto_clusters, data_source_status, detect_successors,
     entity_discrimination, entity_funnel_profile, evidence_chain, feedback_discrimination,
     market_artifact_map, markets_for_entity,
     market_windows, render_dossier_html, render_html, render_markdown, run_correlation,
@@ -3840,6 +3840,74 @@ def test_risk_alerts_is_empty_when_nothing_reaches_high_or_critical(tmp_path):
         results = run_correlation(store)
         assert results["risk_alerts"] == []
         assert "High-risk wallet alerts" not in render_markdown(results["dossiers"], results)
+
+
+class TestDataSourceStatus:
+    """Loop 39 Section 4: ofac_labels()/exchange_labels() both return {} --
+    never raise -- when their local corpus is missing or stale (see ofac.py's
+    own docstring), so a wallet report with zero regulatory/tag hits used to
+    read identically whether that meant "checked, no match" or "corpus
+    stale/unavailable, nothing was actually checked". data_source_status()
+    is the fix: FRESH/STALE/UNAVAILABLE per adapter, deterministic here via
+    monkeypatch rather than depending on whatever corpus state this checkout
+    happens to have."""
+
+    def _patch(self, monkeypatch, *, available=True, index_available=True, stale=False):
+        from cybertrace.integrations import ellipticpp, exchange_tags, ofac
+        for mod in (ofac, exchange_tags, ellipticpp):
+            monkeypatch.setattr(mod, "available", lambda a=available: a)
+            monkeypatch.setattr(mod, "index_available", lambda i=index_available: i)
+            monkeypatch.setattr(mod, "is_stale", lambda s=stale: s)
+
+    def test_fresh_when_available_indexed_and_not_stale(self, monkeypatch):
+        self._patch(monkeypatch, available=True, index_available=True, stale=False)
+        status = data_source_status()
+        assert status == {"ofac": "FRESH", "exchange_tags": "FRESH", "ellipticpp": "FRESH"}
+
+    def test_stale_when_index_no_longer_matches_the_source(self, monkeypatch):
+        self._patch(monkeypatch, available=True, index_available=True, stale=True)
+        status = data_source_status()
+        assert all(v == "STALE" for v in status.values())
+
+    def test_unavailable_when_archive_was_never_downloaded(self, monkeypatch):
+        self._patch(monkeypatch, available=False, index_available=False, stale=True)
+        status = data_source_status()
+        assert all(v == "UNAVAILABLE" for v in status.values())
+
+    def test_unavailable_when_archive_present_but_index_never_built(self, monkeypatch):
+        # available() True (the raw download exists) but index_available()
+        # False (build_index() was never run) -- still UNAVAILABLE, not FRESH,
+        # since no query can actually run against it yet.
+        self._patch(monkeypatch, available=True, index_available=False, stale=True)
+        status = data_source_status()
+        assert all(v == "UNAVAILABLE" for v in status.values())
+
+    def test_a_genuine_no_match_is_distinguishable_from_an_unavailable_source(self, monkeypatch, tmp_path):
+        """The critical invariant this section exists to protect: a wallet
+        with zero OFAC/tag hits must carry an explicit UNAVAILABLE marker
+        when the corpus genuinely can't be checked, so a reader never mistakes
+        silence for a clean result."""
+        from cybertrace.integrations import ellipticpp, exchange_tags, ofac
+        for mod in (ofac, exchange_tags, ellipticpp):
+            monkeypatch.setattr(mod, "available", lambda: False)
+        with EvidenceStore(str(tmp_path / "no_source.db")) as store:
+            _traced(store, BTC_VALID, {"sent_to_addresses": []})
+            report = wallet_trace_report(store, BTC_VALID)
+        assert report["attribution"] is None          # no VASP/OFAC hit found
+        assert report["data_source_status"]["ofac"] == "UNAVAILABLE"
+        assert report["data_source_status"]["exchange_tags"] == "UNAVAILABLE"
+
+    def test_a_genuine_ofac_match_reports_fresh_alongside_regulatory_attested(self, tmp_path):
+        """Positive control, real data: the Polyanin OFAC designation (used
+        throughout this file) must show up as REGULATORY_ATTESTED with the
+        OFAC source reporting FRESH -- not just "no exception was raised"."""
+        _skip_unless_real_sources_available()
+        with EvidenceStore(str(tmp_path / "polyanin_fresh.db")) as store:
+            suspect_id = _real_polyanin_case(store)
+            results = run_correlation(store)
+        hit = next(w for w in results["wallet_exchange_paths"] if w["entity_id"] == suspect_id)
+        assert hit["attribution"] == REGULATORY_ATTESTED
+        assert results["data_source_status"]["ofac"] == "FRESH"
 
 
 def test_direct_vasp_contacts_is_empty_when_the_self_attributed_suspect_has_no_other_direct_vasp_relationship(tmp_path):

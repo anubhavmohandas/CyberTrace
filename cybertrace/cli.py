@@ -351,6 +351,8 @@ def watch(db_path: str, targets, discover: bool, output_format: str,
             click.echo(f"\nRe-checked {len(report['checked'])} target(s) and "
                        f"{len(report['wallets_checked'])} wallet(s) "
                        f"at {report['checked_at']}\n")
+            if report.get('data_source_status'):
+                _echo_data_source_status(report['data_source_status'])
             for row in report['checked']:
                 colour = {'DARK': 'red', 'CHANGED': 'yellow',
                           'BACK_UP': 'green'}.get(row['status'], None)
@@ -562,6 +564,21 @@ def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: s
                   f"{', '.join(risk['risk_categories'])}")
         for reason in risk['risk_reasons']:
             click.echo(f"  - {reason}")
+
+    _echo_data_source_status(report['data_source_status'])
+
+
+def _echo_data_source_status(status: dict) -> None:
+    """One line, always printed: FRESH/STALE/UNAVAILABLE per offline
+    attribution source this report drew on. Not gated behind a --verbose
+    flag -- a "no match" reader can't tell it apart from a stale/unavailable
+    corpus any other way (Loop 39 Section 4)."""
+    line = ", ".join(f"{name}={state}" for name, state in status.items())
+    not_fresh = [name for name, state in status.items() if state != "FRESH"]
+    click.echo(f"Data sources: {line}")
+    if not_fresh:
+        click.echo(f"  [!] not fresh: {', '.join(not_fresh)} -- "
+                  f"a 'no match' from these does not mean 'checked, clean'", err=True)
 
 
 def _parse_batch_rows(path: str) -> list:
