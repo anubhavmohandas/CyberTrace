@@ -312,6 +312,95 @@ window.__resources = {
           </div>
         </sc-if>
 
+        <sc-if value="{{ tabWallets }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;flex-direction:column;gap:32px;max-width:1080px">
+
+            <sc-if value="{{ hasWalletAlerts }}" hint-placeholder-val="{{ false }}">
+              <div>
+                <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#d97a6c;padding-bottom:12px;border-bottom:1px solid #171c1f">HIGH-RISK WALLET ALERTS</div>
+                <sc-for list="{{ walletAlerts }}" as="w" hint-placeholder-count="1">
+                  <div style="border:1px solid #4a2e2a;border-top:none;background:#160f0e;padding:14px 18px;display:flex;justify-content:space-between;align-items:center;gap:16px">
+                    <div style="font:500 13px/1 'IBM Plex Mono',monospace;color:#edf2f4">{{ w.address }}</div>
+                    <div style="font:600 12px/1 'IBM Plex Mono',monospace;letter-spacing:1.2px;color:{{ w.riskColor }};border:1px solid {{ w.riskColor }};padding:6px 10px;flex:none">{{ w.riskLevel }} — {{ w.riskScore }}</div>
+                  </div>
+                </sc-for>
+                <div style="border:1px solid #4a2e2a;border-top:none"></div>
+              </div>
+            </sc-if>
+
+            <div>
+              <div style="display:flex;align-items:baseline;gap:12px;padding-bottom:12px;border-bottom:1px solid #171c1f">
+                <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#67716f">WALLET → VASP REACHABILITY</div>
+                <div style="font-size:12px;color:#5a6367">suspect wallet → hop → counterparty → service/VASP → wallet role → risk</div>
+              </div>
+
+              <sc-if value="{{ hasWallets }}" hint-placeholder-val="{{ true }}">
+                <sc-for list="{{ wallets }}" as="w" hint-placeholder-count="2">
+                  <div style="border:1px solid #1c2427;border-top:none;background:#0d1012;padding:20px 22px;display:flex;flex-direction:column;gap:16px">
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px">
+                      <div>
+                        <div style="font:500 15px/1 'IBM Plex Mono',monospace;color:#edf2f4">{{ w.address }}</div>
+                        <div style="color:#879196;font-size:12.5px;margin-top:8px">{{ w.proximity }} · {{ w.hops }} hop(s) · fund flow {{ w.direction }}</div>
+                      </div>
+                      <div style="font:600 12px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:{{ w.riskColor }};border:1px solid {{ w.riskColor }};padding:6px 10px;flex:none">{{ w.riskLevel }}</div>
+                    </div>
+
+                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;border-top:1px solid #171c1f;padding-top:16px;font:400 11.5px/1 'IBM Plex Mono',monospace">
+                      <sc-for list="{{ w.pathSteps }}" as="p" hint-placeholder-count="2">
+                        <span style="display:flex;align-items:center;gap:8px">
+                          <span style="color:#c5ccd0;border:1px solid #262d31;padding:5px 9px">{{ p.address }}</span>
+                          <sc-if value="{{ p.hasArrow }}" hint-placeholder-val="{{ false }}"><span style="color:#495255">→</span></sc-if>
+                        </span>
+                      </sc-for>
+                      <sc-if value="{{ w.hasExchange }}" hint-placeholder-val="{{ false }}">
+                        <span style="color:#495255">→</span>
+                        <span style="color:#2fb4e8;border:1px solid #163a4a;padding:5px 9px">{{ w.exchange }}</span>
+                        <sc-if value="{{ w.hasWalletRole }}" hint-placeholder-val="{{ false }}">
+                          <span style="color:#495255">→</span>
+                          <span style="color:#c2b280;border:1px solid #3a341f;padding:5px 9px">{{ w.walletRole }}</span>
+                        </sc-if>
+                      </sc-if>
+                    </div>
+
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-top:1px solid #171c1f;padding-top:16px">
+                      <div style="padding-right:22px">
+                        <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#2fb4e8;margin-bottom:10px">VASP ATTRIBUTION</div>
+                        <div style="font-size:12.5px;color:#c5ccd0">{{ w.attributionLine }}</div>
+                        <div style="font:400 10.5px/1.5 'IBM Plex Mono',monospace;color:#5a6367;margin-top:6px;word-break:break-all">{{ w.attributionSource }}</div>
+                      </div>
+                      <div style="padding-left:22px;border-left:1px solid #171c1f">
+                        <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:10px">RISK EVIDENCE — {{ w.riskCategories }}</div>
+                        <div style="display:flex;flex-direction:column;gap:6px">
+                          <sc-for list="{{ w.riskReasons }}" as="r" hint-placeholder-count="1">
+                            <div style="font-size:12px;color:#879196;line-height:1.5">— {{ r }}</div>
+                          </sc-for>
+                        </div>
+                      </div>
+                    </div>
+
+                    <sc-if value="{{ w.hasServiceTags }}" hint-placeholder-val="{{ false }}">
+                      <div style="border-top:1px solid #171c1f;padding-top:14px">
+                        <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#c2b280;margin-bottom:8px">SERVICE TAGS (non-VASP: mixer/DeFi/CoinJoin)</div>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap">
+                          <sc-for list="{{ w.serviceTags }}" as="t" hint-placeholder-count="1">
+                            <span style="font-size:11.5px;color:#c2b280;border:1px solid #3a341f;padding:4px 9px">{{ t.label }}</span>
+                          </sc-for>
+                        </div>
+                      </div>
+                    </sc-if>
+                  </div>
+                </sc-for>
+                <div style="border:1px solid #1c2427;border-top:none"></div>
+              </sc-if>
+              <sc-if value="{{ hasNoWallets }}" hint-placeholder-val="{{ false }}">
+                <div style="border:1px solid #1c2427;background:#0d1012;padding:20px 22px;color:#5a6367;font-size:12.5px">
+                  No traced wallet in this case has a path to a labeled exchange yet — search a wallet address and re-run correlate to populate this view.
+                </div>
+              </sc-if>
+            </div>
+          </div>
+        </sc-if>
+
         <sc-if value="{{ tabGraph }}" hint-placeholder-val="{{ false }}">
           <div style="display:flex;flex-direction:column;gap:14px">
             <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px">
@@ -754,7 +843,7 @@ const searchUrl = (q) => API_BASE + '/api/search?q=' + encodeURIComponent(q);
 const apiFetch = (url, opts) => fetch(url, window.__CT_API_KEY
   ? { ...opts, headers: { ...(opts && opts.headers), 'X-CT-Api-Key': window.__CT_API_KEY } }
   : opts);
-const EMPTY_CASE = { case_id:'', title:'', stats:[], candidates:[], drawers:{}, evidence:[], timeline:[], captures:[], suppressed:[], markets:[], market_relationships:[], notes:[] };
+const EMPTY_CASE = { case_id:'', title:'', stats:[], candidates:[], drawers:{}, evidence:[], timeline:[], captures:[], suppressed:[], markets:[], market_relationships:[], notes:[], wallet_exchange_paths:[], risk_alerts:[] };
 
 const ETYPE_COLOR = { PGP_KEY:C.violet, EMAIL:C.green, BTC_ADDRESS:C.sand, ONION_ADDRESS:C.cyan, IP:'#4c565a' };
 
@@ -826,6 +915,71 @@ function buildGraph(cd) {
                  color: r.suppressed ? C.red : '#4a575c', w:1.8, dash: r.suppressed ? '5 5' : '0' });
   });
   return { nodes, edges };
+}
+
+// Loop 38 Section 2: the Wallets tab. Reuses cd.wallet_exchange_paths /
+// cd.risk_alerts exactly as run_correlation computed them (tools/
+// export_case_gui.py's build_payload already carries both through
+// unchanged) -- no second attribution/risk computation lives here, only
+// display shaping, same discipline every other tab in this file already
+// follows for candidates/evidence/graph.
+const RISK_COLOR = { CRITICAL:C.red, HIGH:'#d97a6c', MODERATE:C.sand, LOW:C.green, INSUFFICIENT_EVIDENCE:'#67716f' };
+
+function walletRow(w, valueById) {
+  const risk = w.risk || {};
+  const riskLevel = risk.risk_level || 'INSUFFICIENT_EVIDENCE';
+  const path = w.path || [];
+  return {
+    key: w.entity_id,
+    address: short(w.value, 26),
+    fullAddress: w.value,
+    hops: w.hops,
+    proximity: w.proximity,
+    direction: w.direction,
+    pathSteps: path.map((eid, i) => ({
+      // valueById, not cd.drawers: drawers only covers dossier CANDIDATES
+      // (cross-market attribution subjects), which a wallet-only case has
+      // none of -- every node in a wallet_exchange_paths path is itself a
+      // top-level entry in that same list (the BFS that finds the path
+      // visits and scores every node along it), so this never falls back
+      // to a raw, meaningless entity_id the way cd.drawers did.
+      address: short(valueById[eid] || eid, 18),
+      hasArrow: i < path.length - 1,
+    })),
+    hasExchange: !!w.exchange,
+    exchange: w.exchange || '',
+    walletRole: w.wallet_role || '',
+    hasWalletRole: !!w.wallet_role,
+    attributionLine: w.attribution ? w.attribution.replace(/_/g, ' ') +
+      ' — reachability confidence ' + (w.confidence != null ? w.confidence.toFixed(2) : '—') : '',
+    attributionSource: w.attribution_source || '',
+    riskLevel, riskColor: RISK_COLOR[riskLevel] || '#67716f',
+    riskScore: risk.risk_score != null ? String(risk.risk_score) : '—',
+    riskCategories: (risk.risk_categories || []).join(', '),
+    riskReasons: risk.risk_reasons || [],
+    serviceTags: (w.service_tags || []).map(t => ({ label: t.label || (t.category || '').replace(/_/g, ' ') })),
+    hasServiceTags: !!(w.service_tags && w.service_tags.length),
+  };
+}
+
+function walletTabVals(cd) {
+  const paths = cd.wallet_exchange_paths || [];
+  const valueById = {};
+  paths.forEach(w => { valueById[w.entity_id] = w.value; });
+  // Alert membership is read off cd.risk_alerts (correlate._risk_alerts'
+  // own HIGH/CRITICAL filter), never recomputed from riskLevel here --
+  // "no surface independently recomputes risk" holds for the alert
+  // threshold too, not only the score itself.
+  const alertIds = new Set((cd.risk_alerts || []).map(w => w.entity_id));
+  const wallets = paths.map(w => Object.assign(
+    walletRow(w, valueById), { isAlert: alertIds.has(w.entity_id) }));
+  return {
+    wallets,
+    hasWallets: wallets.length > 0,
+    hasNoWallets: wallets.length === 0,
+    walletAlerts: wallets.filter(w => w.isAlert),
+    hasWalletAlerts: alertIds.size > 0,
+  };
 }
 
 class Component extends DCLogic {
@@ -1049,12 +1203,15 @@ class Component extends DCLogic {
         ? [{ text:'case data failed to load: ' + st.loadError, color:C.red }]
         : cd.case_id ? [{ text:`${cd.candidates.length} candidate(s), ${cd.suppressed.length} objection(s)`, color:C.cyan }] : [],
 
-      tabs: ['Overview','Graph','Evidence','Timeline','Sources','Report'].map(t => ({
+      ...walletTabVals(cd),
+
+      tabs: ['Overview','Wallets','Graph','Evidence','Timeline','Sources','Report'].map(t => ({
         label:t, color: st.tab === t ? '#edf2f4' : '#7c878c',
         underline: st.tab === t ? C.cyan : 'transparent',
         select: () => this.set({ tab:t, snapshot:null })
       })),
-      tabOverview: st.tab === 'Overview', tabGraph: st.tab === 'Graph', tabEvidence: st.tab === 'Evidence',
+      tabOverview: st.tab === 'Overview', tabWallets: st.tab === 'Wallets', tabGraph: st.tab === 'Graph',
+      tabEvidence: st.tab === 'Evidence',
       tabTimeline: st.tab === 'Timeline', tabSources: st.tab === 'Sources', tabReport: st.tab === 'Report',
 
       stats: cd.stats,

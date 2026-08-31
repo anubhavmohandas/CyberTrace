@@ -26,12 +26,14 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
-from ..normalize import norm_bnb, norm_btc, norm_eth, norm_tron
+from . import _freshness
+from ..normalize import norm_bnb, norm_btc, norm_eth, norm_sol, norm_tron
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "external_data" / "ofac"
 XML_PATH = DATA_DIR / "original" / "sdn_advanced.xml"
 MANIFEST_PATH = DATA_DIR / "manifest.json"
 INDEX_PATH = DATA_DIR / "index.sqlite"
+_SOURCE_PATHS = (XML_PATH,)
 
 # OFAC's own FeatureType label -> the currency code the rest of CyberTrace
 # uses. Only chains CyberTrace has an entity type for -- everything else the
@@ -42,9 +44,14 @@ INDEX_PATH = DATA_DIR / "index.sqlite"
 # space, so both map to the one BNB_ADDRESS currency code -- there is no
 # separate "MATIC"/"Polygon" FeatureType anywhere in that file, so Polygon
 # gets no entry here (nothing to map, not an oversight; see docs/LOOP34
-# Module 2/3 report).
-_ASSET_TO_CURRENCY = {"XBT": "BTC", "ETH": "ETH", "BNB": "BNB", "BSC": "BNB", "TRX": "TRX"}
-_NORMALIZERS = {"BTC": norm_btc, "ETH": norm_eth, "BNB": norm_bnb, "TRX": norm_tron}
+# Module 2/3 report). "SOL" (Loop 38 Section 8) is real too: 1 FeatureType,
+# 4 designated addresses across 3 entities (Sokolovski Rolan, Rashevskyi
+# Dmytro x2, SHPS Shelbit) -- checked directly against this file, not
+# assumed from the schema's asset-type list alone.
+_ASSET_TO_CURRENCY = {"XBT": "BTC", "ETH": "ETH", "BNB": "BNB", "BSC": "BNB",
+                      "TRX": "TRX", "SOL": "SOL"}
+_NORMALIZERS = {"BTC": norm_btc, "ETH": norm_eth, "BNB": norm_bnb, "TRX": norm_tron,
+                "SOL": norm_sol}
 
 
 def manifest() -> Dict[str, Any]:
@@ -61,6 +68,17 @@ def available() -> bool:
 def index_available() -> bool:
     """Whether the local lookup index has been built (see build_index)."""
     return INDEX_PATH.exists()
+
+
+def is_stale() -> bool:
+    """True if the index doesn't match the SDN Advanced XML's current
+    size/mtime -- including an index built before this tracking existed, or
+    one with no index at all. See _freshness.py for why size+mtime (not a
+    full content hash) and why an unknown state reads as stale rather than
+    fresh. A caller (e.g. bitcoin_module._check_exchange_tags's OFAC
+    sibling, or a case-level report) should surface this rather than
+    silently querying a possibly-obsolete sanctions list."""
+    return _freshness.is_stale(INDEX_PATH, _SOURCE_PATHS)
 
 
 def _local(tag: str) -> str:
@@ -143,9 +161,24 @@ def build_index(force: bool = False) -> Path:
     A one-time, offline step -- not run implicitly by lookup_address, which
     raises a clear error instead if the index is missing, same contract as
     exchange_tags.build_index.
+
+    force=False (the default) does the cheapest thing that keeps the index
+    honest: an index whose recorded fingerprint still matches the XML's
+    current size/mtime is returned as-is; one with NO recorded fingerprint
+    (built before freshness tracking existed) is stamped with the current
+    fingerprint in place rather than re-parsed -- the data hasn't changed,
+    only the tracking is new, so paying for a full rescan would be pure
+    waste. Only a fingerprint that has actually changed -- the raw XML was
+    genuinely replaced -- triggers a real rebuild. force=True always rebuilds.
     """
+    current_fp = _freshness.source_fingerprint(_SOURCE_PATHS)
     if INDEX_PATH.exists() and not force:
-        return INDEX_PATH
+        recorded_fp = _freshness.read_fingerprint(INDEX_PATH)
+        if recorded_fp == current_fp:
+            return INDEX_PATH
+        if recorded_fp is None:
+            _freshness.stamp(INDEX_PATH, current_fp)
+            return INDEX_PATH
     tmp_path = INDEX_PATH.with_suffix(".sqlite.building")
     tmp_path.unlink(missing_ok=True)
     conn = sqlite3.connect(tmp_path)
@@ -165,6 +198,7 @@ def build_index(force: bool = False) -> Path:
         conn.commit()
     finally:
         conn.close()
+    _freshness.stamp(tmp_path, current_fp)
     tmp_path.replace(INDEX_PATH)
     return INDEX_PATH
 

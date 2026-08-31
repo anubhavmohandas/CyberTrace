@@ -42,7 +42,7 @@ CHECK_FAILED = "CHECK_FAILED"
 # second, redundant way to get the same answer wrong if it ever disagreed.
 _CHAIN_MODULE_TYPE = {"BTC_ADDRESS": "bitcoin", "ETH_ADDRESS": "ethereum",
                       "BNB_ADDRESS": "bnb", "POLYGON_ADDRESS": "polygon",
-                      "TRX_ADDRESS": "tron"}
+                      "TRX_ADDRESS": "tron", "SOL_ADDRESS": "solana"}
 
 
 def watch_targets(store: EvidenceStore) -> List[dict]:
@@ -89,7 +89,7 @@ def wallet_targets(store: EvidenceStore) -> List[dict]:
         "JOIN observations o ON o.entity_id = e.entity_id "
         "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
         "JOIN targets t ON t.target_id = s.target_id "
-        "WHERE e.etype IN ('BTC_ADDRESS','ETH_ADDRESS','BNB_ADDRESS','POLYGON_ADDRESS','TRX_ADDRESS') "
+        "WHERE e.etype IN ('BTC_ADDRESS','ETH_ADDRESS','BNB_ADDRESS','POLYGON_ADDRESS','TRX_ADDRESS','SOL_ADDRESS') "
         "AND o.extraction_method LIKE '%:enrichment' "
         "ORDER BY t.last_seen DESC")
     return [{"entity_id": r["entity_id"], "etype": r["etype"], "address": r["address"],

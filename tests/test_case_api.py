@@ -271,6 +271,47 @@ def test_search_endpoint_no_module_for_type(tmp_path, monkeypatch):
         assert "error" in body
 
 
+def test_case_db_path_rejects_traversal_and_absolute_segments():
+    """Unit-level pin on the guard itself (Loop 38 defect hunt): case_id
+    reaches cases_dir / f"{case_id}.db" with nothing else validating it --
+    a bare filename-stem allowlist is the fix, not a ".." blacklist (which
+    an absolute right-hand path -- Path.__truediv__ discards the left side
+    entirely for one -- or an encoded separator can bypass)."""
+    cases_dir = Path("/some/cases/dir")
+    assert case_api._case_db_path(cases_dir, "tortaxi") == cases_dir / "tortaxi.db"
+    for hostile in ("../outside/secret", "..", "/etc/passwd", "a/b",
+                    "a/../../b", "", ".", "..%2fsecret"):
+        assert case_api._case_db_path(cases_dir, hostile) is None
+
+
+def test_case_endpoint_rejects_a_live_path_traversal_attempt(tmp_path):
+    """Reproduces the exact live exploit shape a defect hunt confirmed
+    against the pre-fix handler: a %2f-encoded ".." segment survives
+    unquote() as a real path separator and used to reach a *.db file
+    entirely outside --cases-dir. Must now 404 like any other bad case_id,
+    not read the file."""
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with EvidenceStore(str(outside / "secret.db")) as store:
+        store.update_case(name="should never be reachable over the API")
+
+    with _running_server(cases_dir) as base:
+        status, body = _get(f"{base}/api/case/..%2foutside%2fsecret")
+        assert status == 404
+        assert "error" in body
+
+        status, body = _get(f"{base}/api/case/..%2foutside%2fsecret/snapshot/x")
+        assert status == 404
+        assert "error" in body
+
+        status, resp = _post(f"{base}/api/case/..%2foutside%2fsecret/verdict",
+                             {"candidate_id": "OP-x", "outcome": "CONFIRMED"})
+        assert status == 404
+        assert "error" in resp
+
+
 def test_snapshot_endpoint_returns_real_payload(tmp_path):
     cases_dir = tmp_path / "cases"
     cases_dir.mkdir()

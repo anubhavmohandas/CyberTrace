@@ -24,9 +24,11 @@ import functools
 import hmac
 import json
 import os
+import re
 import sys
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -50,6 +52,28 @@ API_KEY = os.environ.get("CT_API_KEY", "")
 ALLOWED_ORIGIN = os.environ.get("CT_ALLOWED_ORIGIN", "*")
 
 
+# case_id/`rest` below reach every one of these call sites straight off the
+# URL path (do_GET/do_POST) with nothing else validating them. A bare
+# filename-stem allowlist is the root-cause fix, applied once here rather
+# than patched into each of the four `cases_dir / f"{case_id}.db"` sites
+# individually: a blacklist against ".." is easy to bypass (an absolute
+# path -- Path.__truediv__ with an absolute right operand discards the left
+# side entirely, e.g. Path("cases") / "/etc/passwd" == Path("/etc/passwd")
+# -- or an encoded separator), while this only ever accepts what the CLI
+# itself already produces as a case_id (a `--db cases/<name>.db` stem).
+_CASE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _case_db_path(cases_dir: Path, case_id: str) -> Optional[Path]:
+    """The on-disk *.db path for `case_id`, or None if it isn't a bare
+    filename stem -- treated identically to "no such case" by every caller,
+    so a traversal attempt gets the same 404 a typo would, not a distinct
+    error that would confirm the guard exists."""
+    if not _CASE_ID_RE.match(case_id):
+        return None
+    return cases_dir / f"{case_id}.db"
+
+
 def case_summary(db_path: Path) -> dict:
     with EvidenceStore(str(db_path)) as store:
         info = store.case_info()
@@ -58,8 +82,8 @@ def case_summary(db_path: Path) -> dict:
 
 
 def case_payload(cases_dir: Path, case_id: str) -> dict | None:
-    db_path = cases_dir / f"{case_id}.db"
-    if not db_path.is_file():
+    db_path = _case_db_path(cases_dir, case_id)
+    if db_path is None or not db_path.is_file():
         return None
     with EvidenceStore(str(db_path)) as store:
         title = store.case_info().get("name") or case_id
@@ -93,8 +117,8 @@ def run_search(target: str) -> dict:
 
 
 def snapshot_body(cases_dir: Path, case_id: str, snapshot_id: str) -> dict | None:
-    db_path = cases_dir / f"{case_id}.db"
-    if not db_path.is_file():
+    db_path = _case_db_path(cases_dir, case_id)
+    if db_path is None or not db_path.is_file():
         return None
     with EvidenceStore(str(db_path)) as store:
         return store.snapshot_payload(snapshot_id)
@@ -158,8 +182,8 @@ def make_handler(cases_dir: Path):
             return self._json({"error": "not found"}, status=404)
 
         def _investigator_answer(self, case_id: str) -> None:
-            db_path = cases_dir / f"{case_id}.db"
-            if not db_path.is_file():
+            db_path = _case_db_path(cases_dir, case_id)
+            if db_path is None or not db_path.is_file():
                 return self._json({"error": "no such case"}, status=404)
             length = int(self.headers.get("Content-Length", 0))
             try:
@@ -175,8 +199,8 @@ def make_handler(cases_dir: Path):
             return self._json(result, status=200)
 
         def _save_verdict(self, case_id: str) -> None:
-            db_path = cases_dir / f"{case_id}.db"
-            if not db_path.is_file():
+            db_path = _case_db_path(cases_dir, case_id)
+            if db_path is None or not db_path.is_file():
                 return self._json({"error": "no such case"}, status=404)
             length = int(self.headers.get("Content-Length", 0))
             try:

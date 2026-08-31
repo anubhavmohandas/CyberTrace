@@ -29,10 +29,19 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+from . import _freshness
+
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "external_data" / "ellipticpp"
 ORIGINAL_DIR = DATA_DIR / "original"
 MANIFEST_PATH = DATA_DIR / "manifest.json"
 INDEX_PATH = DATA_DIR / "index.sqlite"
+# Only the two files build_index() actually reads -- not all 9 raw CSVs this
+# dataset ships. wallets_classes.csv/txs_*.csv back iter_transactions/
+# wallet_label_counts, standalone offline-evaluation helpers that never
+# inform the SQLite index, so a change to one of them must not be reported
+# as making the index stale when nothing the index contains has changed.
+_SOURCE_PATHS = (ORIGINAL_DIR / "wallets_features_classes_combined.csv",
+                 ORIGINAL_DIR / "AddrAddr_edgelist.csv")
 
 # Elliptic/Elliptic++ convention, both datasets: 1=illicit, 2=licit, 3=unknown.
 CLASS_NAMES = {"1": "illicit", "2": "licit", "3": "unknown"}
@@ -44,7 +53,28 @@ def manifest() -> Dict[str, Any]:
 
 
 def available() -> bool:
-    """Whether the dataset was actually downloaded into original/."""
+    """Whether the dataset was actually downloaded into original/.
+
+    Deliberately still required even though every live query
+    (lookup_wallet/wallet_neighbors) only ever reads INDEX_PATH, never these
+    CSVs directly (Loop 38 Section 7 reassessment). NOT because is_stale()
+    needs it: source_fingerprint() already treats a missing source file as
+    "changed" (see _freshness.py), so a raw file deleted after a successful
+    build is caught by is_stale() -> True on its own, with or without this
+    check -- freshness does not depend on the raw archive staying put.
+    Kept for two narrower reasons instead: (1) an operator whose raw CSVs
+    are gone cannot rebuild the index at all if it ever needs one (a
+    genuinely different, worse state than "just needs a rebuild", worth its
+    own clearer error rather than collapsing into the same "stale" message);
+    (2) this dataset's license_status is UNKNOWN (see manifest.json) and its
+    archive_sha256 exists precisely so a future provenance-verification step
+    could confirm the index traces back to the exact cited file -- nothing
+    in this codebase performs that check yet, so this is a documented option
+    being kept open, not a current invariant anything enforces today.
+    Neither reason is safety-critical the way freshness is; this is
+    intentional policy, not leftover storage coupling, but also not a hard
+    requirement -- revisit if disk footprint (2GB+ for this dataset alone)
+    ever becomes the actual operational constraint."""
     return (ORIGINAL_DIR / "wallets_features_classes_combined.csv").exists()
 
 
@@ -122,6 +152,14 @@ def index_available() -> bool:
     return INDEX_PATH.exists()
 
 
+def is_stale() -> bool:
+    """True if the index doesn't match the two source CSVs' current
+    size/mtime -- including an index built before this tracking existed, or
+    one with no index at all. See _freshness.py and ofac.is_stale (same
+    mechanism, a different dataset)."""
+    return _freshness.is_stale(INDEX_PATH, _SOURCE_PATHS)
+
+
 def _dedupe_wallets(columns: List[str]) -> Iterator[tuple]:
     """One row per address for the index, not one per (address, time step).
 
@@ -173,9 +211,22 @@ def build_index(force: bool = False) -> Path:
     The index itself stays local context (external_data/ellipticpp/, already
     gitignored, and *.sqlite is gitignored globally) -- it is a cache over the
     dataset, not a copy of it into CyberTrace's own evidence.db.
+
+    force=False (the default) trusts an index whose recorded fingerprint
+    still matches _SOURCE_PATHS' current size/mtime, cheaply stamps one built
+    before freshness tracking existed (no minutes-long re-parse needed -- the
+    CSVs haven't changed, only the tracking is new), and only pays for a real
+    rebuild when the fingerprint has actually changed. See ofac.build_index
+    for the identical policy over a much smaller dataset.
     """
+    current_fp = _freshness.source_fingerprint(_SOURCE_PATHS)
     if INDEX_PATH.exists() and not force:
-        return INDEX_PATH
+        recorded_fp = _freshness.read_fingerprint(INDEX_PATH)
+        if recorded_fp == current_fp:
+            return INDEX_PATH
+        if recorded_fp is None:
+            _freshness.stamp(INDEX_PATH, current_fp)
+            return INDEX_PATH
     with open(ORIGINAL_DIR / "wallets_features_classes_combined.csv",
               newline="", encoding="utf-8") as f:
         header = next(csv.reader(f))
@@ -213,6 +264,7 @@ def build_index(force: bool = False) -> Path:
         conn.commit()
     finally:
         conn.close()
+    _freshness.stamp(tmp_path, current_fp)
     tmp_path.replace(INDEX_PATH)
     return INDEX_PATH
 

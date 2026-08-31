@@ -31,19 +31,26 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, Iterator, List
 
-from ..normalize import norm_btc, norm_eth, norm_tron
+from . import _freshness
+from ..normalize import norm_btc, norm_eth, norm_sol, norm_tron
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "external_data" / "exchange_tags"
 ZIP_PATH = DATA_DIR / "original" / "graphsense-tagpacks.zip"
 MANIFEST_PATH = DATA_DIR / "manifest.json"
 INDEX_PATH = DATA_DIR / "index.sqlite"
+_SOURCE_PATHS = (ZIP_PATH,)
 
 _PACKS_PREFIX = "graphsense-tagpacks-master/packs/"
 
 # Only chains CyberTrace has an entity type for. Everything else the corpus
 # carries (EOS, LTC, ...) is read and dropped at index-build time -- see the
 # manifest's schema_notes -- rather than kept for a lookup path nothing calls.
-_NORMALIZERS = {"BTC": norm_btc, "ETH": norm_eth, "TRX": norm_tron}
+# "SOL" (Loop 38 Section 8) is real too: 5 tags, all category='exchange',
+# including two from exchange-wallets-bitfinexcom.yaml ("bitfinex Solana hot
+# wallet"/"...cold wallet") -- the exact source already in
+# _VASP_DISCLOSED_SOURCES below, so these become VASP_DISCLOSED with a real
+# wallet_role automatically, not merely TAG_ATTESTED.
+_NORMALIZERS = {"BTC": norm_btc, "ETH": norm_eth, "TRX": norm_tron, "SOL": norm_sol}
 
 
 def manifest() -> Dict[str, Any]:
@@ -52,13 +59,30 @@ def manifest() -> Dict[str, Any]:
 
 
 def available() -> bool:
-    """Whether the archive was actually downloaded into original/."""
+    """Whether the archive was actually downloaded into original/.
+
+    Kept as a check distinct from index_available() even though queries only
+    ever read INDEX_PATH -- same reasoning as ellipticpp.available() (Loop 38
+    Section 7): not required for is_stale() correctness (a deleted archive
+    already reads as "changed" there on its own), but rather so a rebuild-
+    without-a-source situation gets its own clear error, and so this MIT
+    archive's checksummed provenance (manifest.json's archive_sha256) stays
+    verifiable against something on disk if that check is ever written.
+    Not safety-critical; see ellipticpp.available() for the full reasoning."""
     return ZIP_PATH.exists()
 
 
 def index_available() -> bool:
     """Whether the local lookup index has been built (see build_index)."""
     return INDEX_PATH.exists()
+
+
+def is_stale() -> bool:
+    """True if the index doesn't match the tagpack archive's current
+    size/mtime -- including an index built before this tracking existed, or
+    one with no index at all. See _freshness.py and ofac.is_stale (same
+    mechanism, one dataset over)."""
+    return _freshness.is_stale(INDEX_PATH, _SOURCE_PATHS)
 
 
 def _iter_tag_rows() -> Iterator[tuple]:
@@ -109,9 +133,22 @@ def build_index(force: bool = False) -> Path:
     Elliptic++'s) -- not run implicitly by lookup_address, which raises a
     clear error instead if the index is missing, same contract as
     ellipticpp.lookup_wallet.
+
+    force=False (the default) trusts an index whose recorded fingerprint
+    still matches the archive's current size/mtime, cheaply stamps one built
+    before freshness tracking existed (no re-parse needed -- the archive
+    hasn't changed, only the tracking is new), and only pays for a real
+    rebuild when the fingerprint has actually changed. See ofac.build_index
+    for the identical policy over a different dataset.
     """
+    current_fp = _freshness.source_fingerprint(_SOURCE_PATHS)
     if INDEX_PATH.exists() and not force:
-        return INDEX_PATH
+        recorded_fp = _freshness.read_fingerprint(INDEX_PATH)
+        if recorded_fp == current_fp:
+            return INDEX_PATH
+        if recorded_fp is None:
+            _freshness.stamp(INDEX_PATH, current_fp)
+            return INDEX_PATH
     tmp_path = INDEX_PATH.with_suffix(".sqlite.building")
     tmp_path.unlink(missing_ok=True)
     conn = sqlite3.connect(tmp_path)
@@ -131,6 +168,7 @@ def build_index(force: bool = False) -> Path:
         conn.commit()
     finally:
         conn.close()
+    _freshness.stamp(tmp_path, current_fp)
     tmp_path.replace(INDEX_PATH)
     return INDEX_PATH
 

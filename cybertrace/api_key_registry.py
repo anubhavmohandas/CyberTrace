@@ -113,6 +113,16 @@ class APIKeys:
     # https://www.trongrid.io — TRON (TRX) account/transaction data
     # Free tier works unauthenticated; a key just raises the rate limit
 
+    solana_rpc: Optional[str] = None
+    # https://api.mainnet-beta.solana.com is used when this is unset --
+    # Solana's own public RPC, free, no key, but rate-limited (documented
+    # ~40 req/10s per IP) and explicitly discouraged for production use.
+    # Holds a full URL rather than a bearer key, since private endpoints
+    # (Helius/QuickNode/Alchemy/a private validator) embed the key
+    # differently per provider — set SOLANA_RPC_URL to one for a real
+    # investigation workload. Same "optional key just raises the limit"
+    # shape as `trongrid` above.
+
     # ── Social Media & Identity ───────────────────────────────────────────────
     github: Optional[str] = None
     # https://github.com/settings/tokens — public repo/user/commit OSINT
@@ -156,6 +166,7 @@ class APIKeys:
             nodereal=os.getenv('NODEREAL_API_KEY'),
             chainabuse=os.getenv('CHAINABUSE_API_KEY'),
             trongrid=os.getenv('TRONGRID_API_KEY'),
+            solana_rpc=os.getenv('SOLANA_RPC_URL'),
             # Social
             github=os.getenv('GITHUB_TOKEN'),
             telegram_bot=os.getenv('TELEGRAM_BOT_TOKEN'),
@@ -187,7 +198,7 @@ class APIKeys:
             'Email':                  ['emailrep', 'hunter'],
             'Breach Databases':       ['hibp', 'dehashed', 'leakcheck'],
             'Phone':                  ['numverify', 'twilio_sid', 'twilio_token'],
-            'Crypto / Blockchain':    ['etherscan', 'nodereal', 'chainabuse', 'trongrid'],
+            'Crypto / Blockchain':    ['etherscan', 'nodereal', 'chainabuse', 'trongrid', 'solana_rpc'],
             'Social & Identity':      ['github', 'telegram_bot'],
             'Automation':             ['twocaptcha'],
         }

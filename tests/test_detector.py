@@ -140,7 +140,10 @@ from cybertrace.detector import UNSUPPORTED_CHAINS, chain_caveat
 REAL_UNSUPPORTED = [
     ("44dZUJ7w1T3fKAvFW8XyXUVoAGSbFvXef2wcbnsjNKGWYo6ZgLwSCJvfeFRHWLnKQMcVUwWLZLQHQvXbNjMWfjXm1LKgWFN",
      "monero", "OFAC SDN, ISIL Khorasan"),
-    ("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "solana", "Solana USDC mint"),
+    # Solana is deliberately ABSENT here (Loop 38 Section 8): solana_module.py
+    # gives it a real collector now, so it moved to
+    # test_supported_chains_still_win_over_the_new_patterns below instead of
+    # this refusal-path list.
     ("DH5yaieqoZN36fDVciNyRueRGvGLR3mr7L", "dogecoin", "Dogecoin"),
     ("ltc1qsl9wyhaqfnq7d0zdgdqf6dcv3drxvtq6c0hnvz", "litecoin", "Litecoin bech32"),
     ("XnQFhFYFhqRHDF8dnPZg1oGKvNhpVUgWZP", "dash", "Dash"),
@@ -158,16 +161,30 @@ def test_unsupported_chain_addresses_are_named_not_swept_as_usernames(address, e
 
 
 def test_supported_chains_still_win_over_the_new_patterns():
-    """The unsupported tier is checked after btc/eth/tron on purpose: a base58
-    Bitcoin address must never be captured by the Solana or Litecoin pattern."""
+    """The unsupported tier is checked after btc/eth/tron/solana on purpose:
+    a base58 Bitcoin address must never be captured by the Litecoin pattern,
+    and a real Solana address (its own base58 shape, no distinguishing
+    prefix) must resolve to 'solana', not fall into the Litecoin/Dash/Ripple
+    patterns checked right after it in DETECTION_ORDER."""
     for address, expected in (
             ("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", "btc_legacy"),
             ("34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo", "btc_legacy"),
             ("bc1qm34lsc65zpw79lxes69zkqmk6ee3ewf0j77s3h", "btc_bech32"),
             ("0xdAC17F958D2ee523a2206206994597C13D831ec7", "ethereum"),
             ("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", "tron"),
+            ("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "solana"),  # real USDC mint
     ):
         assert detect_input_type(address)[0] == expected, address
+
+
+def test_solana_routes_to_its_own_module_type():
+    """Solana is a supported chain now (Loop 38 Section 8), not a refusal --
+    module_type must be 'solana', matching MODULE_REGISTRY['solana']."""
+    assert detect_input_type(
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v") == ("solana", "solana")
+    # 'solana' must NOT appear in UNSUPPORTED_CHAINS any more.
+    assert "solana" not in UNSUPPORTED_CHAINS
+    assert chain_caveat("solana") == ""
 
 
 def test_ordinary_usernames_are_not_captured_as_crypto_addresses():

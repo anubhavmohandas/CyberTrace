@@ -14,8 +14,12 @@ from .safety import is_blocked_query
 
 # Every chain trace-wallet/label-exchange/trace-wallet-batch accept explicitly.
 # bnb/polygon must always be given by name -- a bare 0x address auto-detects
-# as ethereum only (see detector.chain_caveat).
-_WALLET_CHAINS = ('bitcoin', 'ethereum', 'bnb', 'polygon', 'tron')
+# as ethereum only (see detector.chain_caveat). solana needs no such override
+# (its base58 shape auto-detects unambiguously, same as bitcoin/tron) but
+# still has to be listed here or these three commands would refuse
+# --chain solana outright even though correlate.py/detector.py both support
+# it (Loop 38 Section 8).
+_WALLET_CHAINS = ('bitcoin', 'ethereum', 'bnb', 'polygon', 'tron', 'solana')
 
 LOGO = r"""
    ██████╗██╗   ██╗██████╗ ███████╗██████╗ ████████╗██████╗  █████╗  ██████╗███████╗
@@ -442,9 +446,9 @@ def feedback(candidate_id: str, db_path: str, outcome: str, note: Optional[str],
 def label_exchange_cmd(address: str, exchange: str, db_path: str,
                        note: Optional[str], analyst: Optional[str], chain: Optional[str]):
     """
-    Record that a Bitcoin, Ethereum, BNB Chain, Polygon, or TRON address is a
-    known deposit/hot-wallet address for an exchange, from an analyst's own
-    knowledge — never inferred by CyberTrace.
+    Record that a Bitcoin, Ethereum, BNB Chain, Polygon, TRON, or Solana
+    address is a known deposit/hot-wallet address for an exchange, from an
+    analyst's own knowledge — never inferred by CyberTrace.
 
     This is the only way an EXCHANGE_DEPOSIT edge is created. Once recorded,
     `correlate`/`watch` report the shortest reachable hop count from any traced
@@ -462,7 +466,7 @@ def label_exchange_cmd(address: str, exchange: str, db_path: str,
         rel_id = label_exchange(store, address, exchange, analyst=analyst, note=note, chain=chain)
         if rel_id is None:
             click.echo(f"[!] {address!r} is not a valid Bitcoin, Ethereum, BNB Chain, "
-                      f"Polygon, or TRON address", err=True)
+                      f"Polygon, TRON, or Solana address", err=True)
             sys.exit(1)
         click.echo(f"[+] Recorded {address} as {exchange} ({rel_id})", err=True)
 
@@ -609,7 +613,7 @@ async def _trace_one_wallet(address: str, chain: Optional[str], store, max_hops:
     resolved_chain = chain
     if resolved_chain is None:
         specific, detected = detect_input_type(address)
-        if detected not in ('bitcoin', 'ethereum', 'tron'):
+        if detected not in ('bitcoin', 'ethereum', 'tron', 'solana'):
             caveat = chain_caveat(specific)
             return {'wallet': address, 'chain': None, 'status': 'invalid_address',
                     'result': None,
@@ -711,9 +715,9 @@ def trace_wallet_batch_cmd(input_file: str, db_path: str, max_hops: int,
     INPUT_FILE, all against one shared evidence store.
 
     INPUT_FILE is a CSV with an `address` column and an optional `chain`
-    column (bitcoin/ethereum/bnb/polygon/tron). A blank/omitted `chain` lets
-    the address decide bitcoin/ethereum/tron; bnb/polygon must be given
-    explicitly -- same rule as `trace-wallet --chain`.
+    column (bitcoin/ethereum/bnb/polygon/tron/solana). A blank/omitted
+    `chain` lets the address decide bitcoin/ethereum/tron/solana; bnb/polygon
+    must be given explicitly -- same rule as `trace-wallet --chain`.
 
     \b
       cybertrace trace-wallet-batch wallets.csv --db case.db

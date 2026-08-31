@@ -564,6 +564,27 @@ def norm_tron(addr: str) -> Optional[str]:
     return f"TRX:{addr}"
 
 
+def norm_sol(addr: str) -> Optional[str]:
+    """Solana: base58-encoded ed25519 public key, 32 raw bytes -- unlike
+    norm_btc/norm_tron there is NO checksum byte at all in this encoding, so
+    this is structural validation only, same documented residual-risk
+    tradeoff as norm_xmr (a junk 32-byte base58 string passes; becoming a
+    false *correlation* would still need the same string to appear on two
+    real investigation targets).
+
+    32 raw bytes is the actual invariant -- detector.py's 43-44-char regex
+    is a narrower *detection* heuristic (tuned to avoid catching an ordinary
+    username), not the canonicalization boundary; b58decode already restores
+    leading zero bytes from leading '1' characters, so this is exact
+    regardless of how many low bytes the key happens to have.
+    """
+    addr = addr.strip()
+    raw = b58decode(addr)
+    if raw is None or len(raw) != 32:
+        return None
+    return f"SOL:{addr}"
+
+
 def tron_hex_to_address(hex_addr: str) -> Optional[str]:
     """21-byte hex (0x41 prefix + 20-byte pubkey hash) -> base58check T...
 
@@ -952,6 +973,7 @@ NORMALIZERS = {
     "BNB_ADDRESS": norm_bnb,
     "POLYGON_ADDRESS": norm_polygon,
     "TRX_ADDRESS": norm_tron,
+    "SOL_ADDRESS": norm_sol,
     "EMAIL": norm_email,
     "IP": norm_ip,
     "ONION_ADDRESS": norm_onion,

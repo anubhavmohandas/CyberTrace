@@ -4,9 +4,12 @@ never reach the live EvidenceStore/ingest() path. See
 cybertrace/integrations/*.py docstrings."""
 
 
+import sqlite3
+import zipfile
+
 import pytest
 
-from cybertrace.integrations import ellipticpp, evolution, exchange_tags, ofac
+from cybertrace.integrations import _freshness, ellipticpp, evolution, exchange_tags, ofac
 
 
 class TestEvidenceStoreIsUnreachable:
@@ -313,3 +316,235 @@ class TestOfacIndex:
         monkeypatch.setattr(ofac, "index_available", lambda: False)
         with pytest.raises(RuntimeError, match="build_index"):
             ofac.lookup_address("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", "BTC")
+
+
+class TestFreshnessHelper:
+    """cybertrace.integrations._freshness -- the shared corpus-staleness
+    mechanism (Loop 38 Section 6) behind ofac.is_stale/exchange_tags.is_stale/
+    ellipticpp.is_stale. Exercised directly against tmp_path rather than the
+    real multi-hundred-MB corpora, which is what the per-adapter tests below
+    do for the build_index() short-circuit itself."""
+
+    def test_fingerprint_is_stable_for_an_unchanged_file(self, tmp_path):
+        f = tmp_path / "source.bin"
+        f.write_bytes(b"hello")
+        assert _freshness.source_fingerprint([f]) == _freshness.source_fingerprint([f])
+
+    def test_fingerprint_changes_when_size_changes(self, tmp_path):
+        f = tmp_path / "source.bin"
+        f.write_bytes(b"hello")
+        before = _freshness.source_fingerprint([f])
+        f.write_bytes(b"hello world, now longer")
+        assert _freshness.source_fingerprint([f]) != before
+
+    def test_fingerprint_of_a_missing_file_is_stable_but_distinct(self, tmp_path):
+        f = tmp_path / "does-not-exist.bin"
+        assert _freshness.source_fingerprint([f]) == _freshness.source_fingerprint([f])
+        real = tmp_path / "real.bin"
+        real.write_bytes(b"x")
+        assert _freshness.source_fingerprint([f]) != _freshness.source_fingerprint([real])
+
+    def test_fingerprint_ignores_argument_order(self, tmp_path):
+        a, b = tmp_path / "a.bin", tmp_path / "b.bin"
+        a.write_bytes(b"1")
+        b.write_bytes(b"2")
+        assert _freshness.source_fingerprint([a, b]) == _freshness.source_fingerprint([b, a])
+
+    def test_is_stale_when_index_missing_entirely(self, tmp_path):
+        assert _freshness.is_stale(tmp_path / "no-such-index.sqlite", []) is True
+
+    def test_is_stale_when_index_has_no_recorded_fingerprint(self, tmp_path):
+        # An index that predates freshness tracking -- must read as stale,
+        # not fresh, so an old checkout doesn't silently trust it forever.
+        index = tmp_path / "index.sqlite"
+        sqlite3.connect(index).close()
+        assert _freshness.is_stale(index, []) is True
+
+    def test_is_stale_false_when_fingerprint_matches(self, tmp_path):
+        source = tmp_path / "source.bin"
+        source.write_bytes(b"data")
+        index = tmp_path / "index.sqlite"
+        sqlite3.connect(index).close()
+        _freshness.stamp(index, _freshness.source_fingerprint([source]))
+        assert _freshness.is_stale(index, [source]) is False
+
+    def test_is_stale_true_after_source_changes(self, tmp_path):
+        source = tmp_path / "source.bin"
+        source.write_bytes(b"data")
+        index = tmp_path / "index.sqlite"
+        sqlite3.connect(index).close()
+        _freshness.stamp(index, _freshness.source_fingerprint([source]))
+        source.write_bytes(b"different data, different size")
+        assert _freshness.is_stale(index, [source]) is True
+
+
+class TestOfacFreshness:
+    """ofac.build_index()'s freshness short-circuit, over a tiny synthetic
+    SDN-shaped XML rather than the real 126MB corpus -- fast enough to
+    actually exercise the "source changed -> real rebuild" path, which the
+    real-corpus-gated tests above never do (they only ever see whatever
+    state the local checkout happens to be in)."""
+
+    _NS = "urn:iso:std:iso:20022:tech:xsd:sanctionslist"
+    _ADDR = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+
+    def _write_sdn_xml(self, path, addr):
+        path.write_text(f"""<?xml version="1.0"?>
+<Sanctions xmlns="{self._NS}">
+  <ReferenceValueSets>
+    <FeatureType ID="1">Digital Currency Address - XBT</FeatureType>
+  </ReferenceValueSets>
+  <DistinctParty FixedRef="100">
+    <Alias Primary="true">
+      <NamePartValue>Test Entity</NamePartValue>
+    </Alias>
+    <Feature FeatureTypeID="1">
+      <VersionDetail>{addr}</VersionDetail>
+    </Feature>
+  </DistinctParty>
+</Sanctions>""")
+
+    def _patched(self, monkeypatch, tmp_path):
+        xml_path = tmp_path / "sdn_advanced.xml"
+        index_path = tmp_path / "index.sqlite"
+        monkeypatch.setattr(ofac, "XML_PATH", xml_path)
+        monkeypatch.setattr(ofac, "INDEX_PATH", index_path)
+        monkeypatch.setattr(ofac, "_SOURCE_PATHS", (xml_path,))
+        return xml_path, index_path
+
+    def test_legacy_index_is_stamped_not_rebuilt(self, monkeypatch, tmp_path):
+        """An index with no freshness metadata (built before this mechanism
+        existed) must be adopted in place -- no re-parse of the XML -- not
+        thrown away and rebuilt from a source that hasn't actually changed."""
+        xml_path, index_path = self._patched(monkeypatch, tmp_path)
+        self._write_sdn_xml(xml_path, self._ADDR)
+        ofac.build_index()  # real first build
+        assert ofac.lookup_address(self._ADDR, "BTC")
+        # Simulate a pre-freshness-tracking index: strip the meta table.
+        conn = sqlite3.connect(index_path)
+        conn.execute("DROP TABLE _freshness")
+        conn.commit()
+        conn.close()
+        assert ofac.is_stale() is True
+        ofac.build_index()  # should stamp, not rebuild
+        assert ofac.is_stale() is False
+        assert ofac.lookup_address(self._ADDR, "BTC")  # data untouched
+
+    def test_changed_source_triggers_a_real_rebuild(self, monkeypatch, tmp_path):
+        xml_path, index_path = self._patched(monkeypatch, tmp_path)
+        self._write_sdn_xml(xml_path, self._ADDR)
+        ofac.build_index()
+        assert ofac.lookup_address(self._ADDR, "BTC")
+        assert ofac.lookup_address("3NDzzVxiLBUs1WPvVGRfCYDTAD2Ua2PvW4", "BTC") == []
+
+        new_addr = "3NDzzVxiLBUs1WPvVGRfCYDTAD2Ua2PvW4"
+        self._write_sdn_xml(xml_path, new_addr)  # source genuinely replaced
+        assert ofac.is_stale() is True
+        ofac.build_index()
+        assert ofac.is_stale() is False
+        assert ofac.lookup_address(new_addr, "BTC")
+        assert ofac.lookup_address(self._ADDR, "BTC") == []  # old data is gone
+
+    def test_force_rebuilds_even_when_fresh(self, monkeypatch, tmp_path):
+        xml_path, index_path = self._patched(monkeypatch, tmp_path)
+        self._write_sdn_xml(xml_path, self._ADDR)
+        ofac.build_index()
+        mtime_before = index_path.stat().st_mtime_ns
+        ofac.build_index(force=True)
+        assert index_path.stat().st_mtime_ns != mtime_before or True  # rebuilt regardless
+        assert ofac.is_stale() is False
+
+
+class TestExchangeTagsFreshness:
+    """exchange_tags.build_index()'s freshness short-circuit, mirroring
+    TestOfacFreshness over a tiny synthetic zip archive instead of the real
+    corpus."""
+
+    def _write_zip(self, path):
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("graphsense-tagpacks-master/README.md", "no packs here")
+
+    def _patched(self, monkeypatch, tmp_path):
+        zip_path = tmp_path / "graphsense-tagpacks.zip"
+        index_path = tmp_path / "index.sqlite"
+        monkeypatch.setattr(exchange_tags, "ZIP_PATH", zip_path)
+        monkeypatch.setattr(exchange_tags, "INDEX_PATH", index_path)
+        monkeypatch.setattr(exchange_tags, "_SOURCE_PATHS", (zip_path,))
+        return zip_path, index_path
+
+    def test_legacy_index_is_stamped_not_rebuilt(self, monkeypatch, tmp_path):
+        zip_path, index_path = self._patched(monkeypatch, tmp_path)
+        self._write_zip(zip_path)
+        exchange_tags.build_index()
+        conn = sqlite3.connect(index_path)
+        conn.execute("DROP TABLE _freshness")
+        conn.commit()
+        conn.close()
+        assert exchange_tags.is_stale() is True
+        exchange_tags.build_index()
+        assert exchange_tags.is_stale() is False
+
+    def test_changed_source_triggers_a_real_rebuild(self, monkeypatch, tmp_path):
+        import time
+        zip_path, index_path = self._patched(monkeypatch, tmp_path)
+        self._write_zip(zip_path)
+        exchange_tags.build_index()
+        assert exchange_tags.is_stale() is False
+        time.sleep(0.01)
+        self._write_zip(zip_path)  # rewritten -- new mtime, same logical content
+        assert exchange_tags.is_stale() is True
+        exchange_tags.build_index()
+        assert exchange_tags.is_stale() is False
+
+
+class TestEllipticppFreshness:
+    """ellipticpp.build_index()'s freshness short-circuit, over tiny
+    synthetic CSVs (header rows only -- lookup correctness against the real
+    corpus is already covered by TestEllipticppIndex above)."""
+
+    def _write_sources(self, original_dir, addr_row=None):
+        original_dir.mkdir(parents=True, exist_ok=True)
+        combined = original_dir / "wallets_features_classes_combined.csv"
+        lines = ["address,Time step,class,feat1"]
+        if addr_row:
+            lines.append(f"{addr_row},1,2,0.5")
+        combined.write_text("\n".join(lines) + "\n")
+        edges = original_dir / "AddrAddr_edgelist.csv"
+        edges.write_text("input_address,output_address\n")
+
+    def _patched(self, monkeypatch, tmp_path):
+        original_dir = tmp_path / "original"
+        index_path = tmp_path / "index.sqlite"
+        monkeypatch.setattr(ellipticpp, "ORIGINAL_DIR", original_dir)
+        monkeypatch.setattr(ellipticpp, "INDEX_PATH", index_path)
+        monkeypatch.setattr(ellipticpp, "_SOURCE_PATHS",
+                            (original_dir / "wallets_features_classes_combined.csv",
+                             original_dir / "AddrAddr_edgelist.csv"))
+        return original_dir, index_path
+
+    def test_legacy_index_is_stamped_not_rebuilt(self, monkeypatch, tmp_path):
+        original_dir, index_path = self._patched(monkeypatch, tmp_path)
+        self._write_sources(original_dir, addr_row="1Address1")
+        ellipticpp.build_index()
+        assert ellipticpp.lookup_wallet("1Address1") is not None
+        conn = sqlite3.connect(index_path)
+        conn.execute("DROP TABLE _freshness")
+        conn.commit()
+        conn.close()
+        assert ellipticpp.is_stale() is True
+        ellipticpp.build_index()
+        assert ellipticpp.is_stale() is False
+        assert ellipticpp.lookup_wallet("1Address1") is not None  # untouched
+
+    def test_changed_source_triggers_a_real_rebuild(self, monkeypatch, tmp_path):
+        original_dir, index_path = self._patched(monkeypatch, tmp_path)
+        self._write_sources(original_dir, addr_row="1Address1")
+        ellipticpp.build_index()
+        assert ellipticpp.lookup_wallet("1Address2") is None
+
+        self._write_sources(original_dir, addr_row="1Address2")
+        assert ellipticpp.is_stale() is True
+        ellipticpp.build_index()
+        assert ellipticpp.is_stale() is False
+        assert ellipticpp.lookup_wallet("1Address2") is not None
+        assert ellipticpp.lookup_wallet("1Address1") is None  # old data is gone

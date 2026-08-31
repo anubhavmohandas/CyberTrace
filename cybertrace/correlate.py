@@ -626,11 +626,14 @@ EXCHANGE_HOP_DECAY = 0.75  # prior, not calibrated -- see FUNNEL_WEIGHT's own co
 
 # entity type -> the currency code the GraphSense tagpack corpus indexes it as.
 _TAG_CURRENCY = {"BTC_ADDRESS": "BTC", "ETH_ADDRESS": "ETH", "BNB_ADDRESS": "BNB",
-                 "TRX_ADDRESS": "TRX"}
+                 "TRX_ADDRESS": "TRX", "SOL_ADDRESS": "SOL"}
 # POLYGON_ADDRESS has no entry: neither the local GraphSense TagPacks corpus
 # nor the local OFAC SDN file carries a Polygon/MATIC-specific record (see
 # ofac.py's _ASSET_TO_CURRENCY comment) -- grouping it into a currency here
 # would query both offline sources for a code that can never match anything.
+# SOL_ADDRESS DOES have an entry (Loop 38 Section 8): both corpora carry
+# real SOL records -- checked directly against the local archive/XML, not
+# assumed (see exchange_tags.py/ofac.py's own _NORMALIZERS comments).
 
 # How an endpoint of a trace came to be called an exchange -- or, for
 # REGULATORY_ATTESTED, an OFAC-designated entity that is not always a VASP
@@ -817,7 +820,7 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
     raw = {r["entity_id"]: (r["raw_value"] or r["normalized_value"], r["etype"])
            for r in store._all(
                "SELECT entity_id, etype, raw_value, normalized_value FROM entities "
-               "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS','BNB_ADDRESS','POLYGON_ADDRESS','TRX_ADDRESS')")}
+               "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS','BNB_ADDRESS','POLYGON_ADDRESS','TRX_ADDRESS','SOL_ADDRESS')")}
     by_currency: Dict[str, List[str]] = defaultdict(list)
     for entity_id, (value, etype) in raw.items():
         currency = _TAG_CURRENCY.get(etype)
@@ -1135,7 +1138,7 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
     values = {r["entity_id"]: (r["raw_value"] or r["normalized_value"])
               for r in store._all(
         "SELECT entity_id, normalized_value, raw_value FROM entities "
-        "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS','BNB_ADDRESS','POLYGON_ADDRESS','TRX_ADDRESS')")}
+        "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS','BNB_ADDRESS','POLYGON_ADDRESS','TRX_ADDRESS','SOL_ADDRESS')")}
 
     exchange_of = _vasp_endpoints(store, values)
 
@@ -1285,7 +1288,7 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
 
 _TRACE_CHAIN_ETYPES = {"bitcoin": "BTC_ADDRESS", "ethereum": "ETH_ADDRESS",
                        "bnb": "BNB_ADDRESS", "polygon": "POLYGON_ADDRESS",
-                       "tron": "TRX_ADDRESS"}
+                       "tron": "TRX_ADDRESS", "solana": "SOL_ADDRESS"}
 
 
 def wallet_path_flags(store: EvidenceStore, hit: Optional[dict],

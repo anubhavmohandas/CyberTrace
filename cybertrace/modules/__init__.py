@@ -6,6 +6,7 @@ from ..detector import detect_input_type, normalize_input
 from .base import BaseModule
 from .bitcoin_module import BitcoinModule
 from .tron_module import TronModule
+from .solana_module import SolanaModule
 from .domain_module import DomainModule
 from .username_module import UsernameModule
 from .email_module import EmailModule
@@ -32,6 +33,7 @@ MODULE_REGISTRY: Dict[str, Type[BaseModule]] = {
     'bnb': BitcoinModule,
     'polygon': BitcoinModule,
     'tron': TronModule,
+    'solana': SolanaModule,
     'domain': DomainModule,
     'username': UsernameModule,
     'email': EmailModule,
@@ -70,6 +72,7 @@ TYPE_TO_MODULE: Dict[str, str] = {
     'bnb': 'bnb',
     'polygon': 'polygon',
     'tron': 'tron',
+    'solana': 'solana',
     # Dark Web
     'onion': 'darkweb',
     'darkweb': 'darkweb',
@@ -163,6 +166,7 @@ __all__ = [
     'BaseModule',
     'BitcoinModule',
     'TronModule',
+    'SolanaModule',
     'DomainModule',
     'UsernameModule',
     'EmailModule',

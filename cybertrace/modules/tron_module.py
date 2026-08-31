@@ -56,11 +56,25 @@ class TronModule(BaseModule):
         key = self.config.api_keys.get('trongrid')
         return {'TRON-PRO-API-KEY': key} if key else {}
 
+    @staticmethod
+    def _trongrid_retryable(body: Any) -> bool:
+        """TronGrid reports rate limiting the same in-band way NodeReal/
+        Etherscan do (see bitcoin_module._is_rate_limit_body): HTTP 200 with
+        `{"success": false, "error": "..."}`, indistinguishable from other
+        permanent failures (bad address, no such account) by success==False
+        alone -- most success=False responses here are NOT transient, so the
+        message text is checked for actual rate-limit vocabulary rather than
+        retrying every failure blindly."""
+        if not (isinstance(body, dict) and body.get('success') is False):
+            return False
+        message = str(body.get('error', '')).lower()
+        return any(kw in message for kw in ('rate limit', 'exceed', 'quota'))
+
     async def _check_trongrid(self, address: str) -> SourceResult:
         """Account balance/activity via TronGrid's public REST API."""
         data = await self.fetch_json(
             f"https://api.trongrid.io/v1/accounts/{address}",
-            headers=self._headers())
+            headers=self._headers(), retryable_body=self._trongrid_retryable)
         if not data or not data.get('data'):
             return SourceResult(source='trongrid', success=False, error='No data returned')
         acct = data['data'][0]
@@ -82,7 +96,7 @@ class TronModule(BaseModule):
         data = await self.fetch_json(
             f"https://api.trongrid.io/v1/accounts/{address}/transactions",
             params={'limit': 20, 'only_confirmed': 'true'},
-            headers=self._headers())
+            headers=self._headers(), retryable_body=self._trongrid_retryable)
         if not data or 'data' not in data:
             return SourceResult(source='trongrid_transactions', success=False,
                                 error='No data returned')
@@ -157,6 +171,11 @@ class TronModule(BaseModule):
             return SourceResult(source='exchange_tags', success=False,
                                 error='GraphSense TagPacks downloaded but not indexed '
                                       '(run exchange_tags.build_index() once, offline)')
+        if exchange_tags.is_stale():
+            return SourceResult(source='exchange_tags', success=False,
+                                error='GraphSense TagPacks index is stale -- the local '
+                                      'archive changed since this index was built (run '
+                                      'exchange_tags.build_index(force=True) to refresh)')
         tags = exchange_tags.lookup_address(address, 'TRX')
         if not tags:
             return SourceResult(source='exchange_tags', success=True, data={'tagged': False})

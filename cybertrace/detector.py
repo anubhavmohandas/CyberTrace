@@ -41,9 +41,15 @@ PATTERNS = {
     'dash': re.compile(r'^X[1-9A-HJ-NP-Za-km-z]{33}$'),
     'zcash': re.compile(r'^(?:t1[a-km-zA-HJ-NP-Z1-9]{33}|zs1[a-z0-9]{75})$'),
     'ripple': re.compile(r'^r[1-9A-HJ-NP-Za-km-z]{24,34}$'),
-    # Solana is base58 with no distinguishing prefix, so it is pinned to the
-    # 43-44 characters an ed25519 pubkey actually encodes to. Narrow on
-    # purpose: a shorter base58 string is far more likely to be a username.
+
+    # Solana: CyberTrace HAS a collector for this one (solana_module.py,
+    # Loop 38 Section 8) -- checked separately from UNSUPPORTED_CHAINS
+    # below, not folded into that dict. Base58 with no distinguishing
+    # prefix, so it is pinned to the 43-44 characters an ed25519 pubkey
+    # actually encodes to. Narrow on purpose: a shorter base58 string is far
+    # more likely to be a username -- a real but unusually short Solana
+    # address (many leading zero bytes) falls through to `username` rather
+    # than being force-matched here, the same tradeoff norm_sol documents.
     'solana': re.compile(r'^[1-9A-HJ-NP-Za-km-z]{43,44}$'),
 
 
@@ -92,6 +98,7 @@ DETECTION_ORDER = [
     ('btc_legacy', 'bitcoin'),
     ('ethereum', 'ethereum'),
     ('tron', 'tron'),
+    ('solana', 'solana'),
     # Recognized, and refused by name -- see UNSUPPORTED_CHAINS.
     ('monero', 'unsupported_chain'),
     ('litecoin', 'unsupported_chain'),
@@ -100,7 +107,6 @@ DETECTION_ORDER = [
     ('dash', 'unsupported_chain'),
     ('zcash', 'unsupported_chain'),
     ('ripple', 'unsupported_chain'),
-    ('solana', 'unsupported_chain'),
     ('onion', 'darkweb'),
     ('gstin', 'indian'),
     ('pan_indian', 'indian'),
@@ -115,10 +121,13 @@ DETECTION_ORDER = [
 
 # specific_type -> the chain it really is, for the ones nothing here can trace.
 # Kept as data rather than prose so a caller can name the chain in a refusal.
+# 'solana' is deliberately absent -- solana_module.py gives it a real
+# collector (Loop 38 Section 8), so it now routes like btc/eth/tron instead
+# of through this refusal path.
 UNSUPPORTED_CHAINS = {
     'monero': 'Monero', 'litecoin': 'Litecoin', 'bitcoin_cash': 'Bitcoin Cash',
     'dogecoin': 'Dogecoin', 'dash': 'Dash', 'zcash': 'Zcash',
-    'ripple': 'XRP Ledger', 'solana': 'Solana',
+    'ripple': 'XRP Ledger',
 }
 
 

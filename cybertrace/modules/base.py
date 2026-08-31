@@ -43,6 +43,17 @@ def _redact_secrets(text: str) -> str:
     return text
 
 
+def _safe_predicate(predicate, body) -> bool:
+    """Run a caller-supplied retryable_body predicate defensively: a
+    predicate written against one API's error shape (dict with an 'error'
+    key, say) must not crash fetch_json when a different, well-formed 200
+    body (a list, a bare string) doesn't match that shape."""
+    try:
+        return bool(predicate(body))
+    except Exception:
+        return False
+
+
 @dataclass
 class SourceResult:
     """Result from a single source."""
@@ -304,6 +315,7 @@ class BaseModule(ABC):
         method: str = 'GET',
         retries: int = 2,
         retry_delay: float = 1.0,
+        retryable_body: Optional[Any] = None,
         **kwargs
     ) -> Optional[dict]:
         """
@@ -311,6 +323,19 @@ class BaseModule(ABC):
 
         Retries with exponential backoff on transient errors (429, 5xx).
         Returns None on error (doesn't raise).
+
+        `retryable_body`, when given, is called on every HTTP-200 JSON body
+        before it's accepted: `retryable_body(body) -> bool`. Several real
+        APIs here (NodeReal's JSON-RPC, Etherscan's REST shape) report rate
+        limiting IN-BAND -- HTTP 200 with an error/rate-limit message inside
+        the JSON -- so the plain status-code retry above never sees it as
+        transient and neither retries nor backs off. A body the predicate
+        flags is treated exactly like a 429: retried with the same backoff,
+        then given up on (as the body itself, not None) once `retries` is
+        exhausted -- so a permanently malformed body can't loop forever, and
+        the caller's own error-message parsing still runs on the final
+        attempt's body exactly as before. Callers that don't pass it keep
+        today's behavior unchanged.
         """
         kwargs.setdefault('allow_redirects', False)  # CVE-2026-47265
         try:
@@ -321,7 +346,12 @@ class BaseModule(ABC):
             try:
                 async with session.request(method, url, **kwargs) as resp:
                     if resp.status == 200:
-                        return await resp.json(content_type=None)
+                        body = await resp.json(content_type=None)
+                        if (retryable_body is not None and attempt < retries
+                                and _safe_predicate(retryable_body, body)):
+                            await asyncio.sleep(retry_delay * (2 ** attempt))
+                            continue
+                        return body
                     if resp.status in (429, 500, 502, 503, 504) and attempt < retries:
                         await asyncio.sleep(retry_delay * (2 ** attempt))
                         continue

@@ -177,7 +177,7 @@ ENTITY_TYPES = {
     "OPERATOR_CANDIDATE", "USERNAME", "EMAIL", "PGP_KEY", "PHONE",
     "TELEGRAM", "SESSION_ID",
     "BTC_ADDRESS", "XMR_ADDRESS", "ETH_ADDRESS", "BNB_ADDRESS", "POLYGON_ADDRESS",
-    "TRX_ADDRESS", "CRYPTO_CLUSTER", "EXCHANGE",
+    "TRX_ADDRESS", "SOL_ADDRESS", "CRYPTO_CLUSTER", "EXCHANGE",
     "IP", "ASN", "HOSTING_PROVIDER", "VPN_PROVIDER", "DOMAIN",
     "NAMESERVER", "CERTIFICATE", "FAVICON", "HTTP_FINGERPRINT", "ANALYTICS_ID",
     "SOCIAL_ACCOUNT", "FORUM_ACCOUNT", "BREACH_RECORD",
@@ -1584,7 +1584,7 @@ ANALYST_TARGET = "analyst.assertion.local"
 
 _LABEL_EXCHANGE_ETYPES = {"bitcoin": "BTC_ADDRESS", "ethereum": "ETH_ADDRESS",
                           "bnb": "BNB_ADDRESS", "polygon": "POLYGON_ADDRESS",
-                          "tron": "TRX_ADDRESS"}
+                          "tron": "TRX_ADDRESS", "solana": "SOL_ADDRESS"}
 
 
 def label_exchange(store: EvidenceStore, address: str, exchange_name: str,
@@ -1673,6 +1673,7 @@ _ENRICHERS = {
     "bnb":      ("BNB_ADDRESS", enrich_bitcoin),
     "polygon":  ("POLYGON_ADDRESS", enrich_bitcoin),
     "tron":     ("TRX_ADDRESS", enrich_bitcoin),
+    "solana":   ("SOL_ADDRESS", enrich_bitcoin),
 }
 
 

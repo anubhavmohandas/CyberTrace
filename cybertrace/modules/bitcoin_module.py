@@ -143,13 +143,22 @@ class BitcoinModule(BaseModule):
         txs: List[dict] = []
         seen_hashes = set()
         data = None
+        pagination_failed = False
         max_pages = _TX_DEEP_PAGES if deep else _TX_SHALLOW_PAGES
         for page in range(max_pages):
             page_data = await self.fetch_json(
                 f"https://blockchain.info/rawaddr/{address}",
                 params={'limit': _TX_PAGE_SIZE, 'offset': page * _TX_PAGE_SIZE},
             )
-            if not page_data:
+            if page_data is None:
+                # fetch_json already retried transient errors itself -- None
+                # here means a page genuinely could not be retrieved (rate
+                # limit exhausted, network error, non-200), not that this
+                # address's history ended. Must not fall into the same
+                # `break` as a short/final page below, or a mid-pagination
+                # failure silently reads as "no more history to page into"
+                # and ships an incomplete sample as if it were complete.
+                pagination_failed = True
                 break
             if data is None:
                 data = page_data  # balance/n_tx/etc. are only ever read off page 0
@@ -173,7 +182,8 @@ class BitcoinModule(BaseModule):
             return SourceResult(
                 source='blockchain.com',
                 success=False,
-                error='No data returned',
+                error='Pagination failed: no page could be retrieved'
+                      if pagination_failed else 'No data returned',
             )
 
         # Parse response
@@ -251,6 +261,15 @@ class BitcoinModule(BaseModule):
         # tx count after dedup, not raw pages fetched, since a short final
         # page or an overlap can make those differ.
         parsed['tx_sample_size'] = len(txs)
+        # True only when a LATER page's fetch genuinely failed (see
+        # pagination_failed above) -- absent/False for the normal case where
+        # every requested page was retrieved and the last one came back
+        # short. Lets a caller tell "this is the wallet's whole history" apart
+        # from "this sample stopped early because of a retrieval failure",
+        # which the prior code could not: both collapsed into the same
+        # early-exit and looked identical in the returned data.
+        if pagination_failed:
+            parsed['pagination_incomplete'] = True
 
         return SourceResult(
             source='blockchain.com',
@@ -471,9 +490,12 @@ class BitcoinModule(BaseModule):
         external_data/ellipticpp/manifest.json for the full safety boundary.
 
         Degrades the same way chainabuse does without a key: dataset not
-        downloaded, or downloaded but not indexed yet (build_index() is a
-        deliberate offline step -- see that function's docstring), both
-        report success=False with an explanatory error rather than raising.
+        downloaded, downloaded but not indexed yet (build_index() is a
+        deliberate offline step -- see that function's docstring), or indexed
+        from a raw CSV pair that has since changed on disk (ellipticpp.
+        is_stale() -- Loop 38 Section 6), all three report success=False with
+        an explanatory error rather than raising or silently querying a
+        possibly-obsolete index.
         """
         if not ellipticpp.available():
             return SourceResult(
@@ -485,6 +507,13 @@ class BitcoinModule(BaseModule):
                 source='ellipticpp', success=False,
                 error='Elliptic++ dataset downloaded but not indexed '
                       '(run ellipticpp.build_index() once, offline)',
+            )
+        if ellipticpp.is_stale():
+            return SourceResult(
+                source='ellipticpp', success=False,
+                error='Elliptic++ index is stale -- the local dataset changed '
+                      'since this index was built (run '
+                      'ellipticpp.build_index(force=True) to refresh)',
             )
         row = ellipticpp.lookup_wallet(address)
         if row is None:
@@ -514,9 +543,11 @@ class BitcoinModule(BaseModule):
         metadata only, never an EXCHANGE_DEPOSIT edge. Only label_exchange
         (an analyst's own say-so) can create that edge.
 
-        Degrades the same way _check_ellipticpp does: dataset not
-        downloaded, or downloaded but not indexed yet, both report
-        success=False with an explanatory error rather than raising.
+        Degrades the same way _check_ellipticpp does: dataset not downloaded,
+        downloaded but not indexed yet, or indexed from an archive that has
+        since changed on disk (exchange_tags.is_stale() -- Loop 38 Section
+        6), all report success=False with an explanatory error rather than
+        raising or silently querying a possibly-obsolete index.
 
         `packs` (the contributed tagpack's own filename -- 'ransomware',
         'ofac', 'lazarus', 'hydra', ...) is included alongside `categories`
@@ -536,6 +567,13 @@ class BitcoinModule(BaseModule):
                 source='exchange_tags', success=False,
                 error='GraphSense TagPacks downloaded but not indexed '
                       '(run exchange_tags.build_index() once, offline)',
+            )
+        if exchange_tags.is_stale():
+            return SourceResult(
+                source='exchange_tags', success=False,
+                error='GraphSense TagPacks index is stale -- the local archive '
+                      'changed since this index was built (run '
+                      'exchange_tags.build_index(force=True) to refresh)',
             )
         tags = exchange_tags.lookup_address(address, chain)
         if not tags:
@@ -625,6 +663,29 @@ class BitcoinModule(BaseModule):
     # NodeReal's real API, not assumed from docs alone.
     _NODEREAL_CATEGORY = {'txlist': 'external', 'tokentx': '20'}
 
+    @staticmethod
+    def _is_rate_limit_body(body: Any, message: str) -> bool:
+        """Shared in-band-rate-limit detector for fetch_json's retryable_body
+        hook: both providers report rate limiting inside an HTTP 200 JSON
+        body rather than as a 429, so the plain status-code retry in
+        fetch_json never sees it. `message` is the provider-specific field
+        already known to carry the text (NodeReal's error.message, Etherscan's
+        result string) -- a permanent error (bad key, invalid address) uses
+        the same field but never contains "rate limit", so this can't loop
+        forever on those; fetch_json's own retry cap bounds it regardless."""
+        return isinstance(body, dict) and 'rate limit' in message.lower()
+
+    @classmethod
+    def _nodereal_retryable(cls, body: Any) -> bool:
+        error = body.get('error') if isinstance(body, dict) else None
+        message = str(error.get('message', '')) if isinstance(error, dict) else ''
+        return cls._is_rate_limit_body(body, message)
+
+    @classmethod
+    def _etherscan_retryable(cls, body: Any) -> bool:
+        result = body.get('result') if isinstance(body, dict) else None
+        return cls._is_rate_limit_body(body, result if isinstance(result, str) else '')
+
     async def _fetch_nodereal_txs(self, address: str,
                                   action: str) -> Tuple[Optional[List[dict]], Optional[str]]:
         """BNB Smart Chain's free transaction-history source: NodeReal
@@ -656,6 +717,7 @@ class BitcoinModule(BaseModule):
                     'address': address, 'order': 'desc', 'maxCount': '0x14',
                 }],
             },
+            retryable_body=self._nodereal_retryable,
         )
         if not data:
             return None, 'No data returned'
@@ -700,6 +762,7 @@ class BitcoinModule(BaseModule):
                 'address': address, 'startblock': 0, 'endblock': 99999999,
                 'page': 1, 'offset': 20, 'sort': 'desc', 'apikey': key,
             },
+            retryable_body=self._etherscan_retryable,
         )
         if not data:
             return None, 'No data returned'
@@ -839,6 +902,12 @@ class BitcoinModule(BaseModule):
             # analyst can see, not silent. None for a target with no
             # blockchain.com source (e.g. ethereum) or no tx history.
             'tx_sample_size': None,
+            # True when a deep-pagination page fetch genuinely failed
+            # (rate-limit retries exhausted, network error) partway through,
+            # so tx_sample_size covers less than the requested depth -- must
+            # not be confused with the wallet simply having no more history.
+            # See _check_blockchain_com's pagination_failed handling.
+            'pagination_incomplete': False,
             # ERC-20 Transfer-event context -- None/empty for non-ETH targets
             # and for ETH targets with no token activity. See
             # _check_etherscan_token_transfers.
@@ -934,6 +1003,8 @@ class BitcoinModule(BaseModule):
                 received_from.update(data['received_from_addresses'])
             if source == 'blockchain.com' and data.get('tx_sample_size') is not None:
                 summary['tx_sample_size'] = data['tx_sample_size']
+            if source == 'blockchain.com' and data.get('pagination_incomplete'):
+                summary['pagination_incomplete'] = True
             # Covers etherscan_token_transfers/bnb_token_transfers/
             # polygon_token_transfers -- every source _parse_evm_txs(token=True)
             # backs, by construction of that shared suffix.

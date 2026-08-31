@@ -551,6 +551,57 @@ class TestBitcoinModuleEvmChainSources:
         finally:
             module.config.api_keys.etherscan = original
 
+    def test_nodereal_call_passes_a_rate_limit_predicate_to_fetch_json(self):
+        """Loop 38 Section 4: NodeReal reports rate limiting INSIDE an HTTP
+        200 JSON-RPC `error`, which fetch_json's plain status-code retry
+        never sees as transient. The predicate handed to fetch_json must
+        actually tell that shape apart from a permanent error (bad key) --
+        see TestFetchJsonInBandRetry for the retry loop itself."""
+        import asyncio
+        module = BitcoinModule()
+        original = module.config.api_keys.nodereal
+        module.config.api_keys.nodereal = 'testkey'
+        captured = {}
+        try:
+            async def fake_fetch_json(url, **kwargs):
+                captured['predicate'] = kwargs.get('retryable_body')
+                return {'jsonrpc': '2.0', 'id': 1, 'result': {'transfers': []}}
+            module.fetch_json = fake_fetch_json
+            asyncio.run(module._check_evm_transactions(self.ADDR, 'bnb'))
+        finally:
+            module.config.api_keys.nodereal = original
+        predicate = captured['predicate']
+        assert predicate is not None
+        assert predicate({'error': {'message': 'rate limit exceeded'}}) is True
+        assert predicate({'error': {'message': 'Unauthorized'}}) is False
+        assert predicate({'result': {'transfers': []}}) is False
+
+    def test_etherscan_call_passes_a_rate_limit_predicate_to_fetch_json(self):
+        """Etherscan's own version of the same in-band shape: rate limiting
+        arrives as a `result` string on an HTTP 200 body, same as its
+        plan-restriction/invalid-address errors -- only the rate-limit one
+        should ever be retried."""
+        import asyncio
+        module = BitcoinModule()
+        original = module.config.api_keys.etherscan
+        module.config.api_keys.etherscan = 'testkey'
+        captured = {}
+        try:
+            async def fake_fetch_json(url, **kwargs):
+                captured['predicate'] = kwargs.get('retryable_body')
+                return {'status': '1', 'result': []}
+            module.fetch_json = fake_fetch_json
+            asyncio.run(module._check_evm_transactions(self.ADDR, 'polygon'))
+        finally:
+            module.config.api_keys.etherscan = original
+        predicate = captured['predicate']
+        assert predicate is not None
+        assert predicate({'result': 'Max rate limit reached, please use API Key '
+                                    'for higher rate limit'}) is True
+        assert predicate({'result': 'Free API access is not supported for this '
+                                    'chain.'}) is False
+        assert predicate({'result': []}) is False
+
     def test_a_genuinely_empty_result_is_success_not_failure(self):
         """Etherscan reports zero transactions as status='0' too (message
         'No transactions found') -- a real, valid, empty answer, not the
@@ -570,6 +621,108 @@ class TestBitcoinModuleEvmChainSources:
             assert result.data['sent_to_addresses'] == []
         finally:
             module.config.api_keys.etherscan = original
+
+
+class TestFetchJsonInBandRetry:
+    """base.BaseModule.fetch_json's own retry loop, exercised directly against
+    a fake aiohttp session rather than monkeypatched away (every other test
+    in this file replaces fetch_json wholesale, so the loop itself had zero
+    coverage before this). Loop 38 Section 4: NodeReal/Etherscan both report
+    rate limiting INSIDE an HTTP 200 JSON body, which the plain status-code
+    branch (429/5xx) never sees as transient without the retryable_body hook.
+    """
+
+    class _FakeResponse:
+        def __init__(self, json_body):
+            self._json_body = json_body
+            self.status = 200
+
+        async def json(self, content_type=None):
+            return self._json_body
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _FakeSession:
+        def __init__(self, bodies):
+            self._bodies = list(bodies)
+            self.call_count = 0
+
+        def request(self, method, url, **kwargs):
+            self.call_count += 1
+            return TestFetchJsonInBandRetry._FakeResponse(self._bodies.pop(0))
+
+    def _module_with_fake_session(self, bodies):
+        module = BitcoinModule()
+        session = self._FakeSession(bodies)
+
+        async def fake_session_for(url):
+            return session
+
+        module._session_for = fake_session_for
+        return module, session
+
+    def test_retryable_body_is_retried_then_succeeds(self):
+        import asyncio
+        bad = {'error': {'code': -32005, 'message': 'rate limit exceeded'}}
+        good = {'result': {'transfers': []}}
+        module, session = self._module_with_fake_session([bad, good])
+        result = asyncio.run(module.fetch_json(
+            'https://example.com/api', retries=2, retry_delay=0,
+            retryable_body=module._nodereal_retryable))
+        assert result == good
+        assert session.call_count == 2
+
+    def test_retryable_body_gives_up_after_retries_exhausted(self):
+        """A body that never stops looking retryable must not loop forever --
+        the existing attempt cap bounds it exactly like a permanent 429
+        would, and the last attempt's own body is still handed back (not
+        None) so the caller's own error-message parsing still runs."""
+        import asyncio
+        bad = {'error': {'code': -32005, 'message': 'rate limit exceeded'}}
+        module, session = self._module_with_fake_session([bad, bad, bad])
+        result = asyncio.run(module.fetch_json(
+            'https://example.com/api', retries=2, retry_delay=0,
+            retryable_body=module._nodereal_retryable))
+        assert result == bad
+        assert session.call_count == 3
+
+    def test_permanent_error_body_is_not_retried(self):
+        import asyncio
+        permanent = {'error': {'code': -32000, 'message': 'Unauthorized'}}
+        module, session = self._module_with_fake_session([permanent])
+        result = asyncio.run(module.fetch_json(
+            'https://example.com/api', retries=2, retry_delay=0,
+            retryable_body=module._nodereal_retryable))
+        assert result == permanent
+        assert session.call_count == 1
+
+    def test_no_predicate_keeps_prior_behavior(self):
+        """Callers that don't pass retryable_body (every other fetch_json
+        caller in the codebase) must see today's unconditional accept-on-200,
+        even for a body that would classify as retryable if asked."""
+        import asyncio
+        body = {'result': 'Max rate limit reached'}
+        module, session = self._module_with_fake_session([body])
+        result = asyncio.run(module.fetch_json('https://example.com/api',
+                                               retries=2, retry_delay=0))
+        assert result == body
+        assert session.call_count == 1
+
+    def test_a_malformed_body_the_predicate_cannot_classify_is_not_retried(self):
+        """A predicate written against one API's error shape must not crash
+        -- or accidentally retry -- on a well-formed 200 body it wasn't
+        designed to look at (a bare list, say)."""
+        import asyncio
+        module, session = self._module_with_fake_session([[1, 2, 3]])
+        result = asyncio.run(module.fetch_json(
+            'https://example.com/api', retries=2, retry_delay=0,
+            retryable_body=module._nodereal_retryable))
+        assert result == [1, 2, 3]
+        assert session.call_count == 1
 
 
 class TestBitcoinModuleFundFlowDirection:
@@ -728,6 +881,57 @@ class TestBitcoinModuleTransactionDepth:
         result = asyncio.run(module._check_blockchain_com(self.BTC, deep=True))
         assert len(calls) == _TX_DEEP_PAGES
         assert result.data['tx_sample_size'] == _TX_DEEP_PAGES * _TX_PAGE_SIZE
+
+    def test_a_failed_later_page_is_flagged_not_mistaken_for_end_of_history(self, monkeypatch):
+        """Loop 38 Section 5: fetch_json returning None for a later page (its
+        own retries exhausted -- rate limit, network error) must not read the
+        same as a short/final page. Page 0 is a FULL page (more history
+        exists beyond it), so a silent break here would misreport a
+        retrieval failure as "wallet has no more transactions"."""
+        import asyncio
+        from cybertrace.modules import bitcoin_module
+
+        async def _no_op_sleep(*_a, **_k):
+            return
+        monkeypatch.setattr(bitcoin_module.asyncio, "sleep", _no_op_sleep)
+        module = BitcoinModule()
+        page0 = self._padding_txs(50, 1700000000, 'p0')
+
+        async def fake_fetch_json(url, **kwargs):
+            params = kwargs.get('params') or {}
+            if params.get('offset', 0) == 0:
+                return {'address': self.BTC, 'final_balance': 0, 'total_received': 0,
+                        'total_sent': 0, 'n_tx': 999, 'txs': page0}
+            return None  # page 1's fetch genuinely failed
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._check_blockchain_com(self.BTC, deep=True))
+        assert result.success is True          # page 0's real data is not discarded
+        assert result.data['tx_sample_size'] == 50
+        assert result.data['pagination_incomplete'] is True
+
+    def test_a_short_final_page_is_not_flagged_incomplete(self, monkeypatch):
+        """The genuine end-of-history case (a short page) must NOT set the
+        same flag -- only an actual fetch failure does."""
+        import asyncio
+        pages = [self._padding_txs(50, 1700000000, 'p0'),
+                self._padding_txs(10, 1690000000, 'p1')]
+        module, calls = self._paged_module(pages, monkeypatch)
+        result = asyncio.run(module._check_blockchain_com(self.BTC, deep=True))
+        assert result.data.get('pagination_incomplete', False) is False
+
+    def test_first_page_failing_entirely_surfaces_as_a_retrieval_failure(self):
+        """When even page 0 cannot be fetched, the error text must say so
+        distinctly from a wallet that genuinely has no data -- both used to
+        collapse into the same generic 'No data returned'."""
+        import asyncio
+        module = BitcoinModule()
+
+        async def fake_fetch_json(url, **kwargs):
+            return None
+        module.fetch_json = fake_fetch_json
+        result = asyncio.run(module._check_blockchain_com(self.BTC, deep=False))
+        assert result.success is False
+        assert 'Pagination failed' in result.error
 
     def test_a_transaction_repeated_across_a_pagination_boundary_counts_once(self, monkeypatch):
         """A new tx landing on the address between two paginated calls shifts
@@ -1017,11 +1221,25 @@ class TestBitcoinModuleEllipticpp:
         assert result.success is False
         assert 'build_index' in result.error
 
+    def test_degrades_gracefully_when_index_is_stale(self, monkeypatch):
+        """Loop 38 Section 6: an index built from a raw CSV pair that has
+        since changed on disk must not be queried as if it were current."""
+        import asyncio
+        from cybertrace.integrations import ellipticpp
+        monkeypatch.setattr(ellipticpp, "available", lambda: True)
+        monkeypatch.setattr(ellipticpp, "index_available", lambda: True)
+        monkeypatch.setattr(ellipticpp, "is_stale", lambda: True)
+        module = BitcoinModule()
+        result = asyncio.run(module._check_ellipticpp('1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa'))
+        assert result.success is False
+        assert 'stale' in result.error
+
     def test_address_not_in_dataset_is_a_successful_negative(self, monkeypatch):
         import asyncio
         from cybertrace.integrations import ellipticpp
         monkeypatch.setattr(ellipticpp, "available", lambda: True)
         monkeypatch.setattr(ellipticpp, "index_available", lambda: True)
+        monkeypatch.setattr(ellipticpp, "is_stale", lambda: False)
         monkeypatch.setattr(ellipticpp, "lookup_wallet", lambda addr: None)
         module = BitcoinModule()
         result = asyncio.run(module._check_ellipticpp('1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa'))
@@ -1037,6 +1255,7 @@ class TestBitcoinModuleEllipticpp:
         from cybertrace.integrations import ellipticpp
         monkeypatch.setattr(ellipticpp, "available", lambda: True)
         monkeypatch.setattr(ellipticpp, "index_available", lambda: True)
+        monkeypatch.setattr(ellipticpp, "is_stale", lambda: False)
         monkeypatch.setattr(ellipticpp, "lookup_wallet", lambda addr: {
             "address": addr, "dataset_label": "1", "dataset_label_name": "illicit",
             "time_steps": ["25"], "record_count": 1, "features": {},
@@ -1093,10 +1312,24 @@ class TestExchangeTagsSource:
         assert result.success is False
         assert 'build_index' in result.error
 
+    def test_degrades_gracefully_when_index_is_stale(self, monkeypatch):
+        """Loop 38 Section 6: an index built from an archive that has since
+        changed on disk must not be queried as if it were current."""
+        import asyncio
+        monkeypatch.setattr(exchange_tags, "available", lambda: True)
+        monkeypatch.setattr(exchange_tags, "index_available", lambda: True)
+        monkeypatch.setattr(exchange_tags, "is_stale", lambda: True)
+        module = BitcoinModule()
+        result = asyncio.run(module._check_exchange_tags(
+            '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa', 'BTC'))
+        assert result.success is False
+        assert 'stale' in result.error
+
     def test_address_not_tagged_is_a_successful_negative(self, monkeypatch):
         import asyncio
         monkeypatch.setattr(exchange_tags, "available", lambda: True)
         monkeypatch.setattr(exchange_tags, "index_available", lambda: True)
+        monkeypatch.setattr(exchange_tags, "is_stale", lambda: False)
         monkeypatch.setattr(exchange_tags, "lookup_address", lambda addr, cur: [])
         module = BitcoinModule()
         result = asyncio.run(module._check_exchange_tags(
@@ -1112,6 +1345,7 @@ class TestExchangeTagsSource:
         import asyncio
         monkeypatch.setattr(exchange_tags, "available", lambda: True)
         monkeypatch.setattr(exchange_tags, "index_available", lambda: True)
+        monkeypatch.setattr(exchange_tags, "is_stale", lambda: False)
         monkeypatch.setattr(exchange_tags, "lookup_address", lambda addr, cur: [
             {"currency": cur, "category": "exchange", "label": "binance.com",
              "actor": "binance", "source": "https://example.com", "pack": "binance"},
@@ -1176,6 +1410,39 @@ class TestTronModule:
         summary = module._build_summary(result)
         assert summary['counterparty_addresses'] == [TRX_VALID]
         assert summary['connected_addresses'] == [TRX_VALID]
+
+    def test_trongrid_calls_pass_a_rate_limit_predicate_to_fetch_json(self):
+        """Loop 38 defect hunt: TronGrid reports rate limiting the same
+        in-band way NodeReal/Etherscan do (HTTP 200, `{"success": false,
+        "error": "..."}`) -- must be retried, while an unrelated
+        success=false (bad address, no such account) must not be."""
+        import asyncio
+        module = TronModule()
+        captured = {}
+
+        async def fake_fetch_json(url, **kwargs):
+            captured['predicate'] = kwargs.get('retryable_body')
+            return {'data': [{'balance': 0}]}
+        module.fetch_json = fake_fetch_json
+        asyncio.run(module._check_trongrid(TRX_VALID))
+        predicate = captured['predicate']
+        assert predicate is not None
+        assert predicate({'success': False, 'error': 'Exceeded the user daily usage'}) is True
+        assert predicate({'success': False, 'error': 'account not found'}) is False
+        assert predicate({'data': [{'balance': 0}]}) is False
+
+    def test_degrades_gracefully_when_exchange_tags_index_is_stale(self, monkeypatch):
+        """Loop 38 Section 6: same corpus, same staleness gate as
+        bitcoin_module._check_exchange_tags -- an index built from an
+        archive that has since changed on disk must not be queried."""
+        import asyncio
+        monkeypatch.setattr(exchange_tags, "available", lambda: True)
+        monkeypatch.setattr(exchange_tags, "index_available", lambda: True)
+        monkeypatch.setattr(exchange_tags, "is_stale", lambda: True)
+        module = TronModule()
+        result = asyncio.run(module._check_exchange_tags(TRX_VALID))
+        assert result.success is False
+        assert 'stale' in result.error
 
 
 class TestUsernameModule:
