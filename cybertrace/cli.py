@@ -532,7 +532,7 @@ def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: s
         click.echo(_json.dumps(report, indent=2))
         return
 
-    click.echo(f"Wallet: {report['address']}")
+    click.echo(f"Wallet: {report['address']} ({report['chain']})")
     if len(report['path']) > 1:
         click.echo("Path: " + " -> ".join(report['path']))
     if report['exchange']:

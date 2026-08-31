@@ -197,7 +197,7 @@ def test_batch_output_schema_matches_the_documented_shape(tmp_path, monkeypatch)
     # `result`, when present, is exactly a wallet_trace_report() dict -- not a
     # second, batch-only schema.
     assert set(entry["result"].keys()) == {
-        "entity_id", "address", "path", "hops", "exchange", "exchange_confidence",
+        "entity_id", "address", "chain", "path", "hops", "exchange", "exchange_confidence",
         "attribution", "attribution_source", "wallet_role", "proximity", "direction",
         "flags", "evidence_ids", "service_tags", "risk", "data_source_status",
     }

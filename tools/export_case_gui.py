@@ -103,12 +103,9 @@ def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
             "evidence_ids": c.get("evidence_ids") or [],
         } for c in d["contradictions"]] or [{"label": "None recorded", "anchor": ""}]
 
-        feedback_rows = store.feedback_for_entity(key)
-        verdict = None
-        if feedback_rows:
-            latest = feedback_rows[0]  # feedback_for_entity is already DESC by recorded_at
-            verdict = {"outcome": latest["outcome"], "note": latest["note"] or "",
-                       "analyst": latest["analyst"] or "", "recorded_at": latest["recorded_at"]}
+        # build_dossier already computed this (canonical, Loop 40) -- no
+        # second feedback_for_entity query here.
+        verdict = d["verdict"]
 
         candidates.append({
             "key": key, "candidate_id": d["candidate_id"],

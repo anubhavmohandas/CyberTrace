@@ -209,7 +209,7 @@ def wallet_deltas(before: Dict[str, dict], after: List[dict]) -> List[dict]:
     evidence are needed for, a contact set change is compared like any other
     FIELDS change: plain inequality, in either direction.
     """
-    FIELDS = ("proximity", "hops", "exchange", "attribution", "direction")
+    FIELDS = ("proximity", "hops", "exchange", "attribution", "direction", "risk")
     after_by_id = {p["entity_id"]: p for p in after}
     out = []
     for entity_id, prev in before.items():
@@ -257,7 +257,8 @@ async def recheck(store: EvidenceStore, urls: Optional[List[str]] = None,
     not filter wallets -- it names onion hosts, and a wallet address would
     never match one.
     """
-    from .correlate import wallet_exchange_paths
+    from .correlate import (_attach_wallet_risk, _attach_wallet_service_intelligence,
+                            wallet_exchange_paths)
     from .modules import get_module
     from .modules.darkweb_module import DarkwebModule
 
@@ -306,8 +307,17 @@ async def recheck(store: EvidenceStore, urls: Optional[List[str]] = None,
     # Alerting on those too would bury the one delta an analyst actually
     # watches this case for under every address adjacent to it in the graph.
     watched_ids = {w["entity_id"] for w in wallets}
-    wallets_before = {p["entity_id"]: p for p in wallet_exchange_paths(store)
-                      if p["entity_id"] in watched_ids}
+    wallets_before_list = [p for p in wallet_exchange_paths(store) if p["entity_id"] in watched_ids]
+    # FIELDS (below) compares risk before/after, same as every other tracked
+    # field -- so a wallet whose risk crosses a level with no path/attribution
+    # change (a fresh Chainabuse report, a newly tagged mixing hop) still
+    # surfaces as MOVED instead of only ever showing up in risk_alerts.
+    # _attach_wallet_service_intelligence must run first: risk scoring reads
+    # service_tags off each row rather than recomputing it (see
+    # _attach_wallet_risk's own docstring).
+    _attach_wallet_service_intelligence(store, wallets_before_list)
+    _attach_wallet_risk(store, wallets_before_list)
+    wallets_before = {p["entity_id"]: p for p in wallets_before_list}
     wallets_checked: List[dict] = []
     for w in wallets:
         module_type = _CHAIN_MODULE_TYPE.get(w["etype"])
@@ -324,6 +334,8 @@ async def recheck(store: EvidenceStore, urls: Optional[List[str]] = None,
             "status": _wallet_verdict(store, w["target_id"]) if has_data else CHECK_FAILED,
         })
     wallets_after = [p for p in wallet_exchange_paths(store) if p["entity_id"] in watched_ids]
+    _attach_wallet_service_intelligence(store, wallets_after)
+    _attach_wallet_risk(store, wallets_after)
     wallet_delta_rows = wallet_deltas(wallets_before, wallets_after)
 
     return {"checked": checked, "wallets_checked": wallets_checked,

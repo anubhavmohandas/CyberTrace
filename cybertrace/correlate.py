@@ -1113,6 +1113,12 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
                    SENT_FUNDS_TO records which, so a path whose last hop is a
                    direction-blind TRANSACTED_WITH reports UNKNOWN rather than
                    assuming the useful one.
+      chain        the traced address' own etype (BTC_ADDRESS/ETH_ADDRESS/...),
+                   same string monitor.py's wallets_checked already reports as
+                   "chain" -- every EVM chain's address is otherwise an
+                   indistinguishable bare "0x...", so a case with wallets on
+                   more than one chain needs it on every row, not just the
+                   traced start address.
 
     Still never folded into entity_funnel_profile / candidate_operators:
     reachability is not control, an address reaching an exchange is not the
@@ -1160,10 +1166,15 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
     # request, and this value is what the CLI, the investigator, the markdown
     # brief and the GUI export all print. wallet_trace_report already read
     # raw_value; every other reader was getting the key.
-    values = {r["entity_id"]: (r["raw_value"] or r["normalized_value"])
-              for r in store._all(
-        "SELECT entity_id, normalized_value, raw_value FROM entities "
-        "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS','BNB_ADDRESS','POLYGON_ADDRESS','TRX_ADDRESS','SOL_ADDRESS')")}
+    wallet_rows = store._all(
+        "SELECT entity_id, normalized_value, raw_value, etype FROM entities "
+        "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS','BNB_ADDRESS','POLYGON_ADDRESS','TRX_ADDRESS','SOL_ADDRESS')")
+    values = {r["entity_id"]: (r["raw_value"] or r["normalized_value"]) for r in wallet_rows}
+    # Same etype string monitor.py's wallets_checked already reports as
+    # "chain" (recheck()) -- every EVM chain's address string is otherwise
+    # an indistinguishable bare "0x...", so a case with wallets on more than
+    # one chain needs this on every row, not just the ones re-checked by watch.
+    chain_of = {r["entity_id"]: r["etype"] for r in wallet_rows}
 
     exchange_of = _vasp_endpoints(store, values)
 
@@ -1212,6 +1223,7 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
                  if v["exchange"] != end["exchange"] and v["exchange"] not in direct_brands),
                 key=lambda v: (v["hops"], v["exchange"]))
             out.append({"entity_id": start, "value": values[start],
+                        "chain": chain_of[start],
                         "exchange": end["exchange"], "hops": 0, "confidence": 1.0,
                         "path": [start], "evidence_ids": end["evidence_ids"],
                         "attribution": end["attribution"],
@@ -1237,6 +1249,7 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
                     if peer in exchange_of:
                         end = exchange_of[peer]
                         found = {"entity_id": start, "value": values[start],
+                                 "chain": chain_of[start],
                                  "exchange": end["exchange"], "hops": hop,
                                  "confidence": round(EXCHANGE_HOP_DECAY ** hop, 4),
                                  "path": new_path,
@@ -1546,6 +1559,7 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4,
     return {
         "entity_id": start_id,
         "address": wallet_address,
+        "chain": etype,
         "path": [by_id[eid]["raw_value"] if eid in by_id else eid for eid in path_ids],
         "hops": hit["hops"] if hit else None,
         "exchange": hit["exchange"] if hit else None,
@@ -2454,8 +2468,22 @@ def build_dossier(store: EvidenceStore, cand: dict, aliases: List[dict],
     chain = evidence_chain(
         store, [o for f in cand["funnels"].values() for o in f["evidence_ids"]])
     prefix = {"OPERATOR": "OP", "INFRA": "IN"}.get(cand["role"], "IP")
+    # candidate_id is a deterministic function of entity_id, computed before
+    # this row is ever persisted (see save_candidates) -- so feedback from an
+    # earlier run against the same entity is already findable here, and this
+    # is the one place export_case_gui.py and investigator.py each
+    # independently re-derived the same verdict from. Canonical here means
+    # render_markdown/render_dossier_html/CLI JSON get it for free too,
+    # instead of only the two surfaces that queried it themselves.
+    feedback = store.feedback_for_entity(cand["entity_id"])
+    verdict = None
+    if feedback:
+        latest = feedback[0]
+        verdict = {"outcome": latest["outcome"], "note": latest["note"] or "",
+                  "analyst": latest["analyst"] or "", "recorded_at": latest["recorded_at"]}
     return {
         "candidate_id": f"{prefix}-{cand['entity_id'][-8:]}",
+        "verdict": verdict,
         "role": cand["role"],
         "confidence_level": confidence_level(cand["role"], cand["score"], n_signal,
                                              bool(relevant)),
@@ -2635,9 +2663,21 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
                   ""]
         for w in results["wallet_exchange_paths"]:
             role = f" · {w['wallet_role']} wallet (VASP-disclosed)" if w.get("wallet_role") else ""
-            lines.append(f"- `{w['value']}` → {w['proximity']} · {w['hops']} hop(s) → "
+            lines.append(f"- `{w['value']}` ({w['chain']}) → {w['proximity']} · "
+                         f"{w['hops']} hop(s) → "
                          f"{w['exchange']} · {w['attribution']} ({w['attribution_source']}) · "
                          f"flow {w['direction']} · reachability {w['confidence']:.2f}{role}")
+            # direct_vasp_contacts/secondary_vasp_contacts (AT_VASP rows only)
+            # were previously narrated only in trace-wallet's own CLI `flags`
+            # prose -- a self-attributed suspect's own additional VASP
+            # relationship (e.g. direct Binance deposits alongside a primary
+            # designation) was invisible in the case-level report.
+            if w.get("direct_vasp_contacts"):
+                names = ", ".join(sorted({c["exchange"] for c in w["direct_vasp_contacts"]}))
+                lines.append(f"  - also directly reaches: {names}")
+            if w.get("secondary_vasp_contacts"):
+                names = ", ".join(sorted({c["exchange"] for c in w["secondary_vasp_contacts"]}))
+                lines.append(f"  - reaches further out: {names}")
         lines.append("")
 
     service_hits = [(w, tag) for w in results.get("wallet_exchange_paths", [])
@@ -2681,6 +2721,14 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
                   f"- entity: {d['entity']['etype']} `{d['entity']['value']}`",
                   f"- markets: {', '.join(d['markets']) or '—'}",
                   f"- evidence records: {d['evidence_count']}"]
+        if d.get("verdict"):
+            v = d["verdict"]
+            note = f" — {v['note']}" if v["note"] else ""
+            # REJECTED damps score (see risk/correlate's own feedback-damping
+            # note) -- without this line, a low score on the same candidate a
+            # human already rejected reads as an unexplained engine finding.
+            lines.append(f"- analyst verdict: **{v['outcome']}**{note} "
+                         f"(by {v['analyst'] or 'unknown'}, {v['recorded_at']})")
         if d["funnels"]:
             lines.append("- funnels: " + ", ".join(
                 f"{f} {v['best_conf']:.2f}" for f, v in sorted(d["funnels"].items())))
@@ -2718,6 +2766,8 @@ NODE_STYLE = {
     "ETH_ADDRESS":      ("#d35400", "square", 20),
     "BNB_ADDRESS":      ("#f0b90b", "square", 20),
     "POLYGON_ADDRESS":  ("#8247e5", "square", 20),
+    "TRX_ADDRESS":      ("#ff0013", "square", 20),
+    "SOL_ADDRESS":      ("#14f195", "square", 20),
     "IP":               ("#16a085", "hexagon", 22),
     "DOMAIN":           ("#1abc9c", "dot", 16),
     "HOSTING_PROVIDER": ("#27ae60", "box", 18),
@@ -2940,18 +2990,26 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
                    "a relationship. Confidence is hop decay, not a probability. Flow UNKNOWN "
                    "means the capture recorded that a transaction happened and not which way "
                    "value moved: that is not a deposit.</p>"
-                   "<table><tr><th>wallet</th><th>proximity</th><th>hops</th><th>flow</th>"
+                   "<table><tr><th>wallet</th><th>chain</th><th>proximity</th><th>hops</th>"
+                   "<th>flow</th>"
                    "<th>VASP</th><th>wallet role</th><th>attributed by</th>"
-                   "<th>reachability</th></tr>")
+                   "<th>reachability</th><th>other VASP contacts</th></tr>")
         for w in results["wallet_exchange_paths"]:
+            # direct_vasp_contacts/secondary_vasp_contacts (AT_VASP rows only)
+            # -- a self-attributed suspect's own additional VASP relationship
+            # was previously invisible outside trace-wallet's CLI prose.
+            contacts = [c["exchange"] for c in w.get("direct_vasp_contacts") or []] \
+                + [c["exchange"] for c in w.get("secondary_vasp_contacts") or []]
             out.append(f"<tr><td class=mono>{_esc(w['value'])}</td>"
+                       f"<td>{_esc(w['chain'])}</td>"
                        f"<td>{_esc(w['proximity'])}</td><td>{w['hops']}</td>"
                        f"<td>{_esc(w['direction'])}</td>"
                        f"<td>{_esc(w['exchange'])}</td>"
                        f"<td>{_esc(w['wallet_role']) if w.get('wallet_role') else '—'}</td>"
                        f"<td class=wrap>{_esc(w['attribution'])} · "
                        f"{_esc(w['attribution_source'])}</td>"
-                       f"<td>{w['confidence']:.2f}</td></tr>")
+                       f"<td>{w['confidence']:.2f}</td>"
+                       f"<td class=wrap>{_esc(', '.join(sorted(set(contacts)))) if contacts else '—'}</td></tr>")
         out.append("</table>")
 
     service_hits = [(w, tag) for w in results.get("wallet_exchange_paths", [])
@@ -3014,6 +3072,12 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
         out.append(f"<p class=dim>{_esc(c['entity']['etype'])} · seen on "
                    f"{len(c['markets'])} market(s) · {c['evidence_count']} evidence "
                    f"record(s) · discrimination {c.get('discrimination', 1.0)}</p>")
+        if c.get("verdict"):
+            v = c["verdict"]
+            note = f" — {_esc(v['note'])}" if v["note"] else ""
+            out.append(f"<p><b>Analyst verdict: {_esc(v['outcome'])}</b>{note} "
+                       f"<span class=dim>(by {_esc(v['analyst'] or 'unknown')}, "
+                       f"{_esc(v['recorded_at'])})</span></p>")
         out.append("<ul>" + "".join(f"<li class=mono>{_esc(m)}</li>"
                                     for m in c["markets"]) + "</ul>")
         if contra:

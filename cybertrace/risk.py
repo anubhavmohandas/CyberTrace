@@ -374,6 +374,12 @@ def _extract_features(wallet_entity_id: str, wallet_address: str,
 
 
 def _contribution(feature: dict) -> dict:
+    # amount = base_amount * multiplier holds for every rule, always -- but
+    # "multiplier" is a 0..1 confidence for every rule except
+    # fraud.chainabuse.corroboration.v1, where raw_confidence deliberately
+    # carries a raw report count (see that rule's own "+2 per report" `why`)
+    # so it can exceed 1. A reader assuming multiplier<=1 would misread e.g.
+    # multiplier: 3 there as a data error rather than "3 corroborating reports".
     rule = RULES[feature["rule_id"]]
     base = rule["base"]
     confidence = feature.get("raw_confidence", 1.0)

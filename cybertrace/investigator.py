@@ -62,12 +62,6 @@ def build_context(store: EvidenceStore, candidate_id: Optional[str] = None) -> d
 
     candidates, evidence_by_id, candidate_ids = [], {}, set()
     for d in dossiers:
-        verdict = None
-        feedback = store.feedback_for_entity(d["entity"]["entity_id"])
-        if feedback:
-            latest = feedback[0]
-            verdict = {"outcome": latest["outcome"], "note": latest["note"] or "",
-                       "analyst": latest["analyst"] or "", "recorded_at": latest["recorded_at"]}
         for ke in d["key_evidence"]:
             evidence_by_id[ke["observation_id"]] = {
                 "id": ke["observation_id"], "extraction_method": ke["extraction_method"],
@@ -82,7 +76,9 @@ def build_context(store: EvidenceStore, candidate_id: Optional[str] = None) -> d
             "assessment": _assessment(d),
             "key_evidence": d["key_evidence"], "contradictions": d["contradictions"],
             "recommended_actions": d["recommended_actions"], "limitations": d["limitations"],
-            "timeline": d["timeline"], "verdict": verdict,
+            # build_dossier already computed this (canonical, Loop 40) -- no
+            # second feedback_for_entity query here.
+            "timeline": d["timeline"], "verdict": d["verdict"],
         })
 
     suppressed_relationships = [{
@@ -116,10 +112,14 @@ def build_context(store: EvidenceStore, candidate_id: Optional[str] = None) -> d
 
     # Wallet reachability is its own report, not a candidate (see
     # correlate.wallet_exchange_paths) -- pulled in here only so an answer can
-    # cite its evidence the same validated way as everything else.
+    # cite its evidence the same validated way as everything else. Includes
+    # direct_vasp_contacts/secondary_vasp_contacts' own evidence_ids (AT_VASP
+    # rows only), not just the primary path's -- _wallet_exchange cites both.
     wallet_exchange_paths = results["wallet_exchange_paths"]
     for w in wallet_exchange_paths:
-        for e in evidence_chain(store, w["evidence_ids"]):
+        contacts = (w.get("direct_vasp_contacts") or []) + (w.get("secondary_vasp_contacts") or [])
+        ids = w["evidence_ids"] + [i for c in contacts for i in c.get("evidence_ids", [])]
+        for e in evidence_chain(store, ids):
             evidence_by_id[e["observation_id"]] = {
                 "id": e["observation_id"], "extraction_method": e["extraction_method"],
                 "url": e["url"], "sha256": e["sha256"], "observed_at": e["observed_at"],
@@ -265,17 +265,34 @@ def _wallet_exchange(ctx: dict) -> dict:
         risk_phrase = (f" Risk: {r['risk_level']} (score {r['risk_score']}, {r['risk_policy_version']})."
                        if r.get("risk_score") is not None
                        else " Risk: INSUFFICIENT_EVIDENCE -- not a finding of low risk.")
+        # direct/secondary_vasp_contacts (AT_VASP rows only) are structured
+        # fields wallet_exchange_paths already computed -- this was
+        # previously narrated only in trace-wallet's own `flags` prose, so a
+        # suspect's own additional VASP relationships (e.g. Polyanin's direct
+        # Binance deposits alongside his primary designation) were invisible
+        # to every question this module answers.
+        contacts = (w.get("direct_vasp_contacts") or []) + (w.get("secondary_vasp_contacts") or [])
+        contacts_phrase = ""
+        if w.get("direct_vasp_contacts"):
+            names = ", ".join(sorted({c["exchange"] for c in w["direct_vasp_contacts"]}))
+            contacts_phrase += f" Also directly reaches: {names}."
+        if w.get("secondary_vasp_contacts"):
+            names = ", ".join(sorted({c["exchange"] for c in w["secondary_vasp_contacts"]}))
+            contacts_phrase += f" Reaches further out: {names}."
+        contact_evidence = [i for c in contacts for i in c.get("evidence_ids", [])]
         claims.append({
-            "text": f"`{_short(w['value'], 32)}` — {w['proximity']} to {w['exchange']} "
+            "text": f"`{_short(w['value'], 32)}` ({w['chain']}) — {w['proximity']} to {w['exchange']} "
                     f"({w['hops']} hop(s), flow {w['direction']}, "
                     f"{w['attribution']}: {w['attribution_source']}{role}, "
-                    f"reachability {w['confidence']:.2f}).{risk_phrase}",
-            "kind": "INFERRED", "evidence_ids": w["evidence_ids"],
+                    f"reachability {w['confidence']:.2f}).{risk_phrase}{contacts_phrase}",
+            "kind": "INFERRED", "evidence_ids": w["evidence_ids"] + contact_evidence,
             "candidate_ids": [], "finding_ids": [],
         })
     not_fresh = [name for name, state in ctx.get("data_source_status", {}).items()
                 if state != "FRESH"]
-    return {"answer": "Nearest VASP-attributed address for each traced wallet:",
+    chains = ", ".join(sorted({w["chain"] for w in paths}))
+    return {"answer": f"Nearest VASP-attributed address for each traced wallet "
+                      f"(chains involved: {chains}):",
             "claims": claims,
             "limitations": ([
                 f"Data source(s) not fresh: {', '.join(not_fresh)} -- a 'no match' from "
@@ -322,6 +339,21 @@ def _boundary(ctx: dict, lead: str = "No. ") -> dict:
         "candidate_ids": [c["candidate_id"]],
         "finding_ids": [contra["finding_id"]] if contra.get("finding_id") else [],
     } for c in contradicted for contra in c["contradictions"]]
+    # ctx["candidates"][i]["verdict"] (build_context) was computed but never
+    # read by any answer path -- an analyst's own recorded conclusion, kept
+    # distinguishable from the engine's score/band via the already-defined
+    # but previously unused ANALYST_VERDICT claim kind (see CLAIM_KINDS /
+    # llm_provider's own prompt, which already told the live model this kind
+    # exists).
+    claims += [{
+        "text": f"Analyst verdict on {c['entity']['etype'].replace('_', ' ').lower()} "
+                f"`{_short(c['entity']['value'], 32)}`: {c['verdict']['outcome']}" +
+                (f" — {c['verdict']['note']}" if c['verdict']['note'] else "") +
+                f" (recorded by {c['verdict']['analyst'] or 'unknown'} "
+                f"at {c['verdict']['recorded_at']}).",
+        "kind": "ANALYST_VERDICT", "evidence_ids": [],
+        "candidate_ids": [c["candidate_id"]], "finding_ids": [],
+    } for c in ctx["candidates"] if c.get("verdict")]
     answer = (f"{lead}The strongest candidate is {best['entity']['etype'].replace('_', ' ').lower()} "
               f"`{_short(best['entity']['value'], 32)}` at {best['score']:.2f} ({best['confidence_level']}), "
               f"which is shared-artifact evidence, not proof of common control.")
@@ -362,7 +394,7 @@ _INTENTS = [
     (("why is this here", "why here", "why is it here"), _why_here),
     (("changed", "different", "update", "since"), _changed),
     (("next step", "investigate next", "recommended action"), _next_steps),
-    (("vasp", "exchange", "deposit"), _wallet_exchange),
+    (("vasp", "exchange", "deposit", "wallet", "risk", "alert", "chain"), _wallet_exchange),
 ]
 
 
@@ -372,7 +404,8 @@ def _deterministic_answer(question: str, ctx: dict) -> dict:
         if any(k in q for k in keywords):
             return handler(ctx)
     return _insufficient("Try asking about connections, suppressed relationships, "
-                          "the strongest candidate, what changed, or next steps.")
+                          "the strongest candidate, what changed, wallet/VASP "
+                          "reachability and risk, or next steps.")
 
 
 # ------------------------------------------------------------------------ live

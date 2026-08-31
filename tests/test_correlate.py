@@ -511,6 +511,18 @@ def test_html_graph_is_self_contained_and_marks_hypotheses(tmp_path):
     assert not (tmp_path / "lib").exists()         # single portable artifact
 
 
+def test_node_style_covers_every_traced_chain():
+    """TRX_ADDRESS/SOL_ADDRESS (the two most recently added chains) fell back
+    to DEFAULT_STYLE's plain grey dot -- visually indistinguishable from each
+    other and from every other unstyled node type on the evidence graph."""
+    from cybertrace.correlate import DEFAULT_STYLE, NODE_STYLE
+    chain_etypes = ("BTC_ADDRESS", "ETH_ADDRESS", "BNB_ADDRESS", "POLYGON_ADDRESS",
+                    "TRX_ADDRESS", "SOL_ADDRESS")
+    styles = {etype: NODE_STYLE[etype] for etype in chain_etypes}
+    assert len(set(styles.values())) == len(chain_etypes), "every chain needs its own style"
+    assert DEFAULT_STYLE not in styles.values()
+
+
 def test_html_graph_draws_clone_contradictions(tmp_path):
     out = tmp_path / "clone.html"
     with EvidenceStore(str(tmp_path / "e.db")) as store:
@@ -1661,6 +1673,9 @@ def test_wallet_trace_report_traces_a_bnb_wallet_to_a_real_ofac_designation(tmp_
 
         report = wallet_trace_report(store, BNB_SUSPECT, chain="bnb")
         assert report is not None
+        # A bare "0x..." string is chain-ambiguous on its own -- report/CLI/GUI
+        # readers need this field to tell a BNB wallet apart from an ETH one.
+        assert report["chain"] == "BNB_ADDRESS"
         assert report["hops"] == 1
         assert report["proximity"] == DIRECT
         assert report["direction"] == TO_VASP
@@ -1890,6 +1905,40 @@ def test_vasp_disclosed_direction_is_independent_of_attribution_source(tmp_path)
 
 # --- wallet -> exchange reachability ------------------------------------------
 
+def test_direct_vasp_contacts_surface_in_markdown_and_html_case_reports(tmp_path):
+    """direct_vasp_contacts/secondary_vasp_contacts were already computed
+    onto every AT_VASP wallet_exchange_paths row and narrated in
+    trace-wallet's own CLI flags, but the case-level Markdown/HTML reports
+    (run by `correlate`, not `trace-wallet`) never printed them -- a
+    self-attributed suspect's own additional VASP relationship was invisible
+    outside the single-wallet CLI path."""
+    from cybertrace.evidence import enrich_bitcoin, label_exchange
+
+    suspect = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+    other_vasp_wallet = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        assert label_exchange(store, suspect, "VASP A") is not None
+        assert label_exchange(store, other_vasp_wallet, "VASP B") is not None
+        addr = store.upsert_entity("BTC_ADDRESS", suspect)
+        sid = store.insert_snapshot(store.upsert_target("btc:" + suspect), {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": suspect, "counterparty_addresses": [other_vasp_wallet]},
+                       "bitcoin")
+
+        results = run_correlation(store)
+        hit = next(w for w in results["wallet_exchange_paths"] if w["entity_id"] == addr)
+        assert [c["exchange"] for c in hit["direct_vasp_contacts"]] == ["vasp b"]
+
+        brief = render_markdown(results["dossiers"], results)
+        assert "also directly reaches: vasp b" in brief
+
+        out = tmp_path / "case.html"
+        render_dossier_html(results, str(out))
+        page = out.read_text()
+        assert "other VASP contacts" in page
+        assert "vasp b" in page
+
+
 def test_wallet_exchange_paths_direct_hit(tmp_path):
     with EvidenceStore(str(tmp_path / "e.db")) as store:
         rel = label_exchange(store, BTC_VALID, "Test Exchange", analyst="jdoe",
@@ -1902,6 +1951,7 @@ def test_wallet_exchange_paths_direct_hit(tmp_path):
         assert paths[0]["hops"] == 0
         assert paths[0]["confidence"] == 1.0
         assert paths[0]["evidence_ids"]
+        assert paths[0]["chain"] == "BTC_ADDRESS"
 
 
 def test_wallet_exchange_paths_direct_hit_tron(tmp_path):
@@ -1923,6 +1973,10 @@ def test_wallet_exchange_paths_direct_hit_tron(tmp_path):
         assert paths[0]["value"] == TRX_VALID
         assert paths[0]["value"] != f"trx:{TRX_VALID.lower()}"
         assert paths[0]["hops"] == 0
+        # Chain-blind by string alone at AT_VASP too, same as the hop-found
+        # branch (test_bnb_and_ethereum_entities_never_collide_...) -- pins
+        # that chain_of is read per-entity, not defaulted to BTC.
+        assert paths[0]["chain"] == "TRX_ADDRESS"
 
 
 ETH_VALID = "0x742d35Cc6634C0532925a3b844Bc9e7595f12345"
@@ -1951,6 +2005,8 @@ def test_wallet_exchange_paths_eth_wallet_to_wallet_to_vasp(tmp_path):
         assert row["proximity"] == DIRECT
         assert row["direction"] == TO_VASP
         assert row["evidence_ids"]
+        # Non-AT_VASP ("found") branch carries chain too, not just hop 0 rows.
+        assert row["chain"] == "ETH_ADDRESS"
         assert row["path"] == [addr, store.find_entity("ETH_ADDRESS", ETH_VASP)]
 
 
@@ -3253,6 +3309,41 @@ def test_rejected_feedback_damps_the_entitys_score(tmp_path):
         # single-funnel candidate below min_conf entirely -- suppressed
         # candidacy is a stronger form of "damped", not a different outcome.
         assert after_dossier is None or after_dossier["score"] < before_score
+
+
+def test_recorded_verdict_is_visible_in_markdown_and_html_exports(tmp_path):
+    """build_dossier's own verdict (Loop 40) must reach the two "official"
+    deliverables an investigator hands off -- previously an analyst's
+    recorded conclusion visibly damped a candidate's score with no
+    explanation anywhere in the exported case file, even though
+    export_case_gui.py and investigator.py each separately had it for their
+    own surfaces."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=[{'armored': KEY_A}]), store)
+        ingest(_result(ONION_B, pgp_keys=[{'armored': KEY_A}]), store)
+        before = run_correlation(store)
+        cid = before["dossiers"][0]["candidate_id"]
+        assert before["dossiers"][0]["verdict"] is None
+
+        store.record_feedback(cid, "CONFIRMED", note="matched a signed commit key",
+                              analyst="jdoe")
+
+        results = run_correlation(store)
+        dossier = next(d for d in results["dossiers"] if d["candidate_id"] == cid)
+        assert dossier["verdict"] == {
+            "outcome": "CONFIRMED", "note": "matched a signed commit key",
+            "analyst": "jdoe", "recorded_at": dossier["verdict"]["recorded_at"],
+        }
+
+        brief = render_markdown(results["dossiers"], results)
+        assert "analyst verdict: **CONFIRMED**" in brief
+        assert "matched a signed commit key" in brief
+
+        out = tmp_path / "case.html"
+        render_dossier_html(results, str(out))
+        page = out.read_text()
+        assert "Analyst verdict: CONFIRMED" in page
+        assert "matched a signed commit key" in page
 
 
 def test_confirmed_feedback_lifts_the_entitys_score(tmp_path):

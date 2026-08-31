@@ -215,6 +215,73 @@ def test_deterministic_mode_answers_nearest_exchange_with_a_real_disclosed_walle
     assert any("disclosed as a cold wallet" in c["text"] for c in result["claims"])
 
 
+def test_deterministic_mode_wallet_answer_surfaces_chain_and_direct_vasp_contacts(store):
+    """chain (an EVM address is otherwise an indistinguishable bare "0x...")
+    and direct_vasp_contacts (a self-attributed suspect's own additional VASP
+    relationship, AT_VASP rows only) were previously invisible to every
+    natural-language question -- only trace-wallet's own CLI `flags` prose
+    had them. Same AT_VASP construction test_monitor.py's watch-cycle tests
+    already use."""
+    from cybertrace.evidence import enrich_bitcoin, label_exchange
+    suspect = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+    other_vasp_wallet = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+    assert label_exchange(store, suspect, "VASP A") is not None
+    assert label_exchange(store, other_vasp_wallet, "VASP B") is not None
+    addr = store.upsert_entity("BTC_ADDRESS", suspect)
+    sid = store.insert_snapshot(store.upsert_target("btc:" + suspect), {}, "bitcoin")
+    enrich_bitcoin(store, sid, addr,
+                   {"address": suspect, "counterparty_addresses": [other_vasp_wallet]},
+                   "bitcoin")
+
+    result = investigator.answer(store, "tortaxi", "which vasp is closest to this wallet")
+    assert result["mode"] == "deterministic"
+    assert "chains involved: BTC_ADDRESS" in result["answer"]
+    assert any("(BTC_ADDRESS)" in c["text"] for c in result["claims"])
+    assert any("Also directly reaches: vasp b" in c["text"] for c in result["claims"])
+
+
+@pytest.mark.parametrize("question", [
+    "are there any high-risk wallet alerts?",
+    "tell me about this wallet",
+    "which chains are involved in this case?",
+])
+def test_deterministic_router_reaches_wallet_exchange_for_risk_chain_and_wallet_questions(
+        store, question):
+    """_wallet_exchange was previously only reachable via "vasp"/"exchange"/
+    "deposit" -- a literal risk/wallet/chain question fell through to the
+    generic _insufficient fallback even though a working, grounded handler
+    already existed for it."""
+    _label_a_traced_wallet(store)
+    result = investigator.answer(store, "tortaxi", question)
+    assert result["mode"] == "deterministic"
+    assert result["claims"], f"expected a grounded wallet claim for: {question!r}"
+
+
+def test_boundary_answer_surfaces_a_recorded_analyst_verdict(store):
+    """analyst_feedback (candidates.verdict in build_context) was computed
+    into context but no answer path ever read it -- "has this candidate
+    already been reviewed?" got no verdict-aware answer even deterministically.
+    Also exercises ANALYST_VERDICT, a claim kind CLAIM_KINDS/llm_provider's
+    own prompt already defined but no answer path had ever emitted."""
+    from cybertrace.correlate import run_correlation
+
+    before = run_correlation(store)
+    cid = before["dossiers"][0]["candidate_id"]
+    # CONFIRMED, not REJECTED -- REJECTED damps score (see
+    # test_rejected_feedback_damps_the_entitys_score) and can push a
+    # candidate below min_conf, dropping it from dossiers entirely before
+    # this test gets to check whether its verdict is answerable at all.
+    store.record_feedback(cid, "CONFIRMED", note="matched a signed commit key", analyst="jdoe")
+
+    result = investigator.answer(store, "tortaxi", "does this prove the same operator?")
+    assert result["mode"] == "deterministic"
+    verdict_claims = [c for c in result["claims"] if c["kind"] == "ANALYST_VERDICT"]
+    assert verdict_claims, "expected an ANALYST_VERDICT claim"
+    assert "CONFIRMED" in verdict_claims[0]["text"]
+    assert "matched a signed commit key" in verdict_claims[0]["text"]
+    assert verdict_claims[0]["candidate_ids"] == [cid]
+
+
 def test_live_mode_strips_fabricated_wallet_evidence_id(store, monkeypatch):
     _label_a_traced_wallet(store)
     fake = FakeProvider({"nearest exchange question": {

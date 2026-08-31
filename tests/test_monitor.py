@@ -9,7 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from cybertrace.correlate import wallet_exchange_paths
+from cybertrace.correlate import (
+    _attach_wallet_risk, _attach_wallet_service_intelligence, wallet_exchange_paths,
+)
 from cybertrace.evidence import EvidenceStore, _ingest_enrichment, ingest, label_exchange
 from cybertrace.modules.base import ModuleResult
 from cybertrace.monitor import (
@@ -122,7 +124,8 @@ class TestWalletDeltas:
     touch (that is `before`'s whole job -- see wallet_deltas' own docstring)."""
 
     ROW = {"value": BTC_VALID, "proximity": "DIRECT", "hops": 1,
-          "exchange": "Binance", "attribution": "TAG_ATTESTED", "direction": "TO_VASP"}
+          "exchange": "Binance", "attribution": "TAG_ATTESTED", "direction": "TO_VASP",
+          "risk": {"risk_level": "LOW", "risk_score": 0}}
 
     def test_new_when_a_wallet_only_has_a_path_after(self):
         out = wallet_deltas({}, [{"entity_id": "e1", **self.ROW}])
@@ -138,6 +141,17 @@ class TestWalletDeltas:
     def test_identical_path_produces_no_delta(self):
         before = {"e1": dict(self.ROW)}
         assert wallet_deltas(before, [{"entity_id": "e1", **self.ROW}]) == []
+
+    def test_moved_when_only_risk_changes(self):
+        """A wallet whose risk crosses a level with no path/attribution change
+        (a fresh Chainabuse report, a newly tagged mixing hop) must still
+        surface as MOVED -- not only ever show up in risk_alerts."""
+        before = {"e1": dict(self.ROW)}
+        after_row = {**self.ROW, "risk": {"risk_level": "HIGH", "risk_score": 80}}
+        out = wallet_deltas(before, [{"entity_id": "e1", **after_row}])
+        assert len(out) == 1 and out[0]["change"] == "MOVED"
+        assert out[0]["before"]["risk"]["risk_level"] == "LOW"
+        assert out[0]["after"]["risk"]["risk_level"] == "HIGH"
 
     def test_no_gone_case_when_a_tracked_wallet_is_absent_from_after(self):
         """The evidence store is append-only -- a path already found cannot be
@@ -176,7 +190,7 @@ class TestVaspContactDeltas:
     ROW = {"value": BTC_VALID, "proximity": "AT_VASP", "hops": 0,
           "exchange": "VASP A", "attribution": "ANALYST_ASSERTED",
           "direction": "UNKNOWN", "direct_vasp_contacts": [],
-          "secondary_vasp_contacts": []}
+          "secondary_vasp_contacts": [], "risk": {"risk_level": "LOW", "risk_score": 0}}
 
     def test_a_new_direct_vasp_contact_is_a_moved_delta(self):
         before = {"e1": dict(self.ROW)}
@@ -205,7 +219,8 @@ class TestVaspContactDeltas:
         all -- must not KeyError, and the missing-field default (empty
         contact set) must not manufacture a false delta."""
         row = {"value": BTC_VALID, "proximity": "DIRECT", "hops": 1,
-              "exchange": "Binance", "attribution": "TAG_ATTESTED", "direction": "TO_VASP"}
+              "exchange": "Binance", "attribution": "TAG_ATTESTED", "direction": "TO_VASP",
+              "risk": {"risk_level": "LOW", "risk_score": 0}}
         before = {"e1": dict(row)}
         assert wallet_deltas(before, [{"entity_id": "e1", **row}]) == []
         out = wallet_deltas({}, [{"entity_id": "e1", **row}])
@@ -274,6 +289,8 @@ class TestVaspContactWatchCycle:
             cycle1 = [p for p in wallet_exchange_paths(s) if p["entity_id"] == suspect]
             assert cycle1[0]["proximity"] == "AT_VASP"
             assert cycle1[0]["secondary_vasp_contacts"] == []
+            _attach_wallet_service_intelligence(s, cycle1)
+            _attach_wallet_risk(s, cycle1)
             before = {p["entity_id"]: p for p in cycle1}
 
             # Cycle 2: suspect -> w1 -> w2 -> VASP B appears.
@@ -283,6 +300,8 @@ class TestVaspContactWatchCycle:
             assert label_exchange(s, vasp_b, "VASP B") is not None
 
             after = [p for p in wallet_exchange_paths(s) if p["entity_id"] == suspect]
+            _attach_wallet_service_intelligence(s, after)
+            _attach_wallet_risk(s, after)
             deltas = wallet_deltas(before, after)
 
         assert len(after[0]["secondary_vasp_contacts"]) == 1
@@ -304,6 +323,8 @@ class TestVaspContactWatchCycle:
             # Cycle 1: the suspect already directly reaches VASP B.
             cycle1 = [p for p in wallet_exchange_paths(s) if p["entity_id"] == suspect]
             assert [c["exchange"] for c in cycle1[0]["direct_vasp_contacts"]] == ["vasp b"]
+            _attach_wallet_service_intelligence(s, cycle1)
+            _attach_wallet_risk(s, cycle1)
             before = {p["entity_id"]: p for p in cycle1}
 
             # Cycle 2: a NEW secondary VASP C appears one hop further out.
@@ -317,6 +338,8 @@ class TestVaspContactWatchCycle:
             assert label_exchange(s, vasp_c, "VASP C") is not None
 
             after = [p for p in wallet_exchange_paths(s) if p["entity_id"] == suspect]
+            _attach_wallet_service_intelligence(s, after)
+            _attach_wallet_risk(s, after)
             deltas = wallet_deltas(before, after)
 
         assert [c["exchange"] for c in after[0]["direct_vasp_contacts"]] == ["vasp b"]
