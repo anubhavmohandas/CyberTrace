@@ -1507,7 +1507,7 @@ def test_render_reports_omit_the_service_section_when_there_is_nothing_to_show(t
     must not grow an empty 'Observed service intelligence' section in either
     rendering -- the heading is presence-gated, not always printed."""
     with EvidenceStore(str(tmp_path / "e.db")) as store:
-        suspect = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        store.upsert_entity("BTC_ADDRESS", BTC_VALID)
         label_exchange(store, BTC_VALID, "Test Exchange")
 
         results = run_correlation(store)

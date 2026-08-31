@@ -3,9 +3,9 @@
 import asyncio
 import json
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Set
 
 from .base import BaseModule, ModuleResult, SourceResult
 
@@ -73,7 +73,7 @@ class UsernameModule(BaseModule):
         
         # Build summary
         result.summary = self._build_summary(result)
-        result.end_time = datetime.utcnow()
+        result.end_time = datetime.now(timezone.utc)
         
         return result
     

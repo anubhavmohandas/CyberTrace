@@ -26,7 +26,7 @@ import html
 import json
 import math
 import re
-from collections import Counter, defaultdict
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Set
@@ -983,6 +983,21 @@ def _attach_wallet_service_intelligence(store: EvidenceStore, wallet_paths: List
         ]
 
 
+def _attach_wallet_risk(store: EvidenceStore, wallet_paths: List[dict]) -> None:
+    """Case-report-level sibling of wallet_trace_report's own `risk` field,
+    same shape as _attach_wallet_service_intelligence above: mutates each
+    already-computed wallet_exchange_paths() row with `risk`, so a case-wide
+    correlate run surfaces risk in Markdown/HTML/JSON the same way
+    trace-wallet does for one address. Must run AFTER
+    _attach_wallet_service_intelligence -- risk scoring reads `service_tags`
+    off each row and does not compute it itself.
+    """
+    from .risk import score_wallet_risk
+    for w in wallet_paths:
+        w["risk"] = score_wallet_risk(store, w["entity_id"], w["value"], w,
+                                      w.get("service_tags") or [])
+
+
 def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]:
     """For every address with a path to a VASP-attributed address, over
     TRANSACTED_WITH + SENT_FUNDS_TO + PART_OF_CLUSTER edges (undirected for
@@ -1333,14 +1348,21 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4,
 
     This is the investigation-report layer, built entirely by reading
     metadata evidence.enrich_bitcoin already wrote for addresses that were
-    themselves searched; it computes NO new score. `flags` is a list of exact
-    findings, not a risk_level or confidence composite -- inventing either
-    would be exactly the kind of unearned precision this codebase refuses
-    elsewhere (see EXCHANGE_HOP_DECAY's own "prior, not calibrated" note, and
+    themselves searched. `flags` is a list of exact findings, not a
+    confidence composite -- inventing one would be exactly the kind of
+    unearned precision this codebase refuses elsewhere (see
+    EXCHANGE_HOP_DECAY's own "prior, not calibrated" note, and
     evidence.enrich_bitcoin's ellipticpp_*/chainabuse_* non-attributive
-    discipline). An analyst, or the grounded Investigator, reads `flags` and
-    judges risk themselves -- the engine never becomes the attribution
-    decision-maker.
+    discipline).
+
+    `risk` (see risk.score_wallet_risk, Loop 36) IS a score -- the one
+    deliberate exception -- and it is the opposite of unearned: every
+    contribution in it traces to a named, documented RULE and a specific
+    piece of evidence read off `hit`/`service_tags` computed right above,
+    never an opaque number. It stays a separate field, never folded into
+    `flags`/`attribution`/`proximity`, so "what was observed", "what was
+    attributed", and "how risk was assessed" remain three answerable,
+    distinguishable questions.
 
     Only hops that were themselves independently searched carry metadata; a
     hop discovered purely as a counterparty (never itself investigated) has
@@ -1401,9 +1423,16 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4,
         for eid in path_ids for tag in service_by_id.get(eid, [])
     ]
 
+    # Additive only -- every field above is unchanged from before risk scoring
+    # existed. score_wallet_risk reads hit/service_tags already computed here;
+    # it issues no new query. See risk.py's module docstring for the policy.
+    from .risk import score_wallet_risk
+    wallet_address = by_id[start_id]["raw_value"] if start_id in by_id else address
+    risk = score_wallet_risk(store, start_id, wallet_address, hit, service_tags)
+
     return {
         "entity_id": start_id,
-        "address": by_id[start_id]["raw_value"] if start_id in by_id else address,
+        "address": wallet_address,
         "path": [by_id[eid]["raw_value"] if eid in by_id else eid for eid in path_ids],
         "hops": hit["hops"] if hit else None,
         "exchange": hit["exchange"] if hit else None,
@@ -1415,6 +1444,7 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4,
         "flags": flags,
         "evidence_ids": hit["evidence_ids"] if hit else [],
         "service_tags": service_tags,
+        "risk": risk,
     }
 
 
@@ -2486,6 +2516,26 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
                          f"— {tag['attribution_source']}")
         lines.append("")
 
+    risk_rows = [w for w in results.get("wallet_exchange_paths", [])
+                if w.get("risk", {}).get("risk_score") is not None]
+    if risk_rows:
+        lines += ["## Wallet risk assessment", "",
+                  "_Policy-scored, not a probability and not proof of criminality "
+                  "-- see risk_reasons on each wallet for the full evidence -> "
+                  "feature -> rule -> contribution chain. Wallets with no "
+                  "qualifying evidence are INSUFFICIENT_EVIDENCE and omitted from "
+                  "this table, never silently scored 0/LOW. Kept separate from "
+                  "the VASP/service sections above: risk score != VASP "
+                  "attribution, != reachability confidence._", ""]
+        for w in sorted(risk_rows, key=lambda w: -(w["risk"]["risk_score"] or 0)):
+            r = w["risk"]
+            lines.append(f"- `{w['value']}` → **{r['risk_level']}** "
+                         f"(score {r['risk_score']}, {r['risk_policy_version']}) · "
+                         f"categories: {', '.join(r['risk_categories']) or '—'}")
+            for reason in r["risk_reasons"]:
+                lines.append(f"  - {reason}")
+        lines.append("")
+
     for d in dossiers:
         lines += [f"## {d['candidate_id']} · {d['role']} · {d['confidence_level']} "
                   f"(score {d['score']:.3f})", "",
@@ -2635,6 +2685,8 @@ td.wrap{white-space:normal}
 font-weight:700;letter-spacing:.04em}
 .HIGH{background:#5c1f1f;color:#ffb3b3} .MEDIUM{background:#5c4a1f;color:#ffe08a}
 .LOW{background:#25303a;color:#9fc4e0}
+.CRITICAL{background:#5c1f1f;color:#ff8a8a} .MODERATE{background:#5c4a1f;color:#ffe08a}
+.INSUFFICIENT_EVIDENCE{background:#2c323a;color:var(--dim)}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
 .dim{color:var(--dim)} .bad{color:var(--bad)} .ok{color:var(--ok)}
 ul{margin:6px 0 6px 18px;padding:0} li{margin:2px 0}
@@ -2758,6 +2810,28 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
                        f"{_esc(tag['attribution_source'])}</td></tr>")
         out.append("</table>")
 
+    risk_rows = [w for w in results.get("wallet_exchange_paths", [])
+                if w.get("risk", {}).get("risk_score") is not None]
+    if risk_rows:
+        out.append("<h2>Wallet risk assessment</h2>"
+                   "<p class=dim>Policy-scored, not a probability and not proof of "
+                   "criminality. Kept separate from VASP attribution and "
+                   "reachability confidence above -- see each wallet's reasons for "
+                   "the full evidence &rarr; feature &rarr; rule &rarr; contribution "
+                   "chain. Wallets with no qualifying evidence are "
+                   "INSUFFICIENT_EVIDENCE and omitted here, never silently scored "
+                   "0/LOW.</p>")
+        for w in sorted(risk_rows, key=lambda w: -(w["risk"]["risk_score"] or 0)):
+            r = w["risk"]
+            out.append(
+                f"<details><summary><span class=mono>{_esc(w['value'])}</span> · "
+                f"<span class='tag {_esc(r['risk_level'])}'>{_esc(r['risk_level'])}"
+                f"</span> · score {r['risk_score']} ({_esc(r['risk_policy_version'])}) "
+                f"· {_esc(', '.join(r['risk_categories']) or '—')}</summary>")
+            out.append("<ul>" + "".join(f"<li>{_esc(reason)}</li>"
+                                        for reason in r["risk_reasons"]) + "</ul>")
+            out.append("</details>")
+
     out.append("<h2>Candidates</h2>")
     if not d:
         out.append("<p class=dim>No candidate cleared the evidence floor. With this "
@@ -2860,6 +2934,7 @@ def run_correlation(store: EvidenceStore, min_conf: float = 0.35,
         "contradictions": flags,
     }
     _attach_wallet_service_intelligence(store, results["wallet_exchange_paths"])
+    _attach_wallet_risk(store, results["wallet_exchange_paths"])
     dossiers = [build_dossier(store, c, aliases, flags, windows)
                 for c in results["operators"] + results["infra"] + results["ips"]]
     for rank, d in enumerate(dossiers, 1):

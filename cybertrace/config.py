@@ -3,7 +3,7 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict
 from dotenv import load_dotenv
 
 # Load .env from project root BEFORE api_key_registry's own module-level

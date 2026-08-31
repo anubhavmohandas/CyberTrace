@@ -7,7 +7,7 @@ from typing import Optional
 import click
 
 from .config import config
-from .detector import chain_caveat, detect_input_type, normalize_input
+from .detector import chain_caveat, detect_input_type
 from .modules import get_module, list_modules, resolve_module_for_target, TYPE_TO_MODULE
 from .output import print_result, save_result
 from .safety import is_blocked_query
@@ -168,7 +168,7 @@ def search(target: str, input_type: str, output_format: str, save_path: Optional
     module.show_progress = not quiet
     if not quiet:
         click.echo(f"[*] Using module: {module.name}", err=True)
-        click.echo(f"[*] Searching...", err=True)
+        click.echo("[*] Searching...", err=True)
 
     # Run search
     try:
@@ -489,13 +489,17 @@ def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: s
     flow is TO_VASP / FROM_VASP / UNKNOWN — UNKNOWN means the capture recorded
     that a transaction happened, not which way value moved.
 
-    Reports findings only — no risk score. Each flag names the address and
-    the evidence it came from; label-exchange and search results feed this,
-    correlate never invents new ones here.
+    Each flag names the address and the evidence it came from; label-exchange
+    and search results feed this, correlate never invents new ones here.
 
     A path address GraphSense tags as a mixing service, DeFi service, DeFi
     DEX, or CoinJoin service shows up as its own flag line and in
     `service_tags` — separate from, and never counted as, VASP attribution.
+
+    A separate, explainable risk score (`risk` -- policy risk-v1, see
+    cybertrace/risk.py) is also reported: a policy scale, not a probability,
+    kept apart from the VASP/proximity findings above. INSUFFICIENT_EVIDENCE
+    means no qualifying risk evidence was found, never an implied LOW.
 
     \b
       cybertrace trace-wallet bc1q... --db case.db
@@ -534,6 +538,16 @@ def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: s
             click.echo(f"  - {flag}")
     else:
         click.echo("Flags: none on record")
+
+    risk = report['risk']
+    if risk['risk_score'] is None:
+        click.echo(f"Risk: {risk['risk_level']} ({risk['risk_policy_version']})")
+    else:
+        click.echo(f"Risk: {risk['risk_level']} — score {risk['risk_score']} "
+                  f"({risk['risk_policy_version']}), categories: "
+                  f"{', '.join(risk['risk_categories'])}")
+        for reason in risk['risk_reasons']:
+            click.echo(f"  - {reason}")
 
 
 def _parse_batch_rows(path: str) -> list:

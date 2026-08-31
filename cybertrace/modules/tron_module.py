@@ -49,7 +49,7 @@ class TronModule(BaseModule):
         ]
         await self.run_sources(sources, result)
         result.summary = self._build_summary(result)
-        result.end_time = datetime.utcnow()
+        result.end_time = datetime.now(timezone.utc)
         return result
 
     def _headers(self) -> Dict[str, str]:

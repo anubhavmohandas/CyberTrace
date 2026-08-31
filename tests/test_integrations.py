@@ -3,7 +3,6 @@ provenance + the one invariant that actually matters -- a dataset label can
 never reach the live EvidenceStore/ingest() path. See
 cybertrace/integrations/*.py docstrings."""
 
-import inspect
 
 import pytest
 

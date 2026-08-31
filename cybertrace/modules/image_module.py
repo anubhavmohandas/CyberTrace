@@ -18,9 +18,9 @@ import os
 import shutil
 import subprocess
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import quote_plus
 
 from .base import BaseModule, ModuleResult, SourceResult
@@ -69,7 +69,7 @@ class ImageModule(BaseModule):
                 error=f"Could not obtain file from target: {target}",
             )
             result.summary = {'error': 'File not accessible', 'target': target}
-            result.end_time = datetime.utcnow()
+            result.end_time = datetime.now(timezone.utc)
             return result
 
         try:
@@ -103,7 +103,7 @@ class ImageModule(BaseModule):
                 except OSError:
                     pass
 
-        result.end_time = datetime.utcnow()
+        result.end_time = datetime.now(timezone.utc)
         return result
 
     # ------------------------------------------------------------------ #

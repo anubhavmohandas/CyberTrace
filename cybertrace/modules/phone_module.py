@@ -8,8 +8,8 @@ Replaces unmaintained PhoneInfoga with:
 """
 
 import re
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict
 
 from .base import BaseModule, ModuleResult, SourceResult
 
@@ -67,7 +67,7 @@ class PhoneModule(BaseModule):
         await self.run_sources(sources, result)
 
         result.summary = self._build_summary(result)
-        result.end_time = datetime.utcnow()
+        result.end_time = datetime.now(timezone.utc)
 
         return result
 

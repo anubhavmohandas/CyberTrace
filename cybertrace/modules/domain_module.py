@@ -1,8 +1,7 @@
 """Domain intelligence OSINT module."""
 
 import re
-import socket
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
 from .base import BaseModule, ModuleResult, SourceResult
@@ -66,7 +65,7 @@ class DomainModule(BaseModule):
         # Attach Google dorks to summary for SHADOHDORKS-style output
         result.summary['dorks'] = self._generate_dorks(domain)
 
-        result.end_time = datetime.utcnow()
+        result.end_time = datetime.now(timezone.utc)
 
         return result
     

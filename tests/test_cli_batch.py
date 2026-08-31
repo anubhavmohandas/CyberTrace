@@ -13,7 +13,6 @@ at a time.
 import csv
 import json
 
-import pytest
 from click.testing import CliRunner
 
 from cybertrace.cli import cli
@@ -200,7 +199,7 @@ def test_batch_output_schema_matches_the_documented_shape(tmp_path, monkeypatch)
     assert set(entry["result"].keys()) == {
         "entity_id", "address", "path", "hops", "exchange", "exchange_confidence",
         "attribution", "attribution_source", "proximity", "direction", "flags",
-        "evidence_ids", "service_tags",
+        "evidence_ids", "service_tags", "risk",
     }
 
 

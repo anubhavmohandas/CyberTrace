@@ -29,7 +29,7 @@ import json
 import sqlite3
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List
 
 from ..normalize import norm_btc, norm_eth, norm_tron
 

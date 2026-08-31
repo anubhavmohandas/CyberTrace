@@ -21,8 +21,7 @@ from cybertrace.modules.email_module import EmailModule
 from cybertrace.normalize import (
     dom_simhash, norm_asn, norm_btc, norm_domain, norm_email, norm_eth, norm_ip,
     norm_onion, norm_pgp, norm_tron, norm_username, norm_xmr, pgp_certifier_details,
-    pgp_certifiers, pgp_fingerprint, pgp_key_times, pgp_signature_issuers,
-    simhash_similarity, tron_hex_to_address,
+    pgp_certifiers, pgp_fingerprint, pgp_key_times, simhash_similarity, tron_hex_to_address,
 )
 
 # A real mainnet address (block 170 coinbase) and the BIP-173 P2WPKH vector.

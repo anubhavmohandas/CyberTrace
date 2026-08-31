@@ -1,7 +1,6 @@
 """Bitcoin and cryptocurrency OSINT module."""
 
 import asyncio
-import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -116,7 +115,7 @@ class BitcoinModule(BaseModule):
         
         # Build summary
         result.summary = self._build_summary(result)
-        result.end_time = datetime.utcnow()
+        result.end_time = datetime.now(timezone.utc)
         
         return result
     

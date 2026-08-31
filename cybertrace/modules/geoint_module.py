@@ -18,7 +18,7 @@ Sources (API key required):
 
 import asyncio
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote_plus
 
@@ -87,7 +87,7 @@ class GeointModule(BaseModule):
             lat, lon = self._parse_coordinates(target)
             if lat is None or lon is None:
                 result.summary = {'error': f'Could not parse coordinates: {target}'}
-                result.end_time = datetime.utcnow()
+                result.end_time = datetime.now(timezone.utc)
                 return result
 
             sources = [
@@ -110,7 +110,7 @@ class GeointModule(BaseModule):
 
             if lat is None or lon is None:
                 result.summary = {'error': f'Could not geocode address: {target}'}
-                result.end_time = datetime.utcnow()
+                result.end_time = datetime.now(timezone.utc)
                 return result
 
             sources = [
@@ -132,7 +132,7 @@ class GeointModule(BaseModule):
                     'error': f'Could not resolve IP to coordinates: {target}',
                     'ip_data': ip_geo.data if ip_geo.success else {},
                 }
-                result.end_time = datetime.utcnow()
+                result.end_time = datetime.now(timezone.utc)
                 return result
 
             sources = [
@@ -144,7 +144,7 @@ class GeointModule(BaseModule):
 
         else:
             result.summary = {'error': f'Unsupported target type: {target_type}'}
-            result.end_time = datetime.utcnow()
+            result.end_time = datetime.now(timezone.utc)
             return result
 
         await self.run_sources(sources, result)
@@ -152,7 +152,7 @@ class GeointModule(BaseModule):
         result.summary = self._build_summary(
             result, lat, lon, resolved_address, target_type
         )
-        result.end_time = datetime.utcnow()
+        result.end_time = datetime.now(timezone.utc)
         return result
 
     # ------------------------------------------------------------------ #

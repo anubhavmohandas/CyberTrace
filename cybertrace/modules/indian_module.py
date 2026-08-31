@@ -1,8 +1,8 @@
 """Indian OSINT module for India-specific databases."""
 
 import re
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict
 from urllib.parse import quote_plus
 
 from .base import BaseModule, ModuleResult, SourceResult
@@ -72,7 +72,7 @@ class IndianModule(BaseModule):
         await self.run_sources(sources, result)
         
         result.summary = self._build_summary(result)
-        result.end_time = datetime.utcnow()
+        result.end_time = datetime.now(timezone.utc)
         
         return result
     
@@ -156,7 +156,7 @@ class IndianModule(BaseModule):
             success=True,
             data={
                 'gstin': gstin,
-                'manual_lookup_url': f"https://services.gst.gov.in/services/searchtp",
+                'manual_lookup_url': "https://services.gst.gov.in/services/searchtp",
                 'state_code': gstin[:2],  # First 2 digits are state code
                 'pan_from_gstin': gstin[2:12],  # Characters 3-12 are PAN
                 'note': 'Automated lookup requires captcha. Use the manual URL.',
@@ -169,14 +169,8 @@ class IndianModule(BaseModule):
         
         Note: Direct API access is restricted. We use public search.
         """
-        encoded = quote_plus(query)
-        
-        # MCA public search
-        search_url = f"https://www.mca.gov.in/mcafoportal/companyLLPMasterData.do"
-        
-        # This requires form POST which is complex
-        # Alternative: Use Zauba Corp which aggregates MCA data
-        
+        # MCA's own search requires an interactive form POST -- not attempted
+        # here; Zauba Corp (below) aggregates the same data and is scrapable.
         return SourceResult(
             source='mca_company',
             success=True,

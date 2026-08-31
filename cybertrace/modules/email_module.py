@@ -1,10 +1,9 @@
 """Email OSINT module."""
 
 import asyncio
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Tuple
 from urllib.parse import unquote
-import json
 import re
 
 from .base import BaseModule, ModuleResult, SourceResult
@@ -70,7 +69,7 @@ class EmailModule(BaseModule):
 
         # Build summary
         result.summary = self._build_summary(result)
-        result.end_time = datetime.utcnow()
+        result.end_time = datetime.now(timezone.utc)
 
         return result
     

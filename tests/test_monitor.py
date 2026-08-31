@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from cybertrace.correlate import wallet_exchange_paths
-from cybertrace.evidence import EvidenceStore, _ingest_enrichment, enrich_bitcoin, ingest, label_exchange
+from cybertrace.evidence import EvidenceStore, _ingest_enrichment, ingest, label_exchange
 from cybertrace.modules.base import ModuleResult
 from cybertrace.monitor import (
     run_watch, wallet_deltas, wallet_targets, watch_narrative,
@@ -91,8 +91,7 @@ class TestWalletTargets:
         chain instead of the wallet's, always reading as a first capture."""
         with EvidenceStore(":memory:") as s:
             market_tid = s.upsert_target("pivot-market.example.onion")
-            market_sid = s.insert_snapshot(market_tid, {"page": "contact"},
-                                           collector="darkweb")
+            s.insert_snapshot(market_tid, {"page": "contact"}, collector="darkweb")
             _ingest_enrichment(s, BTC_VALID, "bitcoin",
                                {"address": BTC_VALID, "sent_to_addresses": [BTC_OTHER]},
                                "operator_pivot:pivot", "2026-08-24T00:00:00+00:00",

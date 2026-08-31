@@ -3,15 +3,13 @@
 import asyncio
 import aiohttp
 import hashlib
-import json
 import logging
 import shutil
 import sys
-import time
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -34,7 +32,7 @@ class SourceResult:
     success: bool
     data: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> dict:
         return {
@@ -55,7 +53,7 @@ class ModuleResult:
     sources: Dict[str, SourceResult] = field(default_factory=dict)
     summary: Dict[str, Any] = field(default_factory=dict)
     related: List[str] = field(default_factory=list)  # Related targets to investigate
-    start_time: datetime = field(default_factory=datetime.utcnow)
+    start_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     end_time: Optional[datetime] = None
     # Identifies this one invocation of search(), distinct from every other —
     # including a re-run against the same target. evidence.ingest() carries it

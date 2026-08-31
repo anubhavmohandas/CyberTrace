@@ -8,7 +8,7 @@ import logging
 import re
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from html import unescape
 from typing import Any, Dict, List, Optional, Tuple
@@ -300,7 +300,7 @@ class DarkwebModule(BaseModule):
 
         # Build summary
         result.summary = self._build_summary(result)
-        result.end_time = datetime.utcnow()
+        result.end_time = datetime.now(timezone.utc)
 
         return result
 

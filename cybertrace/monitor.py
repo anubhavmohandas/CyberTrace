@@ -148,7 +148,6 @@ def _wallet_verdict(store: EvidenceStore, target_id: str) -> str:
     snap = store.latest_snapshot(target_id)
     if not snap or not snap["diff_summary"]:
         return LIVE_CHANGED                 # first capture by this collector
-    import json
     return LIVE_CHANGED if json.loads(snap["diff_summary"]).get("changed") else LIVE_SAME
 
 
@@ -239,7 +238,6 @@ def _verdict(store: EvidenceStore, target_id: str, was_active: bool,
     snap = store.latest_snapshot(target_id)
     if not snap or not snap["diff_summary"]:
         return LIVE_CHANGED                 # first capture by this collector
-    import json
     return LIVE_CHANGED if json.loads(snap["diff_summary"]).get("changed") else LIVE_SAME
 
 

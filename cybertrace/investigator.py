@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from .correlate import evidence_chain, run_correlation, market_windows
+from .correlate import evidence_chain, run_correlation
 from .memory import case_history, historical_matches, prior_references, summarize
 from .evidence import EvidenceStore
 from . import llm_provider
@@ -55,7 +55,6 @@ def build_context(store: EvidenceStore, candidate_id: Optional[str] = None) -> d
     """Bounded, serializable case context. Deliberately not a raw store dump —
     only fields an answer is allowed to cite end up here."""
     results = run_correlation(store)
-    windows = market_windows(store)
 
     dossiers = results["dossiers"]
     if candidate_id:

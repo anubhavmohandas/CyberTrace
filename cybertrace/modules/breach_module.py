@@ -14,9 +14,8 @@ Sources (API key required):
 """
 
 import asyncio
-import hashlib
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List
 from urllib.parse import quote_plus
 
 from .base import BaseModule, ModuleResult, SourceResult
@@ -81,7 +80,7 @@ class BreachModule(BaseModule):
         await self.run_sources(sources, result)
 
         result.summary = self._build_summary(result)
-        result.end_time = datetime.utcnow()
+        result.end_time = datetime.now(timezone.utc)
 
         return result
 

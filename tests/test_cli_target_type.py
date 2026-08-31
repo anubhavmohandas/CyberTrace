@@ -15,7 +15,6 @@ unconditionally re-detecting would replace a valid override with the
 detector's 'username' fallback and break geoint outright.
 """
 
-import asyncio
 
 import cybertrace.cli as cli_mod
 from click.testing import CliRunner

@@ -1,8 +1,7 @@
 """Output formatting for CyberTrace results."""
 
 import json
-from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import click
 
@@ -147,7 +146,7 @@ def format_table(result: ModuleResult, color: bool = False) -> str:
     # Header
     width = 70
     lines.append(c("=" * width, **RULE))
-    lines.append(c(f" CYBERTRACE RESULTS ".center(width, "="), **HEADING))
+    lines.append(c(" CYBERTRACE RESULTS ".center(width, "="), **HEADING))
     lines.append(c("=" * width, **RULE))
     lines.append("")
     for label, value in (

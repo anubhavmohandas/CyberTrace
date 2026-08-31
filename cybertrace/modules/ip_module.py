@@ -15,7 +15,7 @@ Sources (API key required):
 """
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from .base import BaseModule, ModuleResult, SourceResult
 
@@ -60,7 +60,7 @@ class IPModule(BaseModule):
         await self.run_sources(sources, result)
 
         result.summary = self._build_summary(result)
-        result.end_time = datetime.utcnow()
+        result.end_time = datetime.now(timezone.utc)
 
         return result
 
@@ -283,7 +283,7 @@ class IPModule(BaseModule):
     async def _check_abuseipdb(self, ip: str) -> SourceResult:
         """AbuseIPDB — abuse score and report history. Free tier: 1k checks/day."""
         api_key = self.config.api_keys.get('abuseipdb')
-        url = f"https://api.abuseipdb.com/api/v2/check"
+        url = "https://api.abuseipdb.com/api/v2/check"
         headers = {
             'Key': api_key,
             'Accept': 'application/json',

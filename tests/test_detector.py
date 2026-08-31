@@ -133,9 +133,8 @@ class TestNormalizeInput:
 # handed to a 3000+ social-site sweep — after which "no VASP path" read to an
 # investigator exactly like a cleared wallet.
 
-import pytest
 
-from cybertrace.detector import UNSUPPORTED_CHAINS, chain_caveat, detect_input_type
+from cybertrace.detector import UNSUPPORTED_CHAINS, chain_caveat
 
 # (address, expected specific_type, what it really is)
 REAL_UNSUPPORTED = [
