@@ -212,6 +212,54 @@ def test_trace_wallet_reports_path_and_flags(tmp_path):
     assert report['direction'] == 'UNKNOWN'
 
 
+def test_wallet_verdict_command_requires_a_traced_wallet(tmp_path):
+    """Loop 41: wallet-level analyst verdicts. Mirrors
+    test_feedback_command_requires_a_real_candidate -- verdict on a wallet
+    never searched into this case is a typo, not a new fact."""
+    from cybertrace.evidence import EvidenceStore
+    db = str(tmp_path / 'case.db')
+    with EvidenceStore(db):
+        pass
+    result = CliRunner().invoke(
+        cli, ['wallet-verdict', '1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2', '--db', db,
+              '--outcome', 'confirmed'])
+    assert result.exit_code == 1
+    assert 'never searched' in result.output.lower()
+
+
+def test_wallet_verdict_recorded_via_cli_is_read_back_by_trace_wallet(tmp_path):
+    """The full loop: record a wallet verdict via the CLI, then confirm
+    trace-wallet's own JSON report reads it back as `verdict` -- kept
+    apart from, and never overwriting, the automated attribution/wallet_role/
+    risk fields sitting beside it."""
+    from cybertrace.evidence import EvidenceStore
+
+    db = str(tmp_path / 'case.db')
+    btc = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+    with EvidenceStore(db):
+        pass  # initializes the schema -- label-exchange's --db requires an existing file
+    result = CliRunner().invoke(
+        cli, ['label-exchange', btc, '--exchange', 'Test Exchange', '--db', db])
+    assert result.exit_code == 0, result.output
+
+    before = CliRunner().invoke(cli, ['trace-wallet', btc, '--db', db, '--output', 'json'])
+    assert json.loads(before.output)['verdict'] is None
+
+    fb = CliRunner().invoke(
+        cli, ['wallet-verdict', btc, '--db', db, '--outcome', 'benign',
+              '--note', 'known merchant deposit address', '--analyst', 'jdoe'])
+    assert fb.exit_code == 0, fb.output
+    assert 'Recorded BENIGN' in fb.output
+
+    after = CliRunner().invoke(cli, ['trace-wallet', btc, '--db', db, '--output', 'json'])
+    report = json.loads(after.output)
+    assert report['verdict']['outcome'] == 'BENIGN'
+    assert report['verdict']['analyst'] == 'jdoe'
+    # Automated fields are untouched by the verdict.
+    assert report['attribution'] == 'ANALYST_ASSERTED'
+    assert report['exchange'] == 'test exchange'
+
+
 def test_trace_wallet_unsearched_address_fails_loudly(tmp_path):
     from cybertrace.evidence import EvidenceStore
     db = str(tmp_path / 'case.db')

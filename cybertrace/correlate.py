@@ -653,6 +653,16 @@ REGULATORY_ATTESTED = "REGULATORY_ATTESTED"     # OFAC SDN digital-currency-addr
 VASP_DISCLOSED = "VASP_DISCLOSED"               # the VASP's own verified published wallet list
 TAG_ATTESTED = "TAG_ATTESTED"                   # a third party's public tagpack entry
 
+# The precedence _vasp_endpoints already enforces (see its own docstring),
+# named here so it is a greppable fact rather than "whichever of that
+# function's four blocks runs last wins": 1 = highest, wins when more than
+# one source names the same address. Consumed by every wallet_exchange_paths/
+# wallet_trace_report row as `attribution_rank`, a sibling field to
+# `attribution` -- never multiplied into `confidence` (that field is pure hop
+# decay, see EXCHANGE_HOP_DECAY) and never read by risk.py.
+_ATTRIBUTION_RANK = {ANALYST_ASSERTED: 1, REGULATORY_ATTESTED: 2,
+                     VASP_DISCLOSED: 3, TAG_ATTESTED: 4}
+
 # wallet_path_flags' per-tier phrasing -- module level so a secondary
 # direct_vasp_contacts entry cites its attribution with the exact same wording
 # as a primary row's, never a near-identical rephrasing of the same tier.
@@ -765,6 +775,23 @@ def _direction(flows: set) -> str:
     return DIRECTION_UNKNOWN
 
 
+def _is_deposit_candidate(proximity: str, direction: str) -> bool:
+    """A wallet is a plausible VASP deposit endpoint only at exactly one hop
+    (proximity == DIRECT), with the last hop's recorded flow moving value
+    toward the VASP (direction == TO_VASP) -- both fields wallet_exchange_paths
+    already computes independently, so this states their AND rather than
+    leaving a reader to derive it from two separate fields (or, previously,
+    only from wallet_path_flags' prose).
+
+    Deliberately never AT_VASP (that address IS the VASP, not a depositor)
+    and never INDIRECT (further out is exactly the reachability-is-not-control
+    territory correlate.py already refuses to overstate -- see
+    endpoint_shared_by/vasp_shared_by's own comments) or FROM_VASP/BOTH_WAYS/
+    UNKNOWN direction (a payout, a two-way relationship, or an unrecorded
+    direction are none of them a one-way deposit)."""
+    return proximity == DIRECT and direction == TO_VASP
+
+
 def data_source_status() -> Dict[str, str]:
     """FRESH / STALE / UNAVAILABLE for each offline dataset adapter
     _vasp_endpoints reads (OFAC, GraphSense exchange_tags, Elliptic++).
@@ -859,7 +886,11 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
             if hit:
                 out[entity_id] = {"exchange": hit["label"], "evidence_ids": [],
                                   "attribution": TAG_ATTESTED, "wallet_role": None,
-                                  "attribution_source": f"GraphSense tagpack: {hit['pack']}"}
+                                  "attribution_source": f"GraphSense tagpack: {hit['pack']}",
+                                  # cross_chain_links' grouping key -- the tag
+                                  # label itself, same string vasp_shared_by
+                                  # already groups VASP_DISCLOSED rows by.
+                                  "group_key": hit["label"]}
 
         disclosed = vasp_disclosed_labels(dict(by_currency))
         for entity_id, (value, _etype) in raw.items():
@@ -877,7 +908,8 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
                                   "wallet_role": _wallet_role(hit["role"]),
                                   "attribution_source":
                                       f"{hit['brand']} self-disclosure ({hit['role']}): "
-                                      f"{hit['source']}"}
+                                      f"{hit['source']}",
+                                  "group_key": hit["brand"]}
 
         from .integrations.ofac import ofac_labels
         designated = ofac_labels(dict(by_currency))
@@ -887,7 +919,14 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
                 out[entity_id] = {"exchange": hit["entity_name"], "evidence_ids": [],
                                   "attribution": REGULATORY_ATTESTED, "wallet_role": None,
                                   "attribution_source":
-                                      f"OFAC SDN: profile {hit['profile_id']}"}
+                                      f"OFAC SDN: profile {hit['profile_id']}",
+                                  # profile_id, not entity_name -- a stronger
+                                  # key than the display name for
+                                  # cross_chain_links' grouping (two distinct
+                                  # designated parties could in principle
+                                  # share a common name; they cannot share an
+                                  # SDN profile id).
+                                  "group_key": f"OFAC:{hit['profile_id']}"}
 
     for r in store._all(
             "SELECT r.source_entity_id AS addr, e.normalized_value AS exchange, "
@@ -898,8 +937,94 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
         out[r["addr"]] = {"exchange": r["exchange"], "wallet_role": None,
                           "evidence_ids": json.loads(r["observation_ids"] or "[]"),
                           "attribution": ANALYST_ASSERTED,
-                          "attribution_source": r["source_label"] or "analyst"}
+                          "attribution_source": r["source_label"] or "analyst",
+                          # The exchange name IS the analyst's own citation
+                          # here -- reusing it across chains is the analyst
+                          # deliberately asserting the same entity.
+                          "group_key": r["exchange"]}
     return out
+
+
+def cross_chain_links(store: EvidenceStore) -> List[dict]:
+    """Same-entity relationships ACROSS chains, using only evidence this
+    codebase already trusts for single-chain VASP attribution -- never
+    address-string similarity, transaction timing, or amount matching (see
+    the module-level discipline notes throughout this file, e.g.
+    _secondary_vasp_reach's docstring and risk.py's own refusals).
+
+    Two or more addresses on DIFFERENT chains are linked here only when they
+    are named by the EXACT SAME evidence record _vasp_endpoints already read
+    for each of them individually: the same OFAC SDN profile
+    (REGULATORY_ATTESTED, keyed by profile_id -- a real government
+    determination that, e.g., one sanctioned individual's BTC, ETH, and TRX
+    addresses are all theirs; the shipped local OFAC corpus has 40+ such
+    multi-chain profiles), the same VASP's own disclosed wallet list
+    (VASP_DISCLOSED, keyed by brand -- a VASP publishing its own hot wallets
+    on more than one chain), the same GraphSense tagpack label
+    (TAG_ATTESTED), or the same analyst citation (ANALYST_ASSERTED, keyed by
+    the exchange name the analyst themselves typed for label_exchange). This
+    is the identical per-address evidence _vasp_endpoints computes for
+    one-chain attribution -- this function only additionally checks whether
+    two hits sharing that evidence span more than one chain. Never mixes
+    tiers: a TAG_ATTESTED guess and a REGULATORY_ATTESTED designation happening
+    to name similar text are not merged into one link.
+
+    No numeric "confidence" is invented for a link: the evidence backing it
+    IS the attribution tier itself, reported as `attribution`/
+    `attribution_rank` -- the same two fields every wallet_exchange_paths row
+    already carries, not a second, uncalibrated composite score.
+
+    No transaction/reference id or timestamp is reported: none of the four
+    evidence sources this reads (an OFAC listing, a VASP's own wallet-list
+    publication, a GraphSense tagpack entry, an analyst's own citation) is
+    itself a transaction -- there is no on-chain event linking the two
+    addresses, only a shared designation/disclosure naming both.
+
+    Bridge transactions, cross-chain swaps, and wrapped-asset mint/burn
+    records ARE real, transaction-level cross-chain evidence in principle
+    (Wormholescan's VAA-attested transfers, THORChain Midgard's swap actions,
+    the WBTC DAO's own mint/burn API) but require a new live API integration
+    this codebase does not yet have -- left MISSING/BLOCKED here rather than
+    approximated from data never designed to answer that question.
+    """
+    raw = {r["entity_id"]: (r["raw_value"] or r["normalized_value"], r["etype"])
+           for r in store._all(
+               "SELECT entity_id, etype, raw_value, normalized_value FROM entities "
+               "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS','BNB_ADDRESS','POLYGON_ADDRESS','TRX_ADDRESS','SOL_ADDRESS')")}
+    values = {eid: v for eid, (v, _e) in raw.items()}
+    exchange_of = _vasp_endpoints(store, values)
+
+    groups: Dict[tuple, List[str]] = defaultdict(list)
+    for entity_id, hit in exchange_of.items():
+        groups[(hit["attribution"], hit["group_key"])].append(entity_id)
+
+    links = []
+    for (attribution, _group_key), entity_ids in groups.items():
+        chains = {raw[eid][1] for eid in entity_ids}
+        # A single 0x string is independently listed under ETH_ADDRESS AND
+        # BNB_ADDRESS (etc.) whenever a caller has ingested it as both -- the
+        # exact EVM chain-format ambiguity detector.chain_caveat() already
+        # documents (a real OFAC record lists one address under both ETH and
+        # BNB currency codes). That is one physical address wearing two etype
+        # labels, not a cross-chain relationship between two addresses --
+        # requiring at least two DISTINCT address strings keeps this function
+        # from reporting the same ambiguity as if it were new evidence.
+        distinct_values = {raw[eid][0] for eid in entity_ids}
+        if len(chains) < 2 or len(distinct_values) < 2:
+            continue
+        members = sorted(
+            ({"entity_id": eid, "value": raw[eid][0], "chain": raw[eid][1],
+             "source": exchange_of[eid]["attribution_source"]}
+             for eid in entity_ids),
+            key=lambda m: (m["chain"], m["value"]))
+        links.append({
+            "entity_name": exchange_of[entity_ids[0]]["exchange"],
+            "attribution": attribution,
+            "attribution_rank": _ATTRIBUTION_RANK[attribution],
+            "chains": sorted(chains),
+            "members": members,
+        })
+    return sorted(links, key=lambda link: (link["attribution_rank"], link["entity_name"]))
 
 
 # Human-readable phrase per GraphSense non-VASP service category -- module
@@ -1015,6 +1140,7 @@ def _secondary_vasp_reach(adjacency: Dict[str, Dict[str, tuple]],
                     if brand not in found:
                         found[brand] = {"peer_entity_id": peer, "exchange": brand,
                                         "attribution": peer_end["attribution"],
+                                        "attribution_rank": _ATTRIBUTION_RANK[peer_end["attribution"]],
                                         "attribution_source": peer_end["attribution_source"],
                                         "wallet_role": peer_end["wallet_role"],
                                         "hops": hop, "path": new_path,
@@ -1072,6 +1198,54 @@ def _attach_wallet_risk(store: EvidenceStore, wallet_paths: List[dict]) -> None:
     for w in wallet_paths:
         w["risk"] = score_wallet_risk(store, w["entity_id"], w["value"], w,
                                       w.get("service_tags") or [])
+
+
+def _attach_wallet_flags(store: EvidenceStore, wallet_paths: List[dict]) -> None:
+    """Case-report-level sibling of wallet_trace_report's own `flags` field --
+    same shape as _attach_wallet_service_intelligence/_attach_wallet_risk
+    above, and exactly what wallet_path_flags' own docstring already
+    anticipated ("so investigator.build_context can attach the same flags to
+    every entry ... without re-running its BFS per wallet"), but no caller
+    ever did this: a case-wide `correlate`/`watch` run, the Markdown/HTML
+    report, the GUI payload, and the Investigator all saw a wallet's
+    conclusions (attribution, risk, VASP contacts) with none of the per-hop
+    cited evidence (abuse reports, Elliptic++ labels, GraphSense tagpack
+    hits) `trace-wallet` computes for that identical address -- a real,
+    named gap (Loop 41 audit).
+
+    Order relative to the other two _attach_* passes does not matter here:
+    wallet_path_flags queries the store directly for each row's own path
+    metadata/service tags rather than reading anything those two already
+    wrote onto `w`.
+    """
+    for w in wallet_paths:
+        w["flags"] = wallet_path_flags(store, w)
+
+
+def _wallet_verdict(store: EvidenceStore, entity_id: str) -> Optional[dict]:
+    """The most recent wallet_feedback row for one wallet entity, or None --
+    same shape as build_dossier's own `verdict` (see that function's
+    comment), so a reader never has to tell a wallet verdict and a candidate
+    verdict apart by field layout. Canonical here: every caller (case-wide
+    _attach_wallet_verdict below, and wallet_trace_report's single-wallet
+    path) reads this instead of independently re-deriving it."""
+    feedback = store.wallet_feedback_for(entity_id)
+    if not feedback:
+        return None
+    latest = feedback[0]
+    return {"outcome": latest["outcome"], "note": latest["note"] or "",
+           "analyst": latest["analyst"] or "", "recorded_at": latest["recorded_at"]}
+
+
+def _attach_wallet_verdict(store: EvidenceStore, wallet_paths: List[dict]) -> None:
+    """Case-report-level sibling of build_dossier's own `verdict` field:
+    mutates each wallet_exchange_paths() row with `verdict`, so a case-wide
+    correlate/watch run, its Markdown/HTML/JSON, the GUI, and the Investigator
+    all see the same recorded wallet decision `trace-wallet`'s own report
+    does -- never a second, independently-queried copy.
+    """
+    for w in wallet_paths:
+        w["verdict"] = _wallet_verdict(store, w["entity_id"])
 
 
 def _risk_alerts(wallet_paths: List[dict]) -> List[dict]:
@@ -1199,6 +1373,7 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
                 secondary.append({"peer_entity_id": peer,
                                   "exchange": peer_end["exchange"],
                                   "attribution": peer_end["attribution"],
+                                  "attribution_rank": _ATTRIBUTION_RANK[peer_end["attribution"]],
                                   "attribution_source": peer_end["attribution_source"],
                                   "wallet_role": peer_end["wallet_role"],
                                   "direction": _direction(flows),
@@ -1227,9 +1402,13 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
                         "exchange": end["exchange"], "hops": 0, "confidence": 1.0,
                         "path": [start], "evidence_ids": end["evidence_ids"],
                         "attribution": end["attribution"],
+                        "attribution_rank": _ATTRIBUTION_RANK[end["attribution"]],
                         "attribution_source": end["attribution_source"],
                         "wallet_role": end["wallet_role"],
                         "proximity": AT_VASP, "direction": DIRECTION_UNKNOWN,
+                        # This address IS the VASP endpoint (hops==0), not a
+                        # depositor to it -- never a deposit candidate.
+                        "deposit_candidate": False,
                         "direct_vasp_contacts": secondary,
                         "secondary_vasp_contacts": secondary_multi})
             continue
@@ -1248,6 +1427,8 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
                     new_ev = ev_ids + hop_obs
                     if peer in exchange_of:
                         end = exchange_of[peer]
+                        proximity = DIRECT if hop == 1 else INDIRECT
+                        direction = _direction(flows)
                         found = {"entity_id": start, "value": values[start],
                                  "chain": chain_of[start],
                                  "exchange": end["exchange"], "hops": hop,
@@ -1255,10 +1436,12 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
                                  "path": new_path,
                                  "evidence_ids": new_ev + end["evidence_ids"],
                                  "attribution": end["attribution"],
+                                 "attribution_rank": _ATTRIBUTION_RANK[end["attribution"]],
                                  "attribution_source": end["attribution_source"],
                                  "wallet_role": end["wallet_role"],
-                                 "proximity": DIRECT if hop == 1 else INDIRECT,
-                                 "direction": _direction(flows)}
+                                 "proximity": proximity,
+                                 "direction": direction,
+                                 "deposit_candidate": _is_deposit_candidate(proximity, direction)}
                         break
                     next_frontier.append((peer, new_path, new_ev))
                 if found:
@@ -1565,10 +1748,21 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4,
         "exchange": hit["exchange"] if hit else None,
         "exchange_confidence": hit["confidence"] if hit else None,
         "attribution": hit["attribution"] if hit else None,
+        "attribution_rank": _ATTRIBUTION_RANK.get(hit["attribution"]) if hit else None,
         "attribution_source": hit["attribution_source"] if hit else None,
         "wallet_role": hit["wallet_role"] if hit else None,
         "proximity": hit["proximity"] if hit else None,
         "direction": hit["direction"] if hit else None,
+        "deposit_candidate": hit.get("deposit_candidate", False) if hit else False,
+        # Structured sibling of the prose in `flags` below -- previously only
+        # in case-wide wallet_exchange_paths() rows, absent from this
+        # single-wallet report even though `hit` (when this wallet is itself
+        # AT_VASP) already carries them. Matches the case-wide JSON shape so
+        # `trace-wallet -o json` and a case's `wallet_exchange_paths` entry
+        # for the same address no longer disagree on what fields exist.
+        "direct_vasp_contacts": hit.get("direct_vasp_contacts", []) if hit else [],
+        "secondary_vasp_contacts": hit.get("secondary_vasp_contacts", []) if hit else [],
+        "verdict": _wallet_verdict(store, start_id),
         "flags": flags,
         "evidence_ids": hit["evidence_ids"] if hit else [],
         "service_tags": service_tags,
@@ -2678,6 +2872,19 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
             if w.get("secondary_vasp_contacts"):
                 names = ", ".join(sorted({c["exchange"] for c in w["secondary_vasp_contacts"]}))
                 lines.append(f"  - reaches further out: {names}")
+            if w.get("verdict"):
+                v = w["verdict"]
+                note = f" — {v['note']}" if v["note"] else ""
+                lines.append(f"  - analyst verdict: **{v['outcome']}**{note} "
+                             f"(by {v['analyst'] or 'unknown'}, {v['recorded_at']})")
+            # Per-hop cited findings (abuse reports, Elliptic++ dataset
+            # labels, GraphSense tagpack hits, the omnibus/hot-wallet
+            # endpoint_shared_by warning) -- the same exact list
+            # `trace-wallet` already prints for one address, previously
+            # invisible in a case-wide report even though _attach_wallet_flags
+            # now computes it for every row here (Loop 41 audit).
+            for flag in w.get("flags", []):
+                lines.append(f"  - {flag}")
         lines.append("")
 
     service_hits = [(w, tag) for w in results.get("wallet_exchange_paths", [])
@@ -2713,6 +2920,18 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
                          f"categories: {', '.join(r['risk_categories']) or '—'}")
             for reason in r["risk_reasons"]:
                 lines.append(f"  - {reason}")
+        lines.append("")
+
+    if results.get("cross_chain_links"):
+        lines += ["## Cross-chain links", "",
+                  "_Same entity named on more than one chain by ONE evidence record -- "
+                  "an OFAC SDN profile, a VASP's own disclosed wallet list, a GraphSense "
+                  "tagpack, or an analyst's own citation -- never inferred from address "
+                  "similarity, timing, or amount. No numeric confidence: the evidence is "
+                  "the attribution tier itself._", ""]
+        for link in results["cross_chain_links"]:
+            addrs = ", ".join(f"`{m['value']}` ({m['chain']})" for m in link["members"])
+            lines.append(f"- **{link['entity_name']}** ({link['attribution']}): {addrs}")
         lines.append("")
 
     for d in dossiers:
@@ -2808,10 +3027,18 @@ def render_html(store: EvidenceStore, path: str,
     for node_id, attrs in graph.nodes(data=True):
         colour, shape, size = NODE_STYLE.get(attrs.get("etype"), DEFAULT_STYLE)
         value = attrs.get("value") or ""
+        label = value if len(value) <= 28 else value[:26] + "…"
+        # Several entity types (HOSTING_PROVIDER among them, populated from
+        # live WHOIS/RDAP `org` text a hostile registrant controls) have no
+        # character-restricting normalizer. Escaped exactly like _esc() does
+        # for render_dossier_html: pyvis's own template switches to an
+        # innerHTML tooltip whenever any node's title contains "href", which
+        # would otherwise turn an attacker-chosen org name into script
+        # execution in the analyst's browser on hover.
         net.add_node(node_id, shape=shape, size=size, color=colour,
-                     label=value if len(value) <= 28 else value[:26] + "…",
-                     title=f"{attrs.get('etype')}\n{value}\n"
-                           f"first seen {attrs.get('first_seen')}")
+                     label=_esc(label),
+                     title=_esc(f"{attrs.get('etype')}\n{value}\n"
+                                f"first seen {attrs.get('first_seen')}"))
 
     for src, dst, attrs in graph.edges(data=True):
         rtype = attrs.get("rtype")
@@ -2834,7 +3061,7 @@ def render_html(store: EvidenceStore, path: str,
         ends = [store.find_entity("MARKET", url) for url in flag["markets"]]
         if all(ends) and len(ends) == 2:
             net.add_edge(ends[0], ends[1], color="#ff4d4d", width=3, dashes=True,
-                         arrows="", label="CLONE", title=flag["detail"])
+                         arrows="", label="CLONE", title=_esc(flag["detail"]))
 
     net.write_html(path, notebook=False, open_browser=False)
 
@@ -2993,13 +3220,31 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
                    "<table><tr><th>wallet</th><th>chain</th><th>proximity</th><th>hops</th>"
                    "<th>flow</th>"
                    "<th>VASP</th><th>wallet role</th><th>attributed by</th>"
-                   "<th>reachability</th><th>other VASP contacts</th></tr>")
+                   "<th>reachability</th><th>other VASP contacts</th>"
+                   "<th>evidence</th><th>analyst verdict</th></tr>")
         for w in results["wallet_exchange_paths"]:
             # direct_vasp_contacts/secondary_vasp_contacts (AT_VASP rows only)
             # -- a self-attributed suspect's own additional VASP relationship
             # was previously invisible outside trace-wallet's CLI prose.
             contacts = [c["exchange"] for c in w.get("direct_vasp_contacts") or []] \
                 + [c["exchange"] for c in w.get("secondary_vasp_contacts") or []]
+            # Per-hop cited findings _attach_wallet_flags now computes for
+            # every case-wide row -- <details> per the module's own
+            # zero-JavaScript disclosure convention, so N flags on a busy
+            # wallet don't blow out every other row's height.
+            flags = w.get("flags") or []
+            evidence_cell = (
+                "<details><summary>" + str(len(flags)) + " finding(s)</summary><ul>"
+                + "".join(f"<li>{_esc(f)}</li>" for f in flags) + "</ul></details>"
+            ) if flags else "—"
+            # A human decision, kept apart from every automated column to its
+            # left -- same _wallet_verdict field trace-wallet/render_markdown/
+            # the GUI/Investigator all read, never re-derived here.
+            v = w.get("verdict")
+            verdict_cell = (f"<b>{_esc(v['outcome'])}</b>"
+                           + (f" — {_esc(v['note'])}" if v["note"] else "")
+                           + f"<br><span class=dim>{_esc(v['analyst'] or 'unknown')}, "
+                           f"{_esc(v['recorded_at'])}</span>") if v else "—"
             out.append(f"<tr><td class=mono>{_esc(w['value'])}</td>"
                        f"<td>{_esc(w['chain'])}</td>"
                        f"<td>{_esc(w['proximity'])}</td><td>{w['hops']}</td>"
@@ -3009,7 +3254,9 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
                        f"<td class=wrap>{_esc(w['attribution'])} · "
                        f"{_esc(w['attribution_source'])}</td>"
                        f"<td>{w['confidence']:.2f}</td>"
-                       f"<td class=wrap>{_esc(', '.join(sorted(set(contacts)))) if contacts else '—'}</td></tr>")
+                       f"<td class=wrap>{_esc(', '.join(sorted(set(contacts)))) if contacts else '—'}</td>"
+                       f"<td class=wrap>{evidence_cell}</td>"
+                       f"<td class=wrap>{verdict_cell}</td></tr>")
         out.append("</table>")
 
     service_hits = [(w, tag) for w in results.get("wallet_exchange_paths", [])
@@ -3054,6 +3301,22 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
             out.append("<ul>" + "".join(f"<li>{_esc(reason)}</li>"
                                         for reason in r["risk_reasons"]) + "</ul>")
             out.append("</details>")
+
+    if results.get("cross_chain_links"):
+        out.append("<h2>Cross-chain links</h2>"
+                   "<p class=dim>Same entity named on more than one chain by ONE "
+                   "evidence record -- an OFAC SDN profile, a VASP's own disclosed "
+                   "wallet list, a GraphSense tagpack, or an analyst's own citation -- "
+                   "never inferred from address similarity, timing, or amount. No "
+                   "numeric confidence: the evidence is the attribution tier itself.</p>"
+                   "<table><tr><th>entity</th><th>attributed by</th><th>addresses</th></tr>")
+        for link in results["cross_chain_links"]:
+            addrs = "<br>".join(f"{_esc(m['value'])} <span class=dim>({_esc(m['chain'])})</span>"
+                                for m in link["members"])
+            out.append(f"<tr><td class=mono>{_esc(link['entity_name'])}</td>"
+                       f"<td>{_esc(link['attribution'])}</td>"
+                       f"<td class=wrap>{addrs}</td></tr>")
+        out.append("</table>")
 
     out.append("<h2>Candidates</h2>")
     if not d:
@@ -3160,10 +3423,13 @@ def run_correlation(store: EvidenceStore, min_conf: float = 0.35,
         "clones": clones,
         "clusters": sorted(set(crypto_clusters(store).values())),
         "wallet_exchange_paths": wallet_exchange_paths(store),
+        "cross_chain_links": cross_chain_links(store),
         "contradictions": flags,
     }
     _attach_wallet_service_intelligence(store, results["wallet_exchange_paths"])
     _attach_wallet_risk(store, results["wallet_exchange_paths"])
+    _attach_wallet_flags(store, results["wallet_exchange_paths"])
+    _attach_wallet_verdict(store, results["wallet_exchange_paths"])
     results["risk_alerts"] = _risk_alerts(results["wallet_exchange_paths"])
     results["data_source_status"] = data_source_status()
     dossiers = [build_dossier(store, c, aliases, flags, windows)

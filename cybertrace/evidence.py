@@ -141,6 +141,26 @@ CREATE TABLE IF NOT EXISTS analyst_feedback (
   recorded_at  TEXT NOT NULL
 );
 
+-- Same insert-only pattern and purpose as analyst_feedback, for a wallet
+-- entity rather than a candidate -- a traced address never becomes a
+-- `candidates` row (candidates.ctype is only ever OPERATOR/INFRA/IP), so no
+-- analyst_feedback FK could ever reach one. Keyed to entities(entity_id)
+-- instead: entity_id is stable across a re-correlate/re-watch the same way
+-- candidate_id is (see EvidenceStore.upsert_entity's UNIQUE(etype,
+-- normalized_value)), so a wallet verdict survives a re-run exactly like a
+-- candidate verdict does. Never joined into or overwriting `entities`,
+-- `wallet_exchange_paths`, or risk.py's score -- read back as a separate
+-- `verdict` field alongside them, the same way build_dossier's `verdict`
+-- sits beside a candidate's automated score.
+CREATE TABLE IF NOT EXISTS wallet_feedback (
+  feedback_id  TEXT PRIMARY KEY,
+  entity_id    TEXT NOT NULL REFERENCES entities(entity_id),
+  outcome      TEXT NOT NULL,              -- CONFIRMED | REJECTED | BENIGN | MALICIOUS | UNKNOWN
+  note         TEXT,
+  analyst      TEXT,
+  recorded_at  TEXT NOT NULL
+);
+
 -- Case-level metadata for the store as a whole. One row: a `--db` file is
 -- already one investigation (its targets/entities/candidates all scope to
 -- it), so this just gives that existing scope a name, a status and a place
@@ -170,6 +190,7 @@ CREATE INDEX IF NOT EXISTS idx_rel_source  ON relationships(source_entity_id);
 CREATE INDEX IF NOT EXISTS idx_rel_target  ON relationships(target_entity_id);
 CREATE INDEX IF NOT EXISTS idx_rel_type    ON relationships(rtype);
 CREATE INDEX IF NOT EXISTS idx_feedback_candidate ON analyst_feedback(candidate_id);
+CREATE INDEX IF NOT EXISTS idx_wallet_feedback_entity ON wallet_feedback(entity_id);
 """
 
 ENTITY_TYPES = {
@@ -253,6 +274,14 @@ IP_CLASSES = {"INFRA_IP", "PERSONAL_IP", "VPN_IP", "TOR_RELAY", "EXCHANGE_IP",
 FEEDBACK_OUTCOMES = {"CONFIRMED", "REJECTED", "BENIGN", "MALICIOUS", "UNKNOWN"}
 
 CASE_STATUSES = {"OPEN", "CLOSED", "ARCHIVED"}
+
+# The six chains correlate.wallet_exchange_paths/_vasp_endpoints actually
+# trace and attribute (same set as that module's own hardcoded SQL IN(...)
+# list) -- record_wallet_feedback is scoped to these, not XMR_ADDRESS or any
+# other entity type, because a wallet verdict only means something next to a
+# wallet_exchange_paths row, and Monero addresses never appear in one.
+WALLET_ETYPES = {"BTC_ADDRESS", "ETH_ADDRESS", "BNB_ADDRESS", "POLYGON_ADDRESS",
+                 "TRX_ADDRESS", "SOL_ADDRESS"}
 
 # Netblock owners that are anonymity egress rather than origin hosting. The
 # distinction changes the next investigative step, not the score: for a tunnel
@@ -863,6 +892,43 @@ class EvidenceStore:
             "SELECT af.* FROM analyst_feedback af "
             "JOIN candidates c ON c.candidate_id = af.candidate_id "
             "WHERE c.entity_id=? ORDER BY af.recorded_at DESC", (entity_id,))
+
+    # --- wallet feedback -------------------------------------------------------
+    #
+    # A traced wallet never becomes a `candidates` row (see wallet_feedback's
+    # own schema comment), so it needs its own insert-only table rather than
+    # reusing analyst_feedback's candidate_id FK. Same discipline throughout:
+    # never an UPSERT, an unknown outcome or entity_id raises rather than
+    # silently no-opping, and this never overwrites the automated wallet_role/
+    # attribution/risk fields it sits beside.
+
+    def record_wallet_feedback(self, entity_id: str, outcome: str,
+                               note: Optional[str] = None,
+                               analyst: Optional[str] = None) -> str:
+        """A human's verdict on one traced wallet -- reviewed/escalated/
+        dismissed, in the same CONFIRMED/REJECTED/BENIGN/MALICIOUS/UNKNOWN
+        vocabulary a candidate verdict already uses. Raises on an unknown
+        outcome, an entity_id that was never written by upsert_entity, or an
+        entity that is not one of WALLET_ETYPES -- verdict on a wallet that
+        does not exist, or was never a wallet, is a typo, not a new fact."""
+        if outcome not in FEEDBACK_OUTCOMES:
+            raise ValueError(f"unknown feedback outcome: {outcome}")
+        row = self._one("SELECT etype FROM entities WHERE entity_id=?", (entity_id,))
+        if row is None:
+            raise ValueError(f"no such entity: {entity_id}")
+        if row["etype"] not in WALLET_ETYPES:
+            raise ValueError(f"not a wallet entity ({row['etype']}): {entity_id}")
+        fid = self._id("wfb")
+        self.conn.execute(
+            "INSERT INTO wallet_feedback (feedback_id, entity_id, outcome, note, "
+            "analyst, recorded_at) VALUES (?,?,?,?,?,?)",
+            (fid, entity_id, outcome, note, analyst, utcnow()))
+        self.conn.commit()
+        return fid
+
+    def wallet_feedback_for(self, entity_id: str) -> List[sqlite3.Row]:
+        return self._all("SELECT * FROM wallet_feedback WHERE entity_id=? "
+                         "ORDER BY recorded_at DESC", (entity_id,))
 
     # --- case metadata --------------------------------------------------------
 

@@ -1504,6 +1504,51 @@ def test_feedback_candidate_id_survives_a_re_correlate(tmp_path):
         assert len(store.feedback_for(cid)) == 1
 
 
+# --- wallet feedback (Loop 41) -------------------------------------------
+
+def test_wallet_feedback_requires_a_real_entity(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        with pytest.raises(ValueError, match="no such entity"):
+            store.record_wallet_feedback("ent_doesnotexist", "CONFIRMED")
+
+
+def test_wallet_feedback_rejects_a_non_wallet_entity(tmp_path):
+    """Scoped to WALLET_ETYPES -- an entity that exists but isn't one of the
+    six traced chains (a PGP key, here) must be refused rather than silently
+    accepted into a table that only means something next to a
+    wallet_exchange_paths row."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        pgp_id = store.upsert_entity("PGP_KEY", "A" * 40)  # valid bare fingerprint shape
+        with pytest.raises(ValueError, match="not a wallet entity"):
+            store.record_wallet_feedback(pgp_id, "CONFIRMED")
+
+
+def test_wallet_feedback_rejects_an_unknown_outcome(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2")
+        with pytest.raises(ValueError, match="unknown feedback outcome"):
+            store.record_wallet_feedback(addr, "MAYBE")
+
+
+def test_wallet_feedback_round_trips_and_keeps_every_revision(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2")
+
+        fid = store.record_wallet_feedback(addr, "REJECTED", note="looked wrong at first")
+        assert fid.startswith("wfb_")
+        store.record_wallet_feedback(addr, "CONFIRMED", note="verified", analyst="jdoe")
+
+        history = store.wallet_feedback_for(addr)
+        # newest first -- the latest revision is what a reader should treat
+        # as the current verdict, same convention feedback_for_entity uses.
+        assert [h["outcome"] for h in history] == ["CONFIRMED", "REJECTED"]
+        assert history[0]["analyst"] == "jdoe"
+
+        # Feedback on a DIFFERENT wallet must never appear here.
+        other = store.upsert_entity("BTC_ADDRESS", "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa")
+        assert store.wallet_feedback_for(other) == []
+
+
 def test_label_exchange_writes_an_analyst_asserted_fact(tmp_path):
     """label_exchange is the only writer of EXCHANGE_DEPOSIT edges, and it must
     look like analyst_feedback -- provenance-tracked, never an OSINT-derived

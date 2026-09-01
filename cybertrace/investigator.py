@@ -133,6 +133,17 @@ def build_context(store: EvidenceStore, candidate_id: Optional[str] = None) -> d
         "suppressed_relationships": suppressed_relationships,
         "contradictions": results["contradictions"],
         "wallet_exchange_paths": wallet_exchange_paths,
+        # The case's own HIGH/CRITICAL-filtered, ranked list -- every other
+        # surface (CLI, Markdown, HTML, GUI) has a dedicated section for this;
+        # without it, "what are the alerts on this case" could only be
+        # answered by scanning every wallet_exchange_paths row by hand
+        # (Loop 41 audit). Reads the same `risk` field each row already
+        # carries -- no second scoring pass.
+        "risk_alerts": results.get("risk_alerts", []),
+        # Real, government/VASP-sourced cross-chain groupings (Loop 41) --
+        # see correlate.cross_chain_links' own docstring for exactly which
+        # evidence this reads and why it invents no confidence number.
+        "cross_chain_links": results.get("cross_chain_links", []),
         "data_source_status": results.get("data_source_status", {}),
         "memory": memory_ctx,
         "known_ids": {
@@ -259,6 +270,21 @@ def _wallet_exchange(ctx: dict) -> dict:
     # cross-surface consistency: risk was previously invisible to every
     # natural-language question, even though the data was already here).
     claims = []
+    alerts = ctx.get("risk_alerts") or []
+    if alerts:
+        # The case's own HIGH/CRITICAL-filtered list, cited by name rather
+        # than left for a reader to re-derive by scanning every wallet claim
+        # below -- every other surface (CLI/Markdown/HTML/GUI) has this exact
+        # list as its own section (Loop 41 audit: this was previously the
+        # one field the Investigator's context did not carry at all).
+        names = ", ".join(f"`{_short(a['value'], 24)}` ({a['risk']['risk_level']})"
+                          for a in alerts)
+        claims.append({
+            "text": f"{len(alerts)} wallet(s) reached HIGH or CRITICAL risk-v1: {names}.",
+            "kind": "INFERRED",
+            "evidence_ids": [i for a in alerts for i in a.get("evidence_ids", [])],
+            "candidate_ids": [], "finding_ids": [],
+        })
     for w in paths:
         role = f", disclosed as a {w['wallet_role'].lower()} wallet" if w.get("wallet_role") else ""
         r = w.get("risk") or {}
@@ -286,6 +312,32 @@ def _wallet_exchange(ctx: dict) -> dict:
                     f"{w['attribution']}: {w['attribution_source']}{role}, "
                     f"reachability {w['confidence']:.2f}).{risk_phrase}{contacts_phrase}",
             "kind": "INFERRED", "evidence_ids": w["evidence_ids"] + contact_evidence,
+            "candidate_ids": [], "finding_ids": [],
+        })
+        # A recorded human decision on this SAME wallet -- kept as its own
+        # ANALYST_VERDICT claim (the claim kind _boundary already uses for a
+        # candidate verdict) rather than folded into the INFERRED claim
+        # above, so an automated finding and a human's conclusion about it
+        # stay visibly distinguishable here too.
+        if w.get("verdict"):
+            v = w["verdict"]
+            claims.append({
+                "text": f"Analyst verdict on {_short(w['value'], 32)}: {v['outcome']}" +
+                        (f" — {v['note']}" if v["note"] else "") +
+                        f" (recorded by {v['analyst'] or 'unknown'} at {v['recorded_at']}).",
+                "kind": "ANALYST_VERDICT", "evidence_ids": [],
+                "candidate_ids": [], "finding_ids": [],
+            })
+    # Same entity named on more than one chain by one evidence record (Loop
+    # 41) -- never inferred from address similarity, timing, or amount; see
+    # correlate.cross_chain_links' own docstring for exactly what evidence
+    # this reads and why it carries no invented confidence number.
+    for link in ctx.get("cross_chain_links") or []:
+        addrs = ", ".join(f"{_short(m['value'], 24)} ({m['chain']})" for m in link["members"])
+        claims.append({
+            "text": f"Cross-chain: {link['entity_name']} ({link['attribution']}) is named "
+                    f"on more than one chain by the same evidence record: {addrs}.",
+            "kind": "INFERRED", "evidence_ids": [],
             "candidate_ids": [], "finding_ids": [],
         })
     not_fresh = [name for name, state in ctx.get("data_source_status", {}).items()
@@ -394,7 +446,7 @@ _INTENTS = [
     (("why is this here", "why here", "why is it here"), _why_here),
     (("changed", "different", "update", "since"), _changed),
     (("next step", "investigate next", "recommended action"), _next_steps),
-    (("vasp", "exchange", "deposit", "wallet", "risk", "alert", "chain"), _wallet_exchange),
+    (("vasp", "exchange", "deposit", "wallet", "risk", "alert", "chain", "bridge"), _wallet_exchange),
 ]
 
 

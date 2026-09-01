@@ -257,6 +257,67 @@ def test_deterministic_router_reaches_wallet_exchange_for_risk_chain_and_wallet_
     assert result["claims"], f"expected a grounded wallet claim for: {question!r}"
 
 
+def test_wallet_exchange_answer_cites_risk_alerts(store):
+    """risk_alerts (the case's own HIGH/CRITICAL-filtered, ranked list) was
+    computed by run_correlation but never reached build_context at all --
+    every other surface (CLI/Markdown/HTML/GUI) already had a dedicated
+    section for it (Loop 41 audit). Real data: Polyanin's own OFAC
+    self-designation, CRITICAL/80 (see test_correlate.py's identical
+    fixture)."""
+    from .test_correlate import _real_polyanin_case, _skip_unless_real_sources_available
+
+    _skip_unless_real_sources_available()
+    _real_polyanin_case(store)
+
+    ctx = investigator.build_context(store)
+    assert len(ctx["risk_alerts"]) == 1
+    assert ctx["risk_alerts"][0]["risk"]["risk_level"] == "CRITICAL"
+
+    result = investigator.answer(store, "tortaxi", "are there any high-risk wallet alerts?")
+    assert result["mode"] == "deterministic"
+    assert any("1 wallet(s) reached HIGH or CRITICAL" in c["text"] for c in result["claims"])
+
+
+def test_wallet_exchange_answer_surfaces_a_recorded_wallet_verdict(store):
+    """Loop 41: a wallet-level analyst verdict (new in this loop, kept apart
+    from analyst_feedback/candidates) must reach the Investigator as its own
+    ANALYST_VERDICT claim, the same claim kind _boundary already uses for a
+    candidate verdict -- never folded into the INFERRED wallet-reachability
+    claim beside it."""
+    _label_a_traced_wallet(store)
+    addr = store.find_entity("BTC_ADDRESS", "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2")
+    store.record_wallet_feedback(addr, "MALICIOUS", note="matched a prior case",
+                                 analyst="jdoe")
+
+    result = investigator.answer(store, "tortaxi", "which vasp is closest to this wallet")
+    assert result["mode"] == "deterministic"
+    verdict_claims = [c for c in result["claims"] if c["kind"] == "ANALYST_VERDICT"]
+    assert verdict_claims, "expected an ANALYST_VERDICT claim for the wallet"
+    assert "MALICIOUS" in verdict_claims[0]["text"]
+    assert "matched a prior case" in verdict_claims[0]["text"]
+
+
+def test_wallet_exchange_answer_cites_a_real_cross_chain_link(store):
+    """Loop 41: cross_chain_links (real OFAC-sourced multi-chain profiles)
+    must reach the Investigator's context and be citable in an answer, the
+    same way risk_alerts now is."""
+    from .test_correlate import SIM_HYON_SOP_ETH, SIM_HYON_SOP_TRX
+    from cybertrace.integrations import ofac
+    if not (ofac.available() and ofac.index_available()):
+        pytest.skip("OFAC SDN not downloaded/indexed in this checkout")
+
+    store.upsert_entity("ETH_ADDRESS", SIM_HYON_SOP_ETH)
+    store.upsert_entity("TRX_ADDRESS", SIM_HYON_SOP_TRX)
+
+    ctx = investigator.build_context(store)
+    assert len(ctx["cross_chain_links"]) == 1
+    assert ctx["cross_chain_links"][0]["entity_name"] == "Sim Hyon Sop"
+
+    result = investigator.answer(store, "tortaxi", "any cross-chain links in this case?")
+    assert result["mode"] == "deterministic"
+    assert any("Cross-chain: Sim Hyon Sop" in c["text"] for c in result["claims"])
+
+
 def test_boundary_answer_surfaces_a_recorded_analyst_verdict(store):
     """analyst_feedback (candidates.verdict in build_context) was computed
     into context but no answer path ever read it -- "has this candidate

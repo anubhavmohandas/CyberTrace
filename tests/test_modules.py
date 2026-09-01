@@ -2357,6 +2357,26 @@ class TestDarkwebOperatorIntel:
         # about how the key is otherwise ingested.
         assert keys[0]["role"] == "displayed"
 
+    @pytest.mark.skipif(not evolution.index_available(),
+                        reason="Evolution PGP index not built (call build_index() once)")
+    def test_extract_pgp_keys_skips_lookup_when_evolution_index_is_stale(self, monkeypatch):
+        """Loop 41 security audit: the one live call site of
+        evolution.lookup_pgp_fingerprint checked available()/index_available()
+        but never is_stale() -- unlike bitcoin_module._check_ellipticpp's own
+        three-check pattern -- so a stale local index's silence read as
+        "checked, no match" rather than "not actually checked". Real key from
+        the corpus, proven to match when fresh by the sibling test above;
+        with is_stale() forced True the same key must come back with no
+        evolution_dataset_match field at all."""
+        monkeypatch.setattr(evolution, "is_stale", lambda: True)
+        rec = next(evolution.iter_vendor_pgp_fingerprints())
+        reflowed = evolution._reflow_armor(rec["armored_original"])
+        html = f"<div class='pgp'>Our key:<br>{reflowed}<br>Verify before paying.</div>"
+        keys = DarkwebModule._extract_pgp_keys(html)
+        assert len(keys) == 1
+        assert keys[0]["fingerprint"] == rec["fingerprint"]
+        assert "evolution_dataset_match" not in keys[0]
+
     def test_extract_pgp_keys_degrades_silently_without_the_dataset(self, monkeypatch):
         """No dataset, no index, or both: extraction must still succeed with a
         real fingerprint and simply carry no evolution_* fields — the same

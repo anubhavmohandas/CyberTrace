@@ -162,6 +162,87 @@ def test_verdict_no_such_case_404(tmp_path):
         assert "error" in resp
 
 
+def _add_wallet(db_path: Path) -> None:
+    from cybertrace.evidence import label_exchange
+    with EvidenceStore(str(db_path)) as store:
+        label_exchange(store, "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", "Test Exchange")
+
+
+def test_wallet_verdict_persists_across_reload(tmp_path):
+    """Loop 41: the wallet-level sibling of test_verdict_persists_across_reload
+    -- a POST'd wallet verdict must survive a fresh GET of the case, and must
+    never touch the automated attribution/exchange fields beside it."""
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    db_path = cases_dir / "tortaxi.db"
+    _make_case_db(db_path)
+    _add_wallet(db_path)
+
+    with _running_server(cases_dir) as base:
+        status, case = _get(f"{base}/api/case/tortaxi")
+        assert status == 200
+        wallet = case["wallet_exchange_paths"][0]
+        assert wallet["verdict"] is None
+
+        status, resp = _post(f"{base}/api/case/tortaxi/wallet-verdict", {
+            "entity_id": wallet["entity_id"], "outcome": "BENIGN",
+            "note": "regression test wallet verdict", "analyst": "pytest",
+        })
+        assert status == 200
+        assert "feedback_id" in resp
+
+        status, reloaded = _get(f"{base}/api/case/tortaxi")
+        assert status == 200
+        reloaded_wallet = next(w for w in reloaded["wallet_exchange_paths"]
+                               if w["entity_id"] == wallet["entity_id"])
+        assert reloaded_wallet["verdict"] == {
+            "outcome": "BENIGN", "note": "regression test wallet verdict",
+            "analyst": "pytest", "recorded_at": reloaded_wallet["verdict"]["recorded_at"],
+        }
+        assert reloaded_wallet["attribution"] == wallet["attribution"]
+        assert reloaded_wallet["exchange"] == wallet["exchange"]
+
+
+def test_wallet_verdict_rejects_bad_outcome(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    db_path = cases_dir / "tortaxi.db"
+    _make_case_db(db_path)
+    _add_wallet(db_path)
+
+    with _running_server(cases_dir) as base:
+        _, case = _get(f"{base}/api/case/tortaxi")
+        entity_id = case["wallet_exchange_paths"][0]["entity_id"]
+
+        status, resp = _post(f"{base}/api/case/tortaxi/wallet-verdict",
+                             {"entity_id": entity_id, "outcome": "NOT_A_REAL_OUTCOME"})
+        assert status == 400
+        assert "error" in resp
+
+
+def test_wallet_verdict_rejects_unknown_entity(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    _make_case_db(cases_dir / "tortaxi.db")
+
+    with _running_server(cases_dir) as base:
+        status, resp = _post(f"{base}/api/case/tortaxi/wallet-verdict",
+                             {"entity_id": "ent_doesnotexist", "outcome": "CONFIRMED"})
+        assert status == 400
+        assert "error" in resp
+
+
+def test_wallet_verdict_no_such_case_404(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+
+    with _running_server(cases_dir) as base:
+        status, resp = _post(f"{base}/api/case/does-not-exist/wallet-verdict",
+                             {"entity_id": "ent_x", "outcome": "CONFIRMED"})
+        assert status == 404
+        assert "error" in resp
+
+
 def test_investigator_endpoint_deterministic(tmp_path):
     """No CT_LLM_PROVIDER set in this test process -> the real live path
     (tools/case_api.py -> cybertrace.investigator.answer) falls back to a
@@ -308,6 +389,11 @@ def test_case_endpoint_rejects_a_live_path_traversal_attempt(tmp_path):
 
         status, resp = _post(f"{base}/api/case/..%2foutside%2fsecret/verdict",
                              {"candidate_id": "OP-x", "outcome": "CONFIRMED"})
+        assert status == 404
+        assert "error" in resp
+
+        status, resp = _post(f"{base}/api/case/..%2foutside%2fsecret/wallet-verdict",
+                             {"entity_id": "ent_x", "outcome": "CONFIRMED"})
         assert status == 404
         assert "error" in resp
 

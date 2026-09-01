@@ -18,7 +18,7 @@ from cybertrace.correlate import (
     SUCCESSOR_SIGNALS, UNJOINED_CONTEXT,
     canonical_entity_key, candidate_infra, candidate_ips, candidate_operators,
     confidence_level, contradiction_anchor, contradictions_from_identity,
-    contradictions_from_key_temporal,
+    contradictions_from_key_temporal, cross_chain_links,
     crypto_clusters, data_source_status, detect_successors,
     entity_discrimination, entity_funnel_profile, evidence_chain, feedback_discrimination,
     market_artifact_map, markets_for_entity,
@@ -509,6 +509,30 @@ def test_html_graph_is_self_contained_and_marks_hypotheses(tmp_path):
     assert "vis-network" in page                   # library inlined, not fetched
     assert "http://cdn" not in page and "https://cdn" not in page
     assert not (tmp_path / "lib").exists()         # single portable artifact
+
+
+def test_render_html_escapes_untrusted_entity_values(tmp_path):
+    """Security fix (Loop 41 audit): HOSTING_PROVIDER (among other free-text
+    entity types) has no character-restricting normalizer -- it is written
+    verbatim from a WHOIS/RDAP `org` field a hostile registrant controls
+    (evidence.py's enrich_ip/favicon-match paths). pyvis's own installed
+    template switches EVERY node's hover tooltip to an innerHTML sink the
+    moment any one node's title contains the substring "href", so an
+    unescaped org name was a real stored-XSS path into an analyst's browser.
+    _esc() (already trusted for render_dossier_html) must close it here too."""
+    malicious = 'evil<img src=x onerror=alert(1) href="x">'
+    out = tmp_path / "graph.html"
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        store.upsert_entity("HOSTING_PROVIDER", malicious)
+        render_html(store, str(out))
+
+    page = out.read_text()
+    # pyvis re-serializes node data through its own json.dumps, which further
+    # backslash-escapes the "&" _esc() already produced for the JS string
+    # literal -- the value is still present on disk, just never as a live
+    # "<img" tag anywhere in the file.
+    assert "<img" not in page
+    assert "evil" in page
 
 
 def test_node_style_covers_every_traced_chain():
@@ -1737,6 +1761,87 @@ def test_label_exchange_chain_override_labels_a_polygon_address(tmp_path):
         assert row["exchange"] == "polygon vasp"
 
 
+# --- cross_chain_links (Loop 41) -----------------------------------------
+#
+# Real OFAC SDN profile 42498 "Sim Hyon Sop" -- verified live against the
+# local index (external_data/ofac/index.sqlite) during the Loop 41 audit:
+# genuinely distinct ETH and TRX address strings, both under one profile_id.
+SIM_HYON_SOP_ETH = "0x4f47bc496083c727c5fbe3ce9cdf2b0f6496270c"
+SIM_HYON_SOP_BNB_SAME_STRING = SIM_HYON_SOP_ETH  # OFAC lists this exact string under BOTH ETH and BNB
+SIM_HYON_SOP_TRX = "TGXE9dGWawjfd3xqFSho1h1bRbRv9wUGrF"
+
+
+def test_cross_chain_links_finds_a_real_multi_chain_ofac_profile(tmp_path):
+    """Real, government-sourced cross-chain evidence: one OFAC SDN profile
+    naming genuinely distinct ETH and TRX addresses as the same designated
+    party. This is the exact shape the Loop 41 audit identified as already
+    present, unused, in the shipped corpus -- not inferred from address
+    similarity, timing, or amount."""
+    from cybertrace.integrations import ofac
+    if not (ofac.available() and ofac.index_available()):
+        pytest.skip("OFAC SDN not downloaded/indexed in this checkout")
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        store.upsert_entity("ETH_ADDRESS", SIM_HYON_SOP_ETH)
+        store.upsert_entity("TRX_ADDRESS", SIM_HYON_SOP_TRX)
+
+        links = cross_chain_links(store)
+        assert len(links) == 1
+        link = links[0]
+        assert link["entity_name"] == "Sim Hyon Sop"
+        assert link["attribution"] == "REGULATORY_ATTESTED"
+        assert link["attribution_rank"] == 2
+        assert link["chains"] == ["ETH_ADDRESS", "TRX_ADDRESS"]
+        member_chains = {m["chain"] for m in link["members"]}
+        assert member_chains == {"ETH_ADDRESS", "TRX_ADDRESS"}
+        for m in link["members"]:
+            assert "OFAC SDN: profile 42498" in m["source"]
+
+        # Also reachable through the case-wide run_correlation results, same
+        # as any other cross-surface field.
+        results = run_correlation(store)
+        assert results["cross_chain_links"] == links
+
+
+def test_cross_chain_links_refuses_the_evm_same_string_ambiguity(tmp_path):
+    """The identical real OFAC record above also lists this ONE address
+    string under both ETH and BNB currency codes -- the exact EVM chain-
+    format ambiguity detector.chain_caveat() already documents. Ingesting it
+    as two entity types must NOT be reported as a cross-chain link: it is one
+    physical address wearing two etype labels, not evidence of two addresses
+    controlled by the same party."""
+    from cybertrace.integrations import ofac
+    if not (ofac.available() and ofac.index_available()):
+        pytest.skip("OFAC SDN not downloaded/indexed in this checkout")
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        store.upsert_entity("ETH_ADDRESS", SIM_HYON_SOP_ETH)
+        store.upsert_entity("BNB_ADDRESS", SIM_HYON_SOP_BNB_SAME_STRING)
+
+        assert cross_chain_links(store) == []
+
+
+def test_cross_chain_links_never_merges_across_attribution_tiers(tmp_path):
+    """A TAG_ATTESTED third-party guess and a REGULATORY_ATTESTED government
+    designation must never be merged into one link even if they happened to
+    share a group_key string -- attribution tier is part of the grouping key,
+    not an afterthought."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        assert label_exchange(store, "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", "Shared Name") is not None
+        assert label_exchange(store, "0x000000000000000000000000000000000000eeee",
+                              "Shared Name", chain="ethereum") is not None
+        links = cross_chain_links(store)
+        assert len(links) == 1  # both are ANALYST_ASSERTED -- one legitimate link
+        assert links[0]["attribution"] == "ANALYST_ASSERTED"
+        assert links[0]["chains"] == ["BTC_ADDRESS", "ETH_ADDRESS"]
+
+
+def test_cross_chain_links_empty_with_no_multi_chain_evidence(tmp_path):
+    """No defensible cross-chain evidence -> empty list, never a fabricated
+    guess -- the refusal behavior the task explicitly requires."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        assert label_exchange(store, "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", "Solo VASP") is not None
+        assert cross_chain_links(store) == []
+
+
 # --- VASP_DISCLOSED -----------------------------------------------------
 #
 # Real addresses from the two sources independently
@@ -1801,6 +1906,39 @@ def test_a_real_bitmex_disclosed_address_is_vasp_disclosed(tmp_path):
         # same way (Loop 37).
         assert hit["wallet_role"] == "RESERVE"
         assert store._all("SELECT 1 FROM relationships WHERE rtype='EXCHANGE_DEPOSIT'") == []
+
+
+def test_a_real_bitfinex_sol_hot_wallet_is_vasp_disclosed_and_hot(tmp_path):
+    """The one attribution-tier/wallet_role combination the shipped corpus
+    supports (Loop 38's real Bitfinex Solana hot wallet, same address
+    test_solana_module.py pins) but that no test asserted wallet_role for --
+    COLD and RESERVE are covered above, HOT was not (Loop 41 audit finding).
+    A 1-hop DIRECT path, not AT_VASP: the suspect is a distinct address that
+    sent funds to the real hot wallet, which is what earns its own
+    VASP_DISCLOSED/HOT attribution from _vasp_endpoints."""
+    from cybertrace.integrations import exchange_tags
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+    from cybertrace.normalize import b58encode
+    BITFINEX_SOL_HOT = "FxteHmLwG9nk1eL4pjNve3Eub2goGkkz6g6TbvdmW46a"
+    suspect = b58encode(b"\x01" * 32)  # structurally valid, unrelated SOL address
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("SOL_ADDRESS", suspect)
+        sid = store.insert_snapshot(store.upsert_target("sol:" + suspect), {}, "solana")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": suspect, "sent_to_addresses": [BITFINEX_SOL_HOT]}, "solana")
+
+        hit = next(w for w in wallet_exchange_paths(store) if w["entity_id"] == addr)
+        assert hit["attribution"] == VASP_DISCLOSED
+        assert hit["exchange"] == "Bitfinex"
+        assert hit["wallet_role"] == "HOT"
+        assert hit["proximity"] == DIRECT
+        assert hit["direction"] == TO_VASP
+        assert hit["attribution_rank"] == 3  # VASP_DISCLOSED, per _ATTRIBUTION_RANK
+        # One hop, moving toward the VASP -- exactly what deposit_candidate
+        # names (Loop 41): the smallest structured claim the existing
+        # proximity+direction fields already support.
+        assert hit["deposit_candidate"] is True
 
 
 def test_vasp_disclosed_outranks_a_third_party_tag_on_the_same_address(tmp_path):
@@ -1952,6 +2090,10 @@ def test_wallet_exchange_paths_direct_hit(tmp_path):
         assert paths[0]["confidence"] == 1.0
         assert paths[0]["evidence_ids"]
         assert paths[0]["chain"] == "BTC_ADDRESS"
+        assert paths[0]["attribution_rank"] == 1  # ANALYST_ASSERTED, highest rank
+        # This address IS the labeled exchange endpoint (AT_VASP, hops==0) --
+        # never a deposit candidate for itself.
+        assert paths[0]["deposit_candidate"] is False
 
 
 def test_wallet_exchange_paths_direct_hit_tron(tmp_path):
@@ -2008,6 +2150,8 @@ def test_wallet_exchange_paths_eth_wallet_to_wallet_to_vasp(tmp_path):
         # Non-AT_VASP ("found") branch carries chain too, not just hop 0 rows.
         assert row["chain"] == "ETH_ADDRESS"
         assert row["path"] == [addr, store.find_entity("ETH_ADDRESS", ETH_VASP)]
+        assert row["attribution_rank"] == 1  # ANALYST_ASSERTED
+        assert row["deposit_candidate"] is True
 
 
 def test_wallet_exchange_paths_eth_wallet_to_erc20_transfer_to_vasp(tmp_path):
@@ -2065,6 +2209,11 @@ def test_wallet_exchange_paths_eth_wallet_to_intermediate_to_erc20_to_vasp(tmp_p
         assert row["direction"] == TO_VASP
         assert row["path"] == [addr_a, addr_b, store.find_entity("ETH_ADDRESS", ETH_VASP)]
         assert row["evidence_ids"]
+        # direction alone (TO_VASP) is not enough: deposit_candidate requires
+        # proximity == DIRECT too, so a 2-hop reach through an intermediary
+        # is never reported as a deposit endpoint -- reachability through
+        # another wallet is not this suspect depositing directly.
+        assert row["deposit_candidate"] is False
 
 
 def test_wallet_exchange_paths_one_hop_via_transacted_with(tmp_path):
@@ -3931,6 +4080,71 @@ def test_risk_alerts_is_empty_when_nothing_reaches_high_or_critical(tmp_path):
         results = run_correlation(store)
         assert results["risk_alerts"] == []
         assert "High-risk wallet alerts" not in render_markdown(results["dossiers"], results)
+
+
+def test_attach_wallet_flags_reaches_case_wide_markdown_and_html(tmp_path):
+    """_attach_wallet_flags (Loop 41 audit): a case-wide correlate/watch run,
+    its Markdown brief, and its HTML dossier previously never saw a single
+    one of wallet_path_flags' per-hop cited findings (abuse reports,
+    Elliptic++ labels, GraphSense tagpack hits, the VASP's own wallet-role
+    disclosure) -- only single-address `trace-wallet` computed them at all.
+    Real fixture: the same Bitfinex cold-wallet disclosure used above."""
+    from cybertrace.integrations import exchange_tags
+    if not (exchange_tags.available() and exchange_tags.index_available()):
+        pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        sid = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": BTC_VALID, "sent_to_addresses": [BITFINEX_COLD]}, "bitcoin")
+
+        results = run_correlation(store)
+        hit = next(w for w in results["wallet_exchange_paths"] if w["entity_id"] == addr)
+        assert hit["flags"], "expected _attach_wallet_flags to populate flags case-wide"
+        assert any("discloses this exact address as a cold wallet" in f for f in hit["flags"])
+
+        md = render_markdown(results["dossiers"], results)
+        assert "discloses this exact address as a cold wallet" in md
+
+        html_path = str(tmp_path / "case.html")
+        render_dossier_html(results, html_path)
+        with open(html_path) as fh:
+            html_out = fh.read()
+        assert "finding(s)</summary>" in html_out
+        assert "discloses this exact address as a cold wallet" in html_out
+
+
+def test_wallet_verdict_surfaces_in_markdown_and_html(tmp_path):
+    """Loop 41: a recorded wallet verdict must reach the same case-wide
+    surfaces a candidate verdict already does -- kept visibly apart from the
+    automated attribution/risk columns beside it, never overwriting them."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        rel = label_exchange(store, BTC_VALID, "Test Exchange")
+        assert rel is not None
+        addr = store.find_entity("BTC_ADDRESS", BTC_VALID)
+        store.record_wallet_feedback(addr, "BENIGN", note="known merchant address",
+                                     analyst="jdoe")
+
+        results = run_correlation(store)
+        hit = next(w for w in results["wallet_exchange_paths"] if w["entity_id"] == addr)
+        assert hit["verdict"]["outcome"] == "BENIGN"
+        assert hit["verdict"]["analyst"] == "jdoe"
+        # Automated fields are untouched by the verdict.
+        assert hit["attribution"] == "ANALYST_ASSERTED"
+        assert hit["exchange"] == "test exchange"
+
+        md = render_markdown(results["dossiers"], results)
+        assert "analyst verdict: **BENIGN**" in md
+        assert "known merchant address" in md
+        assert "(by jdoe," in md
+
+        html_path = str(tmp_path / "case.html")
+        render_dossier_html(results, html_path)
+        with open(html_path) as fh:
+            html_out = fh.read()
+        assert "analyst verdict" in html_out
+        assert "<b>BENIGN</b>" in html_out
+        assert "known merchant address" in html_out
 
 
 class TestDataSourceStatus:

@@ -417,6 +417,22 @@ window.__resources = {
                         </div>
                       </div>
                     </sc-if>
+
+                    <sc-if value="{{ w.hasFlags }}" hint-placeholder-val="{{ false }}">
+                      <div style="border-top:1px solid #171c1f;padding-top:14px">
+                        <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:8px">EVIDENCE ON RECORD (source, tier, and claim, cited per finding)</div>
+                        <div style="display:flex;flex-direction:column;gap:6px">
+                          <sc-for list="{{ w.flags }}" as="f" hint-placeholder-count="2">
+                            <div style="font-size:12px;color:#879196;line-height:1.5">— {{ f }}</div>
+                          </sc-for>
+                        </div>
+                      </div>
+                    </sc-if>
+
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;border-top:1px solid #171c1f;padding-top:14px">
+                      <div style="font:400 11.5px/1 'IBM Plex Mono',monospace;color:{{ w.verdictColor }}">{{ w.verdictLabel }}</div>
+                      <div onClick="{{ w.openVerdict }}" style="cursor:pointer;border:1px solid #262d31;color:#a7b1b5;padding:6px 13px;font-size:12px" style-hover="border-color:#2fb4e8;color:#2fb4e8">Record verdict</div>
+                    </div>
                   </div>
                 </sc-for>
                 <div style="border:1px solid #1c2427;border-top:none"></div>
@@ -427,6 +443,29 @@ window.__resources = {
                 </div>
               </sc-if>
             </div>
+
+            <sc-if value="{{ hasCrossChainLinks }}" hint-placeholder-val="{{ false }}">
+              <div>
+                <div style="display:flex;align-items:baseline;gap:12px;padding-bottom:12px;border-bottom:1px solid #171c1f">
+                  <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#67716f">CROSS-CHAIN LINKS</div>
+                  <div style="font-size:12px;color:#5a6367">same entity named on more than one chain by one evidence record — never inferred from address similarity, timing, or amount</div>
+                </div>
+                <sc-for list="{{ crossChainLinks }}" as="link" hint-placeholder-count="1">
+                  <div style="border:1px solid #1c2427;border-top:none;background:#0d1012;padding:16px 22px;display:flex;flex-direction:column;gap:10px">
+                    <div style="display:flex;align-items:baseline;gap:10px">
+                      <div style="font:500 14px/1 'IBM Plex Mono',monospace;color:#edf2f4">{{ link.entityName }}</div>
+                      <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1px;color:#2fb4e8">{{ link.attribution }}</div>
+                    </div>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap">
+                      <sc-for list="{{ link.members }}" as="m" hint-placeholder-count="2">
+                        <span style="font-size:11.5px;color:#c5ccd0;border:1px solid #262d31;padding:5px 9px">{{ m.chain }} · {{ m.value }}</span>
+                      </sc-for>
+                    </div>
+                  </div>
+                </sc-for>
+                <div style="border:1px solid #1c2427;border-top:none"></div>
+              </div>
+            </sc-if>
           </div>
         </sc-if>
 
@@ -751,7 +790,7 @@ window.__resources = {
             <div style="color:#879196;font-size:12.5px;margin-top:9px;text-wrap:pretty">{{ verdict.assessment }}</div>
 
             <div style="margin-top:22px;border:1px solid #33231f;background:#120c0b;padding:15px 17px">
-              <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#d97a6c">WHAT THE ENGINE ALREADY OBJECTED</div>
+              <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#d97a6c">{{ verdict.objectionsHeading }}</div>
               <div style="display:flex;flex-direction:column;gap:10px;margin-top:12px">
                 <sc-for list="{{ verdict.objections }}" as="o" hint-placeholder-count="2">
                   <div>
@@ -954,8 +993,12 @@ function buildGraph(cd) {
 // follows for candidates/evidence/graph.
 const RISK_COLOR = { CRITICAL:C.red, HIGH:'#d97a6c', MODERATE:C.sand, LOW:C.green, INSUFFICIENT_EVIDENCE:'#67716f' };
 
-function walletRow(w, valueById) {
+function walletRow(w, valueById, openVerdict) {
   const risk = w.risk || {};
+  // A recorded human decision on THIS wallet (Loop 41) -- kept apart from
+  // every automated field below it, same shape and same two-color scheme
+  // renderVals() already uses for a candidate verdict.
+  const v = w.verdict;
   const riskLevel = risk.risk_level || 'INSUFFICIENT_EVIDENCE';
   const path = w.path || [];
   return {
@@ -1001,10 +1044,19 @@ function walletRow(w, valueById) {
       ...(w.secondary_vasp_contacts || []).map(c => c.exchange),
     ])],
     hasVaspContacts: !!((w.direct_vasp_contacts || []).length || (w.secondary_vasp_contacts || []).length),
+    // Per-hop cited findings (Loop 41) -- source, evidence tier, and the
+    // specific claim, in the exact same text trace-wallet's own report
+    // already carries. Previously computed server-side but dropped before
+    // reaching this payload; nothing here is a new claim, only display.
+    flags: w.flags || [],
+    hasFlags: !!(w.flags && w.flags.length),
+    verdictLabel: v ? ('ANALYST: ' + v.outcome + (v.note ? ' — ' + v.note : '')) : 'NO ANALYST VERDICT RECORDED',
+    verdictColor: v ? (v.outcome === 'REJECTED' || v.outcome === 'MALICIOUS' ? C.red : C.green) : '#495255',
+    openVerdict: () => openVerdict(w),
   };
 }
 
-function walletTabVals(cd) {
+function walletTabVals(cd, openVerdict) {
   const paths = cd.wallet_exchange_paths || [];
   const valueById = {};
   paths.forEach(w => { valueById[w.entity_id] = w.value; });
@@ -1014,7 +1066,7 @@ function walletTabVals(cd) {
   // threshold too, not only the score itself.
   const alertIds = new Set((cd.risk_alerts || []).map(w => w.entity_id));
   const wallets = paths.map(w => Object.assign(
-    walletRow(w, valueById), { isAlert: alertIds.has(w.entity_id) }));
+    walletRow(w, valueById, openVerdict), { isAlert: alertIds.has(w.entity_id) }));
   // Loop 39 Section 4: cd.data_source_status is FRESH/STALE/UNAVAILABLE per
   // offline adapter (correlate.data_source_status()) -- surfaced once here,
   // not recomputed, so "no OFAC/tag hit" on any card above is never mistaken
@@ -1023,6 +1075,20 @@ function walletTabVals(cd) {
   const dataSources = Object.keys(dss).map(name => ({
     name, state: dss[name], isFresh: dss[name] === 'FRESH',
   }));
+  // Loop 41: same entity named on more than one chain by ONE evidence
+  // record (an OFAC profile, a VASP's own disclosure, a GraphSense tag, or
+  // an analyst's own citation) -- see correlate.cross_chain_links' own
+  // docstring. Never inferred from address similarity, timing, or amount;
+  // no invented confidence number, only the same attribution tier every
+  // wallet card above already shows.
+  const crossChainLinks = (cd.cross_chain_links || []).map(link => ({
+    entityName: link.entity_name,
+    attribution: link.attribution,
+    members: link.members.map(m => ({
+      value: short(m.value, 26), chain: (m.chain || '').replace('_ADDRESS', ''),
+    })),
+  }));
+
   return {
     wallets,
     hasWallets: wallets.length > 0,
@@ -1032,6 +1098,8 @@ function walletTabVals(cd) {
     dataSources,
     hasDataSources: dataSources.length > 0,
     hasStaleDataSource: dataSources.some(d => !d.isFresh),
+    crossChainLinks,
+    hasCrossChainLinks: crossChainLinks.length > 0,
   };
 }
 
@@ -1256,7 +1324,15 @@ class Component extends DCLogic {
         ? [{ text:'case data failed to load: ' + st.loadError, color:C.red }]
         : cd.case_id ? [{ text:`${cd.candidates.length} candidate(s), ${cd.suppressed.length} objection(s)`, color:C.cyan }] : [],
 
-      ...walletTabVals(cd),
+      ...walletTabVals(cd, (w) => this.set({
+        verdict: {
+          kind: 'wallet', entity_id: w.entity_id, name: w.value,
+          assessment: `${w.proximity} to ${w.exchange} (${w.hops} hop(s)) — `
+            + 'a human decision on this wallet, kept apart from the automated finding above.',
+          objections: (w.flags || []).map(f => ({ text: f, rule: '', anchor: '' })),
+        },
+        verdictNote: '', outcome: null,
+      })),
 
       tabs: ['Overview','Wallets','Graph','Evidence','Timeline','Sources','Report'].map(t => ({
         label:t, color: st.tab === t ? '#edf2f4' : '#7c878c',
@@ -1342,7 +1418,14 @@ class Component extends DCLogic {
       recheck: () => this.ask('what changed'),
 
       verdictOpen: !!st.verdict,
-      verdict: st.verdict || { name:'', assessment:'', objections:[] },
+      verdict: st.verdict ? Object.assign({}, st.verdict, {
+        // Candidates get objected to by the engine; a wallet has no
+        // contradiction concept, only the cited flags already shown on its
+        // card -- same {text,rule,anchor} shape, different heading so
+        // neither reads as the other's finding.
+        objectionsHeading: st.verdict.kind === 'wallet'
+          ? 'EVIDENCE ALREADY ON RECORD FOR THIS WALLET' : 'WHAT THE ENGINE ALREADY OBJECTED',
+      }) : { name:'', assessment:'', objections:[], objectionsHeading:'WHAT THE ENGINE ALREADY OBJECTED' },
       closeVerdict: () => this.set({ verdict:null }),
       outcomes: ['CONFIRMED','REJECTED','BENIGN','MALICIOUS','UNKNOWN'].map(o => ({
         label:o,
@@ -1358,10 +1441,19 @@ class Component extends DCLogic {
       saveVerdict: () => {
         if (!st.outcome || !st.verdictNote.trim()) return;
         const caseId = cd.case_id;
-        apiFetch(caseUrl(caseId) + '/verdict', {
+        // Same modal, same POST/reload flow for both -- only the endpoint
+        // and the id field differ (candidate_id vs entity_id), because a
+        // traced wallet is never a `candidates` row (see
+        // evidence.wallet_feedback's schema comment).
+        const isWallet = st.verdict.kind === 'wallet';
+        const path = isWallet ? '/wallet-verdict' : '/verdict';
+        const body = isWallet
+          ? { entity_id: st.verdict.entity_id, outcome: st.outcome, note: st.verdictNote.trim() }
+          : { candidate_id: st.verdict.candidate_id, outcome: st.outcome, note: st.verdictNote.trim() };
+        apiFetch(caseUrl(caseId) + path, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ candidate_id: st.verdict.candidate_id, outcome: st.outcome, note: st.verdictNote.trim() })
+          body: JSON.stringify(body)
         })
           .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e.error || ('HTTP ' + r.status)))))
           .then(() => {

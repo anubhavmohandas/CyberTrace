@@ -481,10 +481,14 @@ class DarkwebModule(BaseModule):
                 # is, never a relationship (evidence.ingest writes it as
                 # PGP_KEY metadata only; see that function's docstring).
                 # Degrades silently, same as _check_ellipticpp without its
-                # index: no dataset downloaded, or downloaded but not
-                # indexed yet, both just skip the lookup rather than raising
-                # mid-crawl.
-                if evolution.available() and evolution.index_available():
+                # index: no dataset downloaded, downloaded but not indexed
+                # yet, or indexed from a corpus that has since changed on
+                # disk (evolution.is_stale() -- same _freshness mechanism
+                # _check_ellipticpp's own third check reads), all just skip
+                # the lookup rather than raising mid-crawl or treating a
+                # stale index's silence as a checked, clean result.
+                if (evolution.available() and evolution.index_available()
+                        and not evolution.is_stale()):
                     hits = evolution.lookup_pgp_fingerprint(bare)
                     if hits:
                         record['evolution_dataset_match'] = True

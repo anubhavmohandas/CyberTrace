@@ -210,6 +210,7 @@ def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
         "markets": sorted(targets.values()),
         "market_relationships": market_relationships,
         "wallet_exchange_paths": results["wallet_exchange_paths"],
+        "cross_chain_links": results["cross_chain_links"],
         "risk_alerts": results["risk_alerts"],
         "data_source_status": results["data_source_status"],
         "report_markdown": render_markdown(results["dossiers"], results),

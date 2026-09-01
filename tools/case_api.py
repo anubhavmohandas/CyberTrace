@@ -173,6 +173,9 @@ def make_handler(cases_dir: Path):
             path = unquote(urlsplit(self.path).path)
             if path.startswith("/api/") and not self._authorized():
                 return self._json({"error": "unauthorized"}, status=401)
+            if path.startswith("/api/case/") and path.endswith("/wallet-verdict"):
+                case_id = path[len("/api/case/"):-len("/wallet-verdict")]
+                return self._save_wallet_verdict(case_id)
             if path.startswith("/api/case/") and path.endswith("/verdict"):
                 case_id = path[len("/api/case/"):-len("/verdict")]
                 return self._save_verdict(case_id)
@@ -215,6 +218,31 @@ def make_handler(cases_dir: Path):
                 try:
                     feedback_id = store.record_feedback(
                         candidate_id, outcome, note=body.get("note"), analyst=body.get("analyst"))
+                except ValueError as e:
+                    return self._json({"error": str(e)}, status=400)
+            return self._json({"feedback_id": feedback_id}, status=200)
+
+        def _save_wallet_verdict(self, case_id: str) -> None:
+            """Same shape as _save_verdict, for a wallet entity_id rather than
+            a candidate_id -- see evidence.wallet_feedback's schema comment
+            for why a traced wallet needs its own table/endpoint instead of
+            reusing the candidate one."""
+            db_path = _case_db_path(cases_dir, case_id)
+            if db_path is None or not db_path.is_file():
+                return self._json({"error": "no such case"}, status=404)
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except json.JSONDecodeError:
+                return self._json({"error": "invalid JSON body"}, status=400)
+            entity_id = body.get("entity_id")
+            outcome = body.get("outcome")
+            if not entity_id or not outcome:
+                return self._json({"error": "entity_id and outcome are required"}, status=400)
+            with EvidenceStore(str(db_path)) as store:
+                try:
+                    feedback_id = store.record_wallet_feedback(
+                        entity_id, outcome, note=body.get("note"), analyst=body.get("analyst"))
                 except ValueError as e:
                     return self._json({"error": str(e)}, status=400)
             return self._json({"feedback_id": feedback_id}, status=200)

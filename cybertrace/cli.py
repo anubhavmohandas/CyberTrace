@@ -434,6 +434,60 @@ def feedback(candidate_id: str, db_path: str, outcome: str, note: Optional[str],
         click.echo(f"[+] Recorded {outcome.upper()} for {candidate_id} ({fid})", err=True)
 
 
+@cli.command('wallet-verdict')
+@click.argument('address')
+@click.option('--db', 'db_path', required=True, type=click.Path(exists=True, dir_okay=False),
+              help='Evidence store the wallet was traced into')
+@click.option('--outcome', required=True,
+              type=click.Choice(['CONFIRMED', 'REJECTED', 'BENIGN', 'MALICIOUS', 'UNKNOWN'],
+                                case_sensitive=False),
+              help='What actually happened, after review')
+@click.option('--note', default=None, help='Free-text rationale')
+@click.option('--analyst', default=None, help='Who is recording this')
+@click.option('--chain', default=None,
+              type=click.Choice(_WALLET_CHAINS),
+              help='Chain ADDRESS was searched on. Required for a bnb/polygon wallet -- '
+                   'a 0x address otherwise resolves to ethereum only.')
+def wallet_verdict_cmd(address: str, db_path: str, outcome: str, note: Optional[str],
+                       analyst: Optional[str], chain: Optional[str]):
+    """
+    Record an analyst's verdict on a wallet already traced into this case --
+    reviewed, confirmed, or dismissed -- kept apart from the automated
+    wallet_role/attribution/risk fields the same way `feedback` keeps a
+    candidate verdict apart from the engine's own score. Never overwrites
+    that automated intelligence; it is a second, independent fact about the
+    same wallet, read back into every report/GUI/Investigator surface
+    alongside it.
+
+    \b
+      cybertrace wallet-verdict bc1q... --db case.db --outcome confirmed
+      cybertrace wallet-verdict 0x... --chain bnb --db case.db --outcome benign \\
+          --note "cleared: known merchant deposit address" --analyst jdoe
+    """
+    from .correlate import _TRACE_CHAIN_ETYPES
+    from .evidence import EvidenceStore
+
+    with EvidenceStore(db_path) as store:
+        specific, detected_chain = detect_input_type(address)
+        resolved_chain = chain or detected_chain
+        if resolved_chain == 'unsupported_chain':
+            click.echo(f"[!] {address!r} is not a valid Bitcoin, Ethereum, BNB Chain, "
+                      f"Polygon, TRON, or Solana address", err=True)
+            sys.exit(1)
+        etype = _TRACE_CHAIN_ETYPES.get(resolved_chain, "BTC_ADDRESS")
+        entity_id = store.find_entity(etype, address)
+        if entity_id is None:
+            click.echo(f"[!] {address!r} was never searched into this case", err=True)
+            sys.exit(1)
+        try:
+            fid = store.record_wallet_feedback(entity_id, outcome.upper(), note=note,
+                                               analyst=analyst)
+        except ValueError as e:
+            click.echo(f"[!] {e}", err=True)
+            sys.exit(1)
+        click.echo(f"[+] Recorded {outcome.upper()} for {address} ({fid})", err=True)
+
+
 @cli.command('label-exchange')
 @click.argument('address')
 @click.option('--exchange', required=True, help='Exchange/VASP name this address belongs to')
