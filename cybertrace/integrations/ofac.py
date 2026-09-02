@@ -280,10 +280,22 @@ def ofac_labels(addresses: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]]:
                     f"SELECT address, entity_name, profile_id FROM addresses "
                     f"WHERE address IN ({marks})", tuple(chunk)):
                 raw = by_canon[addr]
-                # First record wins -- one address designated under two
-                # profiles is not a case this corpus has shown, and merging
-                # would need a policy nothing here needs yet.
-                out.setdefault(raw, {"entity_name": entity_name, "profile_id": profile_id})
+                hit = out.get(raw)
+                if hit is None:
+                    # First record is the primary designation, same as
+                    # before. Real corpus data (the Nov-2018 SamSam
+                    # ransomware sanctions action, profiles 38419/38420,
+                    # sharing BTC address 1H939dom7i4WDLCKyGbXUp3fs9CSTNRzgL)
+                    # shows one address CAN carry two distinct government
+                    # designations at once -- also_designated keeps the rest
+                    # visible instead of silently dropping them, without
+                    # changing this dict's shape for the one caller that only
+                    # ever reads entity_name/profile_id.
+                    out[raw] = {"entity_name": entity_name, "profile_id": profile_id,
+                               "also_designated": []}
+                elif profile_id != hit["profile_id"]:
+                    hit["also_designated"].append(
+                        {"entity_name": entity_name, "profile_id": profile_id})
     finally:
         conn.close()
     return out

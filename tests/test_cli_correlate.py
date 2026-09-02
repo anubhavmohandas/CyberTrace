@@ -170,6 +170,59 @@ def test_label_exchange_rejects_an_invalid_address(tmp_path):
     assert 'not a valid' in result.output.lower()
 
 
+# --- case-state enforcement (Loop 42) ----------------------------------------
+
+def test_label_exchange_refused_once_case_is_closed(tmp_path):
+    from cybertrace.evidence import EvidenceStore
+
+    db = str(tmp_path / 'case.db')
+    with EvidenceStore(db) as store:
+        store.update_case(status="CLOSED")
+
+    result = CliRunner().invoke(
+        cli, ['label-exchange', '1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2',
+             '--exchange', 'Test Exchange', '--db', db])
+    assert result.exit_code != 0
+    assert 'case is CLOSED' in result.output
+
+
+def test_correlate_skips_ingest_but_still_rerenders_when_case_is_closed(tmp_path):
+    """A closed case must stay fully readable/re-derivable -- ingest is
+    refused per file (same graceful 'Skipping' path a bad JSON file already
+    takes), but the command itself still succeeds and re-renders whatever
+    was on record before closing."""
+    from cybertrace.evidence import EvidenceStore, ingest
+
+    db = str(tmp_path / 'case.db')
+    a, b = _shared_key_pair(tmp_path)
+    with EvidenceStore(db) as store:
+        ingest(json.loads(open(a).read()), store)
+        ingest(json.loads(open(b).read()), store)
+        store.update_case(status="CLOSED")
+
+    new_file = _write_result(tmp_path / 'c.json', onion("z"))
+    result = CliRunner().invoke(cli, ['correlate', new_file, '--db', db, '--output', 'json'])
+    assert result.exit_code == 0, result.output
+    assert 'Skipping' in result.output
+    assert 'case is CLOSED' in result.output
+    # The skip message (stderr) precedes the JSON payload (stdout) in the
+    # merged CliRunner output -- isolate the payload before parsing it.
+    data = json.loads(result.output[result.output.index('{'):])
+    assert data['dossiers']  # the two already-ingested markets still re-render
+
+
+def test_watch_refused_once_case_is_archived(tmp_path):
+    from cybertrace.evidence import EvidenceStore
+
+    db = str(tmp_path / 'case.db')
+    with EvidenceStore(db) as store:
+        store.update_case(status="ARCHIVED")
+
+    result = CliRunner().invoke(cli, ['watch', '--db', db])
+    assert result.exit_code != 0
+    assert 'case is ARCHIVED' in result.output
+
+
 # --- trace-wallet ---------------------------------------------------------------
 
 def test_trace_wallet_reports_path_and_flags(tmp_path):

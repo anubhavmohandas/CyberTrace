@@ -1629,3 +1629,187 @@ def test_label_exchange_refuses_an_unsupported_chain_address(tmp_path):
 
         # The supported chains are untouched by the guard.
         assert label_exchange(store, BTC_VALID, "binance.com", analyst="jdoe") is not None
+
+
+# --- case-state enforcement (Loop 42) ----------------------------------------
+#
+# OPEN/CLOSED/ARCHIVED was cosmetic through Loop 41 -- update_case validated
+# only set membership, and nothing else in the store ever read the status
+# back. These prove the one flat rule now enforced: a closed/archived case
+# refuses every write that adds a NEW fact (ingest, label_exchange,
+# record_feedback, record_wallet_feedback), while reads, run_correlation,
+# exports, and the status transition itself stay unrestricted.
+
+def test_ingest_refused_once_case_is_closed(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        store.update_case(status="CLOSED")
+        with pytest.raises(ValueError, match="case is CLOSED"):
+            ingest(_result(ONION_A), store)
+
+
+def test_ingest_refused_once_case_is_archived(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        store.update_case(status="ARCHIVED")
+        with pytest.raises(ValueError, match="case is ARCHIVED"):
+            ingest(_result(ONION_A), store)
+
+
+def test_ingest_allowed_on_a_reopened_case(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        store.update_case(status="CLOSED")
+        store.update_case(status="OPEN")
+        assert ingest(_result(ONION_A), store)  # non-empty: real snapshots written
+
+
+def test_record_feedback_refused_once_case_is_closed(tmp_path):
+    from cybertrace.correlate import run_correlation
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=[{'armored': KEY_A}]), store)
+        ingest(_result(ONION_B, pgp_keys=[{'armored': KEY_A}]), store)
+        cid = run_correlation(store)["dossiers"][0]["candidate_id"]
+        store.update_case(status="CLOSED")
+        with pytest.raises(ValueError, match="case is CLOSED"):
+            store.record_feedback(cid, "CONFIRMED")
+
+
+def test_record_wallet_feedback_refused_once_case_is_closed(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        store.update_case(status="CLOSED")
+        with pytest.raises(ValueError, match="case is CLOSED"):
+            store.record_wallet_feedback(addr, "CONFIRMED")
+
+
+def test_label_exchange_refused_once_case_is_closed(tmp_path):
+    from cybertrace.evidence import label_exchange
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        store.update_case(status="CLOSED")
+        with pytest.raises(ValueError, match="case is CLOSED"):
+            label_exchange(store, BTC_VALID, "Test Exchange")
+
+
+def test_reads_and_recorrelation_unaffected_by_closed_case(tmp_path):
+    """The exact boundary the loop spec draws: a closed case stays fully
+    readable and re-derivable from evidence already on disk -- run_correlation
+    re-scores `candidates` on every read (case_api's GET route, the
+    Investigator, `correlate --db` with no new files) and must never be
+    gated the same way a genuinely new fact is."""
+    from cybertrace.correlate import run_correlation
+
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        ingest(_result(ONION_A, pgp_keys=[{'armored': KEY_A}]), store)
+        ingest(_result(ONION_B, pgp_keys=[{'armored': KEY_A}]), store)
+        run_correlation(store)
+        store.update_case(status="ARCHIVED")
+
+        results = run_correlation(store)  # re-derivation must still work
+        assert results["dossiers"]
+        assert store.case_info()["status"] == "ARCHIVED"
+        assert store._all("SELECT * FROM candidates")
+
+
+def test_status_transition_and_notes_always_allowed(tmp_path):
+    """update_case (the transition itself) and add_case_note (administrative,
+    not evidentiary) are never gated -- an archived case must still be
+    reopenable, and a wrap-up note must still be addable after closing."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        store.update_case(status="CLOSED")
+        store.add_case_note("closed pending legal review")  # must not raise
+        store.update_case(status="ARCHIVED")
+        store.update_case(status="OPEN")  # reopen from ARCHIVED must work
+        assert store.case_info()["status"] == "OPEN"
+
+
+# --- watch-cycle persistence (Loop 42) ---------------------------------------
+
+def test_watch_run_round_trips_json_fields(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        report = {
+            "checked_at": "2026-09-02T00:00:00+00:00",
+            "checked": [{"url": ONION_A, "status": "CHANGED"}],
+            "wallets_checked": [{"address": BTC_VALID, "chain": "BTC_ADDRESS"}],
+            "wallet_deltas": [{"change": "MOVED", "entity_id": "e1"}],
+            "deltas": [{"change": "NEW", "candidate_id": "OP-1"}],
+            "risk_alerts": [{"value": BTC_VALID}],
+            "discovered": [{"service": "x", "onion": ONION_B}],
+            "narrative": {"answer": "a wallet newly reached a VASP"},
+        }
+        rid = store.record_watch_run(report)
+        assert rid.startswith("watch_")
+
+        history = store.watch_history()
+        assert len(history) == 1
+        row = history[0]
+        assert row["checked_at"] == report["checked_at"]
+        assert row["checked"] == report["checked"]
+        assert row["wallet_deltas"] == report["wallet_deltas"]
+        assert row["candidate_deltas"] == report["deltas"]
+        assert row["narrative"] == "a wallet newly reached a VASP"
+        assert row["status"] == "OK"
+
+
+def test_watch_history_is_append_only_and_newest_first(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        store.record_watch_run({"checked_at": "2026-09-01T00:00:00+00:00"})
+        store.record_watch_run({"checked_at": "2026-09-02T00:00:00+00:00"})
+        history = store.watch_history()
+        assert [h["checked_at"] for h in history] == [
+            "2026-09-02T00:00:00+00:00", "2026-09-01T00:00:00+00:00"]
+        assert store.watch_history(limit=1) == history[:1]
+
+
+def test_watch_run_with_no_narrative_stores_null(tmp_path):
+    """A quiet cycle's narrative is None (watch_narrative returns None on an
+    empty delta list) -- must round-trip as None, not the string 'None'."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        store.record_watch_run({"checked_at": "2026-09-02T00:00:00+00:00"})
+        assert store.watch_history()[0]["narrative"] is None
+
+
+# --- transaction-level cross-chain links (Loop 42) ---------------------------
+
+def _tx_link(**overrides) -> dict:
+    link = {
+        "source_chain": "BTC_ADDRESS", "source_address": "bc1qsrc",
+        "source_tx": "BTCTX1", "dest_chain": "ETH_ADDRESS", "dest_address": "0xdest",
+        "dest_tx": "ETHTX1", "mechanism": "SWAP", "evidence_ref": "BTCTX1",
+        "tx_timestamp": "2026-08-01T00:00:00+00:00", "source_api": "thorchain_midgard",
+        "status": "success",
+    }
+    link.update(overrides)
+    return link
+
+
+def test_cross_chain_tx_link_round_trips(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        lid = store.record_cross_chain_tx_link(_tx_link())
+        assert lid.startswith("xlink_")
+        rows = store.cross_chain_tx_links_for("bc1qsrc")
+        assert len(rows) == 1
+        assert rows[0]["dest_address"] == "0xdest"
+        assert rows[0]["mechanism"] == "SWAP"
+        # Findable from either side -- a case may trace the source or the
+        # destination wallet.
+        assert len(store.cross_chain_tx_links_for("0xdest")) == 1
+        assert store.cross_chain_tx_links_for("someone-elses-address") == []
+
+
+def test_cross_chain_tx_link_deduplicates_on_evidence_ref(tmp_path):
+    """Re-running the live lookup over the same real transaction must not
+    grow duplicate rows -- link_id is deterministic on evidence_ref."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        store.record_cross_chain_tx_link(_tx_link())
+        store.record_cross_chain_tx_link(_tx_link())
+        assert len(store.all_cross_chain_tx_links()) == 1
+
+        store.record_cross_chain_tx_link(_tx_link(evidence_ref="A_DIFFERENT_TX"))
+        assert len(store.all_cross_chain_tx_links()) == 2
+
+
+def test_cross_chain_tx_link_refused_once_case_is_closed(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        store.update_case(status="CLOSED")
+        with pytest.raises(ValueError, match="case is CLOSED"):
+            store.record_cross_chain_tx_link(_tx_link())

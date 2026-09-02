@@ -394,7 +394,18 @@ def watch_narrative(store: EvidenceStore, case_id: str, deltas: List[dict]) -> O
 def run_watch(store: EvidenceStore, urls: Optional[List[str]] = None,
               discover: bool = False, correlate: bool = True,
               case_id: Optional[str] = None, deep: bool = False) -> Dict[str, Any]:
-    """Synchronous entry point: re-check, then re-correlate and diff."""
+    """Synchronous entry point: re-check, then re-correlate and diff.
+
+    Refuses outright against a closed/archived case (via store._require_open,
+    the same gate every other new-evidence write already goes through) --
+    a watch cycle fetches live data and ingests it, so it is exactly the
+    "new investigative fact" mutation a sealed case must stop accruing,
+    checked before any live fetch runs rather than partway through one.
+    The completed cycle is then persisted to watch_runs (see
+    EvidenceStore.record_watch_run) so reopening this case later shows what
+    this run found, not only what it printed.
+    """
+    store._require_open()
     before = read_candidates(store)
     report = asyncio.run(recheck(store, urls=urls, discover=discover, deep=deep))
     if correlate:
@@ -406,4 +417,5 @@ def run_watch(store: EvidenceStore, urls: Optional[List[str]] = None,
         report["risk_alerts"] = results["risk_alerts"]
         report["data_source_status"] = results["data_source_status"]
         report["narrative"] = watch_narrative(store, case_id or "case", report["deltas"])
+    store.record_watch_run(report)
     return report

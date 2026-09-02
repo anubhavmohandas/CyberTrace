@@ -50,6 +50,40 @@ def test_watch_narrative_grounded_answer_when_deltas_present(store, monkeypatch)
     assert "claims" in result and "evidence" in result
 
 
+# --- case-state enforcement + watch-history persistence (Loop 42) -----------
+#
+# A fresh, empty ":memory:" store on purpose here: it has no onion or wallet
+# targets, so run_watch's re-check loops are both empty and no live Tor/chain
+# fetch is attempted -- these pin the guard and the persistence write, not
+# the live re-check path (still exercised elsewhere in this file via a fake
+# chain module).
+
+def test_run_watch_refused_once_case_is_closed():
+    with EvidenceStore(":memory:") as s:
+        s.update_case(status="CLOSED")
+        with pytest.raises(ValueError, match="case is CLOSED"):
+            run_watch(s, correlate=False)
+
+
+def test_run_watch_persists_a_watch_run():
+    with EvidenceStore(":memory:") as s:
+        report = run_watch(s)
+        history = s.watch_history()
+        assert len(history) == 1
+        assert history[0]["checked_at"] == report["checked_at"]
+        assert history[0]["status"] == "OK"
+
+
+def test_reopening_a_case_shows_prior_watch_history():
+    """The exact LEA workflow gap named in Loop 42: a second analyst
+    reopening the same --db must see what an earlier watch cycle found, not
+    only what the run that found it printed."""
+    with EvidenceStore(":memory:") as s:
+        run_watch(s, correlate=False)
+        run_watch(s, correlate=False)
+        assert len(s.watch_history()) == 2
+
+
 def _wallet_search_result(address: str, **summary_fields) -> ModuleResult:
     """Shaped exactly like a BitcoinModule.search() return: a ModuleResult, so
     it can stand in for what module.search() itself returns (_visit_wallet

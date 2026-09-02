@@ -407,6 +407,17 @@ window.__resources = {
                       </div>
                     </sc-if>
 
+                    <sc-if value="{{ w.hasAlsoAttributed }}" hint-placeholder-val="{{ false }}">
+                      <div style="border-top:1px solid #171c1f;padding-top:14px">
+                        <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#d97a6c;margin-bottom:8px">⚠ ALSO ATTRIBUTED (conflicting evidence on this SAME address, not merged)</div>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap">
+                          <sc-for list="{{ w.alsoAttributed }}" as="v" hint-placeholder-count="1">
+                            <span style="font-size:11.5px;color:#d97a6c;border:1px solid #4a2420;padding:4px 9px">{{ v }}</span>
+                          </sc-for>
+                        </div>
+                      </div>
+                    </sc-if>
+
                     <sc-if value="{{ w.hasServiceTags }}" hint-placeholder-val="{{ false }}">
                       <div style="border-top:1px solid #171c1f;padding-top:14px">
                         <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#c2b280;margin-bottom:8px">SERVICE TAGS (non-VASP: mixer/DeFi/CoinJoin)</div>
@@ -461,6 +472,50 @@ window.__resources = {
                         <span style="font-size:11.5px;color:#c5ccd0;border:1px solid #262d31;padding:5px 9px">{{ m.chain }} · {{ m.value }}</span>
                       </sc-for>
                     </div>
+                  </div>
+                </sc-for>
+                <div style="border:1px solid #1c2427;border-top:none"></div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ hasTxCrossChainLinks }}" hint-placeholder-val="{{ false }}">
+              <div>
+                <div style="display:flex;align-items:baseline;gap:12px;padding-bottom:12px;border-bottom:1px solid #171c1f">
+                  <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#67716f">TRANSACTION-LEVEL CROSS-CHAIN LINKS</div>
+                  <div style="font-size:12px;color:#5a6367">real bridge/swap records from a live source — never proof of shared control</div>
+                </div>
+                <sc-for list="{{ txCrossChainLinks }}" as="tx" hint-placeholder-count="1">
+                  <div style="border:1px solid #1c2427;border-top:none;background:#0d1012;padding:16px 22px;display:flex;flex-direction:column;gap:8px">
+                    <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+                      <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1px;color:#c2b280">{{ tx.mechanism }}</div>
+                      <div style="font:400 12.5px/1 'IBM Plex Mono',monospace;color:#edf2f4">{{ tx.sourceLine }}</div>
+                      <span style="color:#495255">→</span>
+                      <div style="font:400 12.5px/1 'IBM Plex Mono',monospace;color:#edf2f4">{{ tx.destLine }}</div>
+                    </div>
+                    <div style="font-size:11.5px;color:#67716f">via {{ tx.sourceApi }}
+                      <sc-if value="{{ tx.hasStatus }}" hint-placeholder-val="{{ false }}"> · {{ tx.status }}</sc-if>
+                    </div>
+                  </div>
+                </sc-for>
+                <div style="border:1px solid #1c2427;border-top:none"></div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ hasWatchHistory }}" hint-placeholder-val="{{ false }}">
+              <div>
+                <div style="display:flex;align-items:baseline;gap:12px;padding-bottom:12px;border-bottom:1px solid #171c1f">
+                  <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#67716f">WATCH HISTORY</div>
+                  <div style="font-size:12px;color:#5a6367">every persisted re-check of this case, newest first</div>
+                </div>
+                <sc-for list="{{ watchHistory }}" as="run" hint-placeholder-count="1">
+                  <div style="border:1px solid #1c2427;border-top:none;background:#0d1012;padding:14px 22px;display:flex;flex-direction:column;gap:6px">
+                    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:baseline">
+                      <div style="font:500 12px/1 'IBM Plex Mono',monospace;color:#edf2f4">{{ run.checkedAt }}</div>
+                      <div style="font-size:11.5px;color:#67716f">{{ run.walletDeltaCount }} wallet delta(s) · {{ run.candidateDeltaCount }} candidate delta(s) · {{ run.riskAlertCount }} risk alert(s)</div>
+                    </div>
+                    <sc-if value="{{ run.hasNarrative }}" hint-placeholder-val="{{ false }}">
+                      <div style="font-size:12px;color:#c5ccd0">{{ run.narrative }}</div>
+                    </sc-if>
                   </div>
                 </sc-for>
                 <div style="border:1px solid #1c2427;border-top:none"></div>
@@ -1027,6 +1082,12 @@ function walletRow(w, valueById, openVerdict) {
     exchange: w.exchange || '',
     walletRole: w.wallet_role || '',
     hasWalletRole: !!w.wallet_role,
+    // Loop 42: a genuine same-address, same-or-higher-tier SECOND
+    // attribution (two OFAC profiles or two analyst citations on this ONE
+    // address) -- surfaced, never silently merged into the single
+    // `exchange` line above.
+    alsoAttributed: [...new Set((w.also_attributed || []).map(c => c.exchange))],
+    hasAlsoAttributed: !!(w.also_attributed && w.also_attributed.length),
     attributionLine: w.attribution ? w.attribution.replace(/_/g, ' ') +
       ' — reachability confidence ' + (w.confidence != null ? w.confidence.toFixed(2) : '—') : '',
     attributionSource: w.attribution_source || '',
@@ -1088,6 +1149,34 @@ function walletTabVals(cd, openVerdict) {
       value: short(m.value, 26), chain: (m.chain || '').replace('_ADDRESS', ''),
     })),
   }));
+  // Loop 42: real, live-fetched bridge/swap records (Wormholescan, THORChain
+  // Midgard) -- distinct from crossChainLinks above, which reads the local
+  // OFAC/VASP-disclosure/GraphSense corpora for a SHARED designation. Never
+  // read as proof the source/destination addresses share a controller.
+  const txCrossChainLinks = (cd.transaction_cross_chain_links || []).map(tx => ({
+    mechanism: tx.mechanism,
+    sourceLine: short(tx.source_address, 26) + ' (' + (tx.source_chain || '').replace('_ADDRESS', '') + ')',
+    hasDest: !!tx.dest_address,
+    destLine: tx.dest_address
+      ? short(tx.dest_address, 26) + ' (' + (tx.dest_chain || '').replace('_ADDRESS', '') + ')'
+      : 'destination not supplied',
+    sourceApi: tx.source_api,
+    status: tx.status || '',
+    hasStatus: !!tx.status,
+    evidenceRef: tx.evidence_ref,
+  }));
+  // Loop 42: persisted `watch` cycles -- what a re-check found, so reopening
+  // this case shows a second analyst what earlier runs discovered, not only
+  // what the run that found it printed to a terminal. Newest first, same
+  // order EvidenceStore.watch_history() already returns.
+  const watchHistory = (cd.watch_history || []).map(run => ({
+    checkedAt: run.checked_at,
+    walletDeltaCount: (run.wallet_deltas || []).length,
+    candidateDeltaCount: (run.candidate_deltas || []).length,
+    riskAlertCount: (run.risk_alerts || []).length,
+    narrative: run.narrative || '',
+    hasNarrative: !!run.narrative,
+  }));
 
   return {
     wallets,
@@ -1100,6 +1189,10 @@ function walletTabVals(cd, openVerdict) {
     hasStaleDataSource: dataSources.some(d => !d.isFresh),
     crossChainLinks,
     hasCrossChainLinks: crossChainLinks.length > 0,
+    txCrossChainLinks,
+    hasTxCrossChainLinks: txCrossChainLinks.length > 0,
+    watchHistory,
+    hasWatchHistory: watchHistory.length > 0,
   };
 }
 

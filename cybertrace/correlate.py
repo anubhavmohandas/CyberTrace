@@ -890,7 +890,15 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
                                   # cross_chain_links' grouping key -- the tag
                                   # label itself, same string vasp_shared_by
                                   # already groups VASP_DISCLOSED rows by.
-                                  "group_key": hit["label"]}
+                                  "group_key": hit["label"],
+                                  # No real same-tier brand conflict found in
+                                  # the shipped TagPacks corpus (Loop 42
+                                  # audit: every multi-label address there is
+                                  # one brand under two differently-worded
+                                  # pack labels, never two distinct brands) --
+                                  # kept for shape parity with the other three
+                                  # tiers, always empty here.
+                                  "also_attributed": []}
 
         disclosed = vasp_disclosed_labels(dict(by_currency))
         for entity_id, (value, _etype) in raw.items():
@@ -909,7 +917,11 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
                                   "attribution_source":
                                       f"{hit['brand']} self-disclosure ({hit['role']}): "
                                       f"{hit['source']}",
-                                  "group_key": hit["brand"]}
+                                  "group_key": hit["brand"],
+                                  # No overlap between the two verified
+                                  # VASP_DISCLOSED sources (Loop 42 audit) --
+                                  # kept for shape parity, always empty here.
+                                  "also_attributed": []}
 
         from .integrations.ofac import ofac_labels
         designated = ofac_labels(dict(by_currency))
@@ -926,7 +938,20 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
                                   # designated parties could in principle
                                   # share a common name; they cannot share an
                                   # SDN profile id).
-                                  "group_key": f"OFAC:{hit['profile_id']}"}
+                                  "group_key": f"OFAC:{hit['profile_id']}",
+                                  # A real, shared-infrastructure designation
+                                  # (Loop 42 audit: SamSam ransomware,
+                                  # profiles 38419/38420, one shared BTC
+                                  # address) -- surfaced explicitly rather
+                                  # than silently dropped by ofac_labels'
+                                  # own first-record-wins pick above.
+                                  "also_attributed":
+                                      [{"exchange": d["entity_name"],
+                                        "attribution": REGULATORY_ATTESTED,
+                                        "attribution_source":
+                                            f"OFAC SDN: profile {d['profile_id']}",
+                                        "evidence_ids": []}
+                                       for d in hit.get("also_designated", [])]}
 
     for r in store._all(
             "SELECT r.source_entity_id AS addr, e.normalized_value AS exchange, "
@@ -934,14 +959,29 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
             "JOIN entities e ON e.entity_id = r.target_entity_id "
             "LEFT JOIN evidence ev ON ev.relationship_id = r.rel_id "
             "WHERE r.rtype='EXCHANGE_DEPOSIT' AND r.status='ACTIVE'"):
-        out[r["addr"]] = {"exchange": r["exchange"], "wallet_role": None,
-                          "evidence_ids": json.loads(r["observation_ids"] or "[]"),
-                          "attribution": ANALYST_ASSERTED,
-                          "attribution_source": r["source_label"] or "analyst",
-                          # The exchange name IS the analyst's own citation
-                          # here -- reusing it across chains is the analyst
-                          # deliberately asserting the same entity.
-                          "group_key": r["exchange"]}
+        entry = {"exchange": r["exchange"], "wallet_role": None,
+                "evidence_ids": json.loads(r["observation_ids"] or "[]"),
+                "attribution": ANALYST_ASSERTED,
+                "attribution_source": r["source_label"] or "analyst",
+                # The exchange name IS the analyst's own citation
+                # here -- reusing it across chains is the analyst
+                # deliberately asserting the same entity.
+                "group_key": r["exchange"], "also_attributed": []}
+        prev = out.get(r["addr"])
+        if (prev and prev["attribution"] == ANALYST_ASSERTED
+                and prev["exchange"] != r["exchange"]):
+            # A second analyst citation for the SAME address naming a
+            # DIFFERENT VASP -- a real, legitimate shared/omnibus-wallet
+            # case this loop's audit demonstrated live (label_exchange lets
+            # two independent citations coexist as two ACTIVE relationships
+            # already), not a bug to silently overwrite. Preserved rather
+            # than dropped; which citation prints as the primary `exchange`
+            # is still write order, unchanged from before this fix.
+            entry["also_attributed"] = prev["also_attributed"] + [{
+                "exchange": prev["exchange"], "attribution": prev["attribution"],
+                "attribution_source": prev["attribution_source"],
+                "evidence_ids": prev["evidence_ids"]}]
+        out[r["addr"]] = entry
     return out
 
 
@@ -1410,7 +1450,14 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
                         # depositor to it -- never a deposit candidate.
                         "deposit_candidate": False,
                         "direct_vasp_contacts": secondary,
-                        "secondary_vasp_contacts": secondary_multi})
+                        "secondary_vasp_contacts": secondary_multi,
+                        # A genuine same-address, same-or-higher-tier second
+                        # attribution (Loop 42) -- e.g. two OFAC profiles or
+                        # two analyst citations naming the SAME address.
+                        # Distinct from direct_vasp_contacts/secondary_vasp_
+                        # contacts above, which are OTHER addresses this one
+                        # reaches; this is another claim on THIS address.
+                        "also_attributed": end.get("also_attributed", [])})
             continue
 
         visited = {start}
@@ -1762,6 +1809,14 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4,
         # for the same address no longer disagree on what fields exist.
         "direct_vasp_contacts": hit.get("direct_vasp_contacts", []) if hit else [],
         "secondary_vasp_contacts": hit.get("secondary_vasp_contacts", []) if hit else [],
+        "also_attributed": hit.get("also_attributed", []) if hit else [],
+        # Real, live-fetched bridge/swap records (Loop 42) -- see
+        # modules/cross_chain_module.py and `cybertrace trace-cross-chain`,
+        # the only writer. Distinct from cross_chain_links above: that reads
+        # the local OFAC/VASP-disclosure/GraphSense corpora for a SHARED
+        # designation; this is a live third party's own transaction record,
+        # never treated as proof of shared control.
+        "transaction_cross_chain_links": store.cross_chain_tx_links_for(wallet_address),
         "verdict": _wallet_verdict(store, start_id),
         "flags": flags,
         "evidence_ids": hit["evidence_ids"] if hit else [],
@@ -2872,6 +2927,10 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
             if w.get("secondary_vasp_contacts"):
                 names = ", ".join(sorted({c["exchange"] for c in w["secondary_vasp_contacts"]}))
                 lines.append(f"  - reaches further out: {names}")
+            if w.get("also_attributed"):
+                names = ", ".join(sorted({c["exchange"] for c in w["also_attributed"]}))
+                lines.append(f"  - ⚠ ALSO attributed to (conflicting same/higher-tier "
+                             f"evidence on this SAME address, not merged): {names}")
             if w.get("verdict"):
                 v = w["verdict"]
                 note = f" — {v['note']}" if v["note"] else ""
@@ -2932,6 +2991,41 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
         for link in results["cross_chain_links"]:
             addrs = ", ".join(f"`{m['value']}` ({m['chain']})" for m in link["members"])
             lines.append(f"- **{link['entity_name']}** ({link['attribution']}): {addrs}")
+        lines.append("")
+
+    if results.get("transaction_cross_chain_links"):
+        lines += ["## Transaction-level cross-chain links", "",
+                  "_Real bridge/swap records from a live third-party source "
+                  "(Wormholescan, THORChain Midgard) -- distinct from Cross-chain "
+                  "links above, which reads the local OFAC/VASP-disclosure/GraphSense "
+                  "corpora for a SHARED designation. A record here is evidence that "
+                  "value moved from one chain to another in ONE transaction; it is "
+                  "never treated as proof the source and destination addresses share "
+                  "a controller. No confidence number: neither source publishes one._",
+                  ""]
+        for link in results["transaction_cross_chain_links"]:
+            dest = (f"`{link['dest_address']}` ({link['dest_chain']})"
+                   if link.get("dest_address") else "destination not supplied")
+            when = f" at {link['tx_timestamp']}" if link.get("tx_timestamp") else ""
+            lines.append(f"- [{link['mechanism']}] `{link['source_address']}` "
+                         f"({link['source_chain']}) → {dest}{when} · "
+                         f"{link['source_api']}"
+                         + (f" ({link['status']})" if link.get("status") else "")
+                         + f" · {link['evidence_ref']}")
+        lines.append("")
+
+    if results.get("watch_history"):
+        lines += ["## Watch history", "",
+                  "_Every persisted `watch` cycle for this case, newest first -- what "
+                  "changed reachability, risk, or candidates each time this case was "
+                  "re-checked, not only what the most recent run printed._", ""]
+        for run in results["watch_history"]:
+            lines.append(f"- `{run['checked_at']}` — "
+                         f"{len(run['wallet_deltas'])} wallet delta(s), "
+                         f"{len(run['candidate_deltas'])} candidate delta(s), "
+                         f"{len(run['risk_alerts'])} risk alert(s)")
+            if run.get("narrative"):
+                lines.append(f"  - {run['narrative']}")
         lines.append("")
 
     for d in dossiers:
@@ -3245,11 +3339,16 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
                            + (f" — {_esc(v['note'])}" if v["note"] else "")
                            + f"<br><span class=dim>{_esc(v['analyst'] or 'unknown')}, "
                            f"{_esc(v['recorded_at'])}</span>") if v else "—"
+            also = w.get("also_attributed") or []
+            exchange_cell = _esc(w['exchange']) + (
+                "<br><span class=bad>⚠ also: " +
+                _esc(', '.join(sorted({c['exchange'] for c in also}))) +
+                " (conflicting evidence, not merged)</span>" if also else "")
             out.append(f"<tr><td class=mono>{_esc(w['value'])}</td>"
                        f"<td>{_esc(w['chain'])}</td>"
                        f"<td>{_esc(w['proximity'])}</td><td>{w['hops']}</td>"
                        f"<td>{_esc(w['direction'])}</td>"
-                       f"<td>{_esc(w['exchange'])}</td>"
+                       f"<td class=wrap>{exchange_cell}</td>"
                        f"<td>{_esc(w['wallet_role']) if w.get('wallet_role') else '—'}</td>"
                        f"<td class=wrap>{_esc(w['attribution'])} · "
                        f"{_esc(w['attribution_source'])}</td>"
@@ -3316,6 +3415,46 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
             out.append(f"<tr><td class=mono>{_esc(link['entity_name'])}</td>"
                        f"<td>{_esc(link['attribution'])}</td>"
                        f"<td class=wrap>{addrs}</td></tr>")
+        out.append("</table>")
+
+    if results.get("transaction_cross_chain_links"):
+        out.append("<h2>Transaction-level cross-chain links</h2>"
+                   "<p class=dim>Real bridge/swap records from a live third-party source "
+                   "(Wormholescan, THORChain Midgard) -- distinct from Cross-chain links "
+                   "above, which reads the local OFAC/VASP-disclosure/GraphSense corpora "
+                   "for a SHARED designation. A record here is evidence that value moved "
+                   "from one chain to another in ONE transaction; it is never treated as "
+                   "proof the source and destination addresses share a controller. No "
+                   "confidence number: neither source publishes one.</p>"
+                   "<table><tr><th>mechanism</th><th>source</th><th>destination</th>"
+                   "<th>when</th><th>source api</th><th>reference</th></tr>")
+        for link in results["transaction_cross_chain_links"]:
+            dest = (f"{_esc(link['dest_address'])} <span class=dim>({_esc(link['dest_chain'])})</span>"
+                   if link.get("dest_address") else "<span class=dim>not supplied</span>")
+            status = f" ({_esc(link['status'])})" if link.get("status") else ""
+            out.append(f"<tr><td>{_esc(link['mechanism'])}</td>"
+                       f"<td class=mono>{_esc(link['source_address'])} "
+                       f"<span class=dim>({_esc(link['source_chain'])})</span></td>"
+                       f"<td class=mono>{dest}</td>"
+                       f"<td>{_esc(link.get('tx_timestamp')) or '—'}</td>"
+                       f"<td>{_esc(link['source_api'])}{status}</td>"
+                       f"<td class=mono wrap>{_esc(link['evidence_ref'])}</td></tr>")
+        out.append("</table>")
+
+    if results.get("watch_history"):
+        out.append("<h2>Watch history</h2>"
+                   "<p class=dim>Every persisted `watch` cycle for this case, newest "
+                   "first -- what changed reachability, risk, or candidates each time "
+                   "this case was re-checked, not only what the most recent run "
+                   "printed.</p>"
+                   "<table><tr><th>checked</th><th>wallet deltas</th>"
+                   "<th>candidate deltas</th><th>risk alerts</th><th>narrative</th></tr>")
+        for run in results["watch_history"]:
+            out.append(f"<tr><td class=mono>{_esc(run.get('checked_at'))}</td>"
+                       f"<td>{len(run.get('wallet_deltas') or [])}</td>"
+                       f"<td>{len(run.get('candidate_deltas') or [])}</td>"
+                       f"<td>{len(run.get('risk_alerts') or [])}</td>"
+                       f"<td class=wrap>{_esc(run.get('narrative')) if run.get('narrative') else '—'}</td></tr>")
         out.append("</table>")
 
     out.append("<h2>Candidates</h2>")
@@ -3432,6 +3571,14 @@ def run_correlation(store: EvidenceStore, min_conf: float = 0.35,
     _attach_wallet_verdict(store, results["wallet_exchange_paths"])
     results["risk_alerts"] = _risk_alerts(results["wallet_exchange_paths"])
     results["data_source_status"] = data_source_status()
+    # Persisted `watch` cycles (Loop 42), newest first -- the single canonical
+    # read every other surface (Investigator, GUI, Markdown/HTML) slices from,
+    # same discipline as build_dossier's own verdict field.
+    results["watch_history"] = store.watch_history()
+    # Real, live-fetched bridge/swap records (Loop 42) -- see
+    # modules/cross_chain_module.py. Case-wide sibling of the per-wallet
+    # field wallet_trace_report already carries.
+    results["transaction_cross_chain_links"] = store.all_cross_chain_tx_links()
     dossiers = [build_dossier(store, c, aliases, flags, windows)
                 for c in results["operators"] + results["infra"] + results["ips"]]
     for rank, d in enumerate(dossiers, 1):

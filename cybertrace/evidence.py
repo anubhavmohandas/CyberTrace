@@ -182,6 +182,50 @@ CREATE TABLE IF NOT EXISTS case_notes (
   recorded_at TEXT NOT NULL
 );
 
+-- One row per `watch` execution, same append-only discipline as
+-- wallet_feedback/case_notes: a watch cycle's own findings are a fact about
+-- when it ran, never overwritten, so reopening this case later shows every
+-- prior cycle's conclusions, not only the most recent one. List/dict fields
+-- are stored the same way snapshots.payload already is -- _canon_json out,
+-- json.loads back on read (see EvidenceStore.watch_runs).
+CREATE TABLE IF NOT EXISTS watch_runs (
+  run_id           TEXT PRIMARY KEY,
+  checked_at       TEXT NOT NULL,
+  checked          TEXT,   -- JSON: onion targets re-checked (report['checked'])
+  wallets_checked  TEXT,   -- JSON: report['wallets_checked']
+  wallet_deltas    TEXT,   -- JSON: report['wallet_deltas']
+  candidate_deltas TEXT,   -- JSON: report['deltas']
+  risk_alerts      TEXT,   -- JSON: report['risk_alerts']
+  discovered       TEXT,   -- JSON: report['discovered']
+  narrative        TEXT,   -- report['narrative']['answer'], NULL on a quiet cycle
+  status           TEXT NOT NULL DEFAULT 'OK'
+);
+
+-- Real, transaction-level cross-chain evidence (Loop 42): one bridge/swap
+-- record from a live third-party source (Wormholescan, THORChain Midgard --
+-- see modules/cross_chain_module.py). Deliberately its own table, separate
+-- from the entities/relationships graph correlate.cross_chain_links reads:
+-- this is evidence that VALUE moved across chains in ONE transaction, never
+-- proof the two addresses share a controller unless the source itself
+-- asserts that (neither does). Deduplicated on link_id (deterministic,
+-- seeded on evidence_ref) so re-running the live lookup over the same real
+-- transaction never grows duplicate rows.
+CREATE TABLE IF NOT EXISTS cross_chain_tx_links (
+  link_id        TEXT PRIMARY KEY,
+  source_chain   TEXT NOT NULL,
+  source_address TEXT NOT NULL,
+  source_tx      TEXT,
+  dest_chain     TEXT,
+  dest_address   TEXT,
+  dest_tx        TEXT,
+  mechanism      TEXT NOT NULL,     -- BRIDGE | SWAP
+  evidence_ref   TEXT NOT NULL,     -- the source's own operation/tx reference id
+  tx_timestamp   TEXT,              -- source-supplied, may be NULL
+  source_api     TEXT NOT NULL,     -- 'wormholescan' | 'thorchain_midgard'
+  status         TEXT,              -- the source's own status string, surfaced as-is
+  recorded_at    TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_snap_target ON snapshots(target_id);
 CREATE INDEX IF NOT EXISTS idx_ent_type    ON entities(etype);
 CREATE INDEX IF NOT EXISTS idx_obs_snap    ON observations(snapshot_id);
@@ -191,6 +235,9 @@ CREATE INDEX IF NOT EXISTS idx_rel_target  ON relationships(target_entity_id);
 CREATE INDEX IF NOT EXISTS idx_rel_type    ON relationships(rtype);
 CREATE INDEX IF NOT EXISTS idx_feedback_candidate ON analyst_feedback(candidate_id);
 CREATE INDEX IF NOT EXISTS idx_wallet_feedback_entity ON wallet_feedback(entity_id);
+CREATE INDEX IF NOT EXISTS idx_watch_runs_checked_at ON watch_runs(checked_at);
+CREATE INDEX IF NOT EXISTS idx_cross_chain_tx_source ON cross_chain_tx_links(source_address);
+CREATE INDEX IF NOT EXISTS idx_cross_chain_tx_dest ON cross_chain_tx_links(dest_address);
 """
 
 ENTITY_TYPES = {
@@ -867,6 +914,7 @@ class EvidenceStore:
         exist is a typo, not a new fact, and failing loudly here is cheaper
         than a silent foreign-key-shaped no-op would be.
         """
+        self._require_open()
         if outcome not in FEEDBACK_OUTCOMES:
             raise ValueError(f"unknown feedback outcome: {outcome}")
         if not self._one("SELECT 1 FROM candidates WHERE candidate_id=?", (candidate_id,)):
@@ -911,6 +959,7 @@ class EvidenceStore:
         outcome, an entity_id that was never written by upsert_entity, or an
         entity that is not one of WALLET_ETYPES -- verdict on a wallet that
         does not exist, or was never a wallet, is a typo, not a new fact."""
+        self._require_open()
         if outcome not in FEEDBACK_OUTCOMES:
             raise ValueError(f"unknown feedback outcome: {outcome}")
         row = self._one("SELECT etype FROM entities WHERE entity_id=?", (entity_id,))
@@ -936,6 +985,19 @@ class EvidenceStore:
         row = self._one("SELECT * FROM case_info LIMIT 1")
         return dict(row) if row else {}
 
+    def _require_open(self) -> None:
+        """New investigative evidence may only be recorded into an OPEN
+        case. Reads, correlate's own re-derivation from evidence already on
+        disk, exports, and the status transition itself (update_case) are
+        never gated here -- only the write paths that add a genuinely NEW
+        fact (ingest, label_exchange, record_feedback,
+        record_wallet_feedback) call this first. A closed/archived case
+        stays fully readable; it just stops accruing new evidence once the
+        record is sealed."""
+        status = self.case_info().get("status")
+        if status not in (None, "OPEN"):
+            raise ValueError(f"case is {status}: cannot record new evidence")
+
     def update_case(self, name: Optional[str] = None, status: Optional[str] = None) -> None:
         if status and status not in CASE_STATUSES:
             raise ValueError(f"unknown case status: {status}")
@@ -960,6 +1022,84 @@ class EvidenceStore:
 
     def case_notes(self) -> List[sqlite3.Row]:
         return self._all("SELECT * FROM case_notes ORDER BY recorded_at")
+
+    # --- watch history -----------------------------------------------------
+
+    def record_watch_run(self, report: dict, status: str = "OK") -> str:
+        """Persist one `watch` cycle's own findings -- see monitor.run_watch,
+        the only caller. Not gated by _require_open: run_watch already
+        refuses to start against a closed/archived case, so reaching here at
+        all means the case was OPEN when this cycle ran."""
+        rid = self._id("watch")
+        narrative = report.get("narrative") or {}
+        self.conn.execute(
+            "INSERT INTO watch_runs (run_id, checked_at, checked, wallets_checked, "
+            "wallet_deltas, candidate_deltas, risk_alerts, discovered, narrative, status) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (rid, report.get("checked_at") or utcnow(),
+             _canon_json(report.get("checked", [])),
+             _canon_json(report.get("wallets_checked", [])),
+             _canon_json(report.get("wallet_deltas", [])),
+             _canon_json(report.get("deltas", [])),
+             _canon_json(report.get("risk_alerts", [])),
+             _canon_json(report.get("discovered", [])),
+             narrative.get("answer"), status))
+        self.conn.commit()
+        return rid
+
+    def watch_history(self, limit: Optional[int] = None) -> List[dict]:
+        """Every persisted watch cycle for this case, newest first, so a
+        second analyst reopening the same --db sees what earlier runs found."""
+        sql = "SELECT * FROM watch_runs ORDER BY checked_at DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+        rows = self._all(sql, (limit,) if limit is not None else ())
+        out = []
+        for r in rows:
+            d = dict(r)
+            for f in ("checked", "wallets_checked", "wallet_deltas",
+                     "candidate_deltas", "risk_alerts", "discovered"):
+                d[f] = json.loads(d[f]) if d[f] else []
+            out.append(d)
+        return out
+
+    # --- transaction-level cross-chain links (Loop 42) ----------------------
+
+    def record_cross_chain_tx_link(self, link: dict) -> str:
+        """Persist one real bridge/swap record -- see
+        modules/cross_chain_module.py for the two live sources this reads.
+        Refused on a closed/archived case like every other new-evidence
+        write. Deduplicated on evidence_ref (the source's own reference)
+        rather than a random id, so re-running the live lookup over the
+        same real transaction never grows duplicate rows."""
+        self._require_open()
+        # Seeded on (source_api, evidence_ref), not evidence_ref alone: the
+        # two sources mint references in unrelated id spaces, so scoping by
+        # source rules out even a coincidental cross-source string collision.
+        lid = self._id("xlink", f"{link['source_api']}:{link['evidence_ref']}")
+        self.conn.execute(
+            "INSERT OR IGNORE INTO cross_chain_tx_links (link_id, source_chain, "
+            "source_address, source_tx, dest_chain, dest_address, dest_tx, mechanism, "
+            "evidence_ref, tx_timestamp, source_api, status, recorded_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (lid, link["source_chain"], link["source_address"], link.get("source_tx"),
+             link.get("dest_chain"), link.get("dest_address"), link.get("dest_tx"),
+             link["mechanism"], link["evidence_ref"], link.get("tx_timestamp"),
+             link["source_api"], link.get("status"), utcnow()))
+        self.conn.commit()
+        return lid
+
+    def cross_chain_tx_links_for(self, address: str) -> List[dict]:
+        """Every persisted link naming `address` as either side -- a wallet
+        this case traces may be the source of a bridge/swap out, or the
+        destination of one in."""
+        return [dict(r) for r in self._all(
+            "SELECT * FROM cross_chain_tx_links WHERE source_address=? OR dest_address=? "
+            "ORDER BY recorded_at", (address, address))]
+
+    def all_cross_chain_tx_links(self) -> List[dict]:
+        return [dict(r) for r in self._all(
+            "SELECT * FROM cross_chain_tx_links ORDER BY recorded_at")]
 
     def findings(self, ftype: Optional[str] = None) -> List[sqlite3.Row]:
         if ftype:
@@ -1033,6 +1173,7 @@ def ingest(result: Any, store: EvidenceStore) -> List[str]:
     target_url = data.get("target") or ""
     if not target_url:
         return []
+    store._require_open()
 
     # Which ModuleResult invocation this came from. Absent on captures saved
     # before this field existed (runs/raw/v5..v9) — NULL there, same as any
@@ -1681,6 +1822,7 @@ def label_exchange(store: EvidenceStore, address: str, exchange_name: str,
     Returns the relationship id, or None if `address` fails normalization for
     its chain (the same "no artifact" contract as upsert_entity).
     """
+    store._require_open()
     if chain is not None:
         etype = _LABEL_EXCHANGE_ETYPES.get(chain, "BTC_ADDRESS")
     else:

@@ -144,7 +144,15 @@ def build_context(store: EvidenceStore, candidate_id: Optional[str] = None) -> d
         # see correlate.cross_chain_links' own docstring for exactly which
         # evidence this reads and why it invents no confidence number.
         "cross_chain_links": results.get("cross_chain_links", []),
+        # Real, live-fetched bridge/swap records (Loop 42) -- see
+        # correlate.run_correlation's own read (canonical, no second query).
+        "transaction_cross_chain_links": results.get("transaction_cross_chain_links", []),
         "data_source_status": results.get("data_source_status", {}),
+        # Persisted `watch` cycles (Loop 42) -- run_correlation's own read
+        # (canonical, no second query), capped here so a long-running case
+        # doesn't inflate every answer's context with its entire monitoring
+        # history. _changed cites the latest row.
+        "watch_history": (results.get("watch_history") or [])[:10],
         "memory": memory_ctx,
         "known_ids": {
             "evidence_ids": set(evidence_by_id),
@@ -237,6 +245,21 @@ def _changed(ctx: dict) -> dict:
                         f"as of {prior['last_scored']}{note}",
                 "kind": "MEMORY", "evidence_ids": [], "candidate_ids": [], "finding_ids": [],
             })
+    # The most recent persisted `watch` cycle (Loop 42) -- the one other
+    # source of "what changed" this case has, distinct from the per-artifact
+    # case_history above: a watch run diffs the whole case against its own
+    # last check, not one candidate against a prior correlation pass.
+    runs = ctx.get("watch_history") or []
+    if runs:
+        latest = runs[0]
+        claims.append({
+            "text": f"Last watch run at {latest['checked_at']}: "
+                    f"{len(latest['wallet_deltas'])} wallet delta(s), "
+                    f"{len(latest['candidate_deltas'])} candidate delta(s), "
+                    f"{len(latest['risk_alerts'])} risk alert(s)"
+                    + (f" — {latest['narrative']}" if latest.get('narrative') else ""),
+            "kind": "MEMORY", "evidence_ids": [], "candidate_ids": [], "finding_ids": [],
+        })
     if not claims:
         return {"answer": "No prior correlation run is on record for this case to compare against — "
                            "this is what the current pass found.",
@@ -305,7 +328,17 @@ def _wallet_exchange(ctx: dict) -> dict:
         if w.get("secondary_vasp_contacts"):
             names = ", ".join(sorted({c["exchange"] for c in w["secondary_vasp_contacts"]}))
             contacts_phrase += f" Reaches further out: {names}."
-        contact_evidence = [i for c in contacts for i in c.get("evidence_ids", [])]
+        # A genuine same-address, same-or-higher-tier SECOND attribution
+        # (Loop 42) -- e.g. two OFAC profiles or two analyst citations
+        # naming this SAME address. Distinct from direct/secondary contacts
+        # above, which are OTHER addresses; this is a conflict on THIS one,
+        # surfaced rather than silently merged into a single "winner".
+        also = w.get("also_attributed") or []
+        if also:
+            names = ", ".join(sorted({c["exchange"] for c in also}))
+            contacts_phrase += (f" ALSO attributed to (conflicting evidence on this "
+                               f"same address, not merged): {names}.")
+        contact_evidence = [i for c in contacts + also for i in c.get("evidence_ids", [])]
         claims.append({
             "text": f"`{_short(w['value'], 32)}` ({w['chain']}) — {w['proximity']} to {w['exchange']} "
                     f"({w['hops']} hop(s), flow {w['direction']}, "
@@ -337,6 +370,21 @@ def _wallet_exchange(ctx: dict) -> dict:
         claims.append({
             "text": f"Cross-chain: {link['entity_name']} ({link['attribution']}) is named "
                     f"on more than one chain by the same evidence record: {addrs}.",
+            "kind": "INFERRED", "evidence_ids": [],
+            "candidate_ids": [], "finding_ids": [],
+        })
+    # Real, live-fetched bridge/swap records (Loop 42) -- distinct from the
+    # cross-chain claim above, which reads the local OFAC/VASP-disclosure/
+    # GraphSense corpora for a SHARED designation. A record here is a live
+    # third party's own transaction; never read as proof of shared control.
+    for tx in ctx.get("transaction_cross_chain_links") or []:
+        dest = (f"{_short(tx['dest_address'], 24)} ({tx['dest_chain']})"
+               if tx.get("dest_address") else "an unsupplied destination")
+        claims.append({
+            "text": f"Transaction cross-chain: a {tx['mechanism'].lower()} moved value from "
+                    f"{_short(tx['source_address'], 24)} ({tx['source_chain']}) to {dest}, "
+                    f"per {tx['source_api']}"
+                    + (f" ({tx['status']})" if tx.get("status") else "") + ".",
             "kind": "INFERRED", "evidence_ids": [],
             "candidate_ids": [], "finding_ids": [],
         })
@@ -446,7 +494,8 @@ _INTENTS = [
     (("why is this here", "why here", "why is it here"), _why_here),
     (("changed", "different", "update", "since"), _changed),
     (("next step", "investigate next", "recommended action"), _next_steps),
-    (("vasp", "exchange", "deposit", "wallet", "risk", "alert", "chain", "bridge"), _wallet_exchange),
+    (("vasp", "exchange", "deposit", "wallet", "risk", "alert", "chain", "bridge", "swap"),
+     _wallet_exchange),
 ]
 
 

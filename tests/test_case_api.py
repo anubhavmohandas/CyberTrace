@@ -151,6 +151,31 @@ def test_verdict_rejects_unknown_candidate(tmp_path):
         assert "error" in resp
 
 
+def test_verdict_refused_once_case_is_closed(tmp_path):
+    """Case-state enforcement (Loop 42) reaches the GUI's own verdict route
+    through the identical guard the CLI uses -- no case_api-specific check,
+    since record_feedback already refuses before this endpoint's try/except
+    ValueError -> 400 even sees the write attempted. A closed case must stay
+    readable through the same GET route."""
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    db_path = cases_dir / "tortaxi.db"
+    _make_case_db(db_path)
+    with EvidenceStore(str(db_path)) as store:
+        store.update_case(status="CLOSED")
+
+    with _running_server(cases_dir) as base:
+        status, case = _get(f"{base}/api/case/tortaxi")
+        assert status == 200
+        assert case["status"] == "CLOSED"
+        candidate_id = case["candidates"][0]["candidate_id"]
+
+        status, resp = _post(f"{base}/api/case/tortaxi/verdict",
+                             {"candidate_id": candidate_id, "outcome": "CONFIRMED"})
+        assert status == 400
+        assert "CLOSED" in resp["error"]
+
+
 def test_verdict_no_such_case_404(tmp_path):
     cases_dir = tmp_path / "cases"
     cases_dir.mkdir()

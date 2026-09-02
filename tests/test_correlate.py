@@ -13,6 +13,7 @@ import pytest
 
 from cybertrace.correlate import (
     FUNNELS, SHARED_ARTIFACTS,
+    ANALYST_ASSERTED,
     COMMON_ARTIFACT_FLOOR, DIRECT, EXCHANGE_HOP_DECAY, INDIRECT, LEAD_FLOOR, REGULATORY_ATTESTED,
     RETIRED_ASSESSMENT, TAG_ATTESTED, TO_VASP, VASP_DISCLOSED,
     SUCCESSOR_SIGNALS, UNJOINED_CONTEXT,
@@ -1842,6 +1843,65 @@ def test_cross_chain_links_empty_with_no_multi_chain_evidence(tmp_path):
         assert cross_chain_links(store) == []
 
 
+# --- transaction_cross_chain_links (Loop 42) --------------------------------
+#
+# Distinct from cross_chain_links above: that reads the local OFAC/VASP-
+# disclosure/GraphSense corpora for a SHARED designation; this reads
+# cross_chain_tx_links, written only by `cybertrace trace-cross-chain`
+# (cybertrace.modules.cross_chain_module) from a live third-party bridge/swap
+# record. Correctness of the live parse itself is pinned in
+# tests/test_cross_chain_module.py -- these cover the storage/reporting wiring.
+
+def test_wallet_trace_report_and_run_correlation_surface_tx_cross_chain_links(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        _traced(store, UNDESIGNATED_SUSPECT, {})
+        store.record_cross_chain_tx_link({
+            "source_chain": "BTC_ADDRESS", "source_address": UNDESIGNATED_SUSPECT,
+            "source_tx": "BTCTX1", "dest_chain": "ETH_ADDRESS", "dest_address": "0xdest",
+            "dest_tx": "ETHTX1", "mechanism": "SWAP", "evidence_ref": "BTCTX1",
+            "tx_timestamp": "2026-08-01T00:00:00+00:00", "source_api": "thorchain_midgard",
+            "status": "success",
+        })
+
+        report = wallet_trace_report(store, UNDESIGNATED_SUSPECT)
+        assert len(report["transaction_cross_chain_links"]) == 1
+        assert report["transaction_cross_chain_links"][0]["dest_address"] == "0xdest"
+
+        results = run_correlation(store)
+        assert len(results["transaction_cross_chain_links"]) == 1
+        assert results["transaction_cross_chain_links"][0]["source_tx"] == "BTCTX1"
+
+
+def test_transaction_cross_chain_links_render_in_markdown_and_html(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        _traced(store, UNDESIGNATED_SUSPECT, {})
+        store.record_cross_chain_tx_link({
+            "source_chain": "BTC_ADDRESS", "source_address": UNDESIGNATED_SUSPECT,
+            "source_tx": "BTCTX1", "dest_chain": "ETH_ADDRESS", "dest_address": "0xdest",
+            "dest_tx": None, "mechanism": "BRIDGE", "evidence_ref": "opRef1",
+            "tx_timestamp": None, "source_api": "wormholescan", "status": None,
+        })
+        results = run_correlation(store)
+        md = render_markdown(results["dossiers"], results)
+        assert "Transaction-level cross-chain links" in md
+        assert "opRef1" in md
+        assert "wormholescan" in md
+
+        html_path = str(tmp_path / "dossier.html")
+        render_dossier_html(results, html_path)
+        html_out = open(html_path).read()
+        assert "Transaction-level cross-chain links" in html_out
+        assert "opRef1" in html_out
+
+
+def test_no_transaction_cross_chain_links_omits_the_section(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        results = run_correlation(store)
+        assert results["transaction_cross_chain_links"] == []
+        md = render_markdown(results["dossiers"], results)
+        assert "Transaction-level cross-chain links" not in md
+
+
 # --- VASP_DISCLOSED -----------------------------------------------------
 #
 # Real addresses from the two sources independently
@@ -3659,6 +3719,64 @@ def test_an_ofac_designated_suspect_is_at_vasp_on_itself_before_any_hop(tmp_path
         assert hit["proximity"] == "AT_VASP"
         assert hit["hops"] == 0
         assert "SUEX" in hit["exchange"]
+
+
+# --- same-tier attribution conflicts (Loop 42) -------------------------------
+
+def test_ofac_dual_designated_address_surfaces_both_not_silently_drops_one(tmp_path):
+    """Real corpus data (Loop 42 audit): the Nov-2018 SamSam ransomware
+    sanctions action designated TWO people -- Ahmad Khatibi Aghda (OFAC
+    profile 38419) and Amir Hossein Nikaeen Ravari (profile 38420) -- who
+    share one real BTC address. ofac_labels()'s own first-record-wins pick
+    used to make the second designation vanish with no trace anywhere;
+    also_attributed now keeps it visible instead of silently choosing one
+    government determination over the other."""
+    from cybertrace.integrations import ofac
+    if not (ofac.available() and ofac.index_available()):
+        pytest.skip("OFAC SDN not downloaded/indexed in this checkout")
+    dual_designated = "1H939dom7i4WDLCKyGbXUp3fs9CSTNRzgL"
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        store.upsert_entity("BTC_ADDRESS", dual_designated)
+        hit = next(w for w in wallet_exchange_paths(store) if w["value"] == dual_designated)
+        assert hit["attribution"] == REGULATORY_ATTESTED
+        assert hit["proximity"] == "AT_VASP"
+        assert len(hit["also_attributed"]) == 1
+        also = hit["also_attributed"][0]
+        assert also["attribution"] == REGULATORY_ATTESTED
+        assert also["exchange"] != hit["exchange"]
+        assert "profile" in also["attribution_source"]
+
+
+def test_two_analyst_citations_on_the_same_address_are_both_preserved(tmp_path):
+    """A real, legitimate shared/omnibus-wallet case: two independent
+    analyst citations for the SAME address naming two DIFFERENT VASPs.
+    label_exchange already lets both coexist as two ACTIVE EXCHANGE_DEPOSIT
+    relationships; _vasp_endpoints used to silently overwrite one with the
+    other -- also_attributed keeps both visible instead of picking an
+    arbitrary winner."""
+    addr = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        store.upsert_entity("BTC_ADDRESS", addr)
+        label_exchange(store, addr, "Exchange A", analyst="alice")
+        label_exchange(store, addr, "Exchange B", analyst="bob")
+        hit = next(w for w in wallet_exchange_paths(store) if w["value"] == addr)
+        assert hit["attribution"] == ANALYST_ASSERTED
+        names = {hit["exchange"]} | {c["exchange"] for c in hit["also_attributed"]}
+        assert names == {"exchange a", "exchange b"}
+        assert len(hit["also_attributed"]) == 1
+        assert hit["also_attributed"][0]["attribution"] == ANALYST_ASSERTED
+        assert hit["also_attributed"][0]["evidence_ids"]  # its own citation's evidence, not dropped
+
+
+def test_a_single_analyst_citation_carries_no_also_attributed(tmp_path):
+    """The ordinary case -- one citation, one address -- must not gain a
+    phantom conflict entry."""
+    addr = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        store.upsert_entity("BTC_ADDRESS", addr)
+        label_exchange(store, addr, "Exchange A", analyst="alice")
+        hit = next(w for w in wallet_exchange_paths(store) if w["value"] == addr)
+        assert hit["also_attributed"] == []
 
 
 def test_direction_does_not_depend_on_the_sqlite_query_planner(tmp_path):

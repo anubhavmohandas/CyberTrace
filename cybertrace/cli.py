@@ -256,7 +256,7 @@ def _correlate_store(result_files, output_format: str, db_path: str,
                 with open(path) as fh:
                     payload = json.load(fh)
                 ingest(payload, store)
-            except (json.JSONDecodeError, OSError) as e:
+            except (json.JSONDecodeError, OSError, ValueError) as e:
                 click.echo(f"[!] Skipping {path}: {e}", err=True)
                 continue
             if payload.get('target'):
@@ -342,8 +342,12 @@ def watch(db_path: str, targets, discover: bool, output_format: str,
     from .monitor import run_watch
 
     with EvidenceStore(db_path) as store:
-        report = run_watch(store, urls=list(targets) or None, discover=discover,
-                           case_id=Path(db_path).stem, deep=deep)
+        try:
+            report = run_watch(store, urls=list(targets) or None, discover=discover,
+                               case_id=Path(db_path).stem, deep=deep)
+        except ValueError as e:
+            click.echo(f"[!] {e}", err=True)
+            sys.exit(1)
 
         if output_format == 'json':
             click.echo(json.dumps(report, indent=2, default=str))
@@ -519,12 +523,79 @@ def label_exchange_cmd(address: str, exchange: str, db_path: str,
     from .evidence import EvidenceStore, label_exchange
 
     with EvidenceStore(db_path) as store:
-        rel_id = label_exchange(store, address, exchange, analyst=analyst, note=note, chain=chain)
+        try:
+            rel_id = label_exchange(store, address, exchange, analyst=analyst, note=note, chain=chain)
+        except ValueError as e:
+            click.echo(f"[!] {e}", err=True)
+            sys.exit(1)
         if rel_id is None:
             click.echo(f"[!] {address!r} is not a valid Bitcoin, Ethereum, BNB Chain, "
                       f"Polygon, TRON, or Solana address", err=True)
             sys.exit(1)
         click.echo(f"[+] Recorded {address} as {exchange} ({rel_id})", err=True)
+
+
+@cli.command('trace-cross-chain')
+@click.argument('address')
+@click.option('--db', 'db_path', required=True, type=click.Path(dir_okay=False),
+              help='Evidence store to record any found links into')
+@click.option('--output', '-o', 'output_format', default='table',
+              type=click.Choice(['table', 'json']), help='Output format')
+def trace_cross_chain_cmd(address: str, db_path: str, output_format: str):
+    """
+    Query live Wormholescan (bridge transfers) and THORChain Midgard
+    (cross-chain swaps) for ADDRESS, and record any real transaction-level
+    cross-chain links found.
+
+    Distinct from `correlate`'s own cross-chain links: those read the local
+    OFAC/VASP-disclosure/GraphSense corpora for a SHARED designation across
+    chains. This reads a live third party's own transaction record -- never
+    treated as proof the source and destination addresses share a
+    controller, and never given an invented confidence number (neither
+    source publishes one). See cybertrace.modules.cross_chain_module.
+
+    \b
+      cybertrace trace-cross-chain 0x... --db case.db
+    """
+    import asyncio
+    import json as _json
+
+    from .evidence import EvidenceStore
+    from .modules.cross_chain_module import ThorchainModule, WormholeModule
+
+    async def _fetch() -> list:
+        links = []
+        async with WormholeModule() as m:
+            links += (await m.search(address)).summary.get("transaction_cross_chain_links", [])
+        async with ThorchainModule() as m:
+            links += (await m.search(address)).summary.get("transaction_cross_chain_links", [])
+        return links
+
+    with EvidenceStore(db_path) as store:
+        try:
+            store._require_open()
+        except ValueError as e:
+            click.echo(f"[!] {e}", err=True)
+            sys.exit(1)
+
+        links = asyncio.run(_fetch())
+        for link in links:
+            store.record_cross_chain_tx_link(link)
+
+    if output_format == 'json':
+        click.echo(_json.dumps(links, indent=2))
+        return
+    if not links:
+        click.echo(f"[i] No live bridge/swap activity found for {address!r} via "
+                  f"Wormholescan or THORChain Midgard.")
+        return
+    for link in links:
+        dest = f"{link['dest_address']} ({link['dest_chain']})" if link.get('dest_address') \
+            else "destination not supplied"
+        click.echo(f"  [{link['mechanism']}] {link['source_address']} ({link['source_chain']}) "
+                  f"-> {dest} via {link['source_api']}"
+                  + (f" ({link['status']})" if link.get('status') else ""))
+    click.echo(f"\n[+] Recorded {len(links)} link(s)", err=True)
 
 
 @cli.command('trace-wallet')
@@ -591,6 +662,10 @@ def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: s
         click.echo("Path: " + " -> ".join(report['path']))
     if report['exchange']:
         click.echo(f"Nearest VASP: {report['exchange']}")
+        if report.get('also_attributed'):
+            names = ', '.join(sorted({c['exchange'] for c in report['also_attributed']}))
+            click.echo(f"  [!] ALSO attributed to (conflicting evidence on this SAME "
+                      f"address, not merged): {names}", err=True)
         click.echo(f"  proximity:   {report['proximity']} ({report['hops']} hop(s))")
         click.echo(f"  attribution: {report['attribution']} "
                   f"({report['attribution_source']})")

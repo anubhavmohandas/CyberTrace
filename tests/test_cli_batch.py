@@ -200,7 +200,8 @@ def test_batch_output_schema_matches_the_documented_shape(tmp_path, monkeypatch)
         "entity_id", "address", "chain", "path", "hops", "exchange", "exchange_confidence",
         "attribution", "attribution_rank", "attribution_source", "wallet_role", "proximity",
         "direction", "deposit_candidate", "direct_vasp_contacts", "secondary_vasp_contacts",
-        "verdict", "flags", "evidence_ids", "service_tags", "risk", "data_source_status",
+        "also_attributed", "transaction_cross_chain_links", "verdict", "flags", "evidence_ids",
+        "service_tags", "risk", "data_source_status",
     }
 
 
