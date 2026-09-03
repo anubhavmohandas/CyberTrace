@@ -1240,22 +1240,31 @@ def test_direction_is_reported_from_the_edge_not_assumed(tmp_path):
 def test_a_tag_attested_vasp_is_reachable_but_never_becomes_an_edge(tmp_path):
     """Automatic VASP identification, and the line it must not cross.
 
-    The shipped GraphSense corpus names this address as Binance's, so the
-    trace must reach it -- refusing to would leave a shipped dataset unread
-    and the central requirement unmet. But the engine must NOT write the
-    EXCHANGE_DEPOSIT edge label_exchange exists to gate: a third party's
-    public claim is a lead to check, not CyberTrace's own finding, and the
-    two must stay separable in the output an analyst reads.
+    The shipped GraphSense corpus names this address as crypto.com's, so
+    the trace must reach it -- refusing to would leave a shipped dataset
+    unread and the central requirement unmet. But the engine must NOT
+    write the EXCHANGE_DEPOSIT edge label_exchange exists to gate: a third
+    party's public claim is a lead to check, not CyberTrace's own finding,
+    and the two must stay separable in the output an analyst reads.
+
+    Not Binance: Loop 44's VASP_DISCLOSED corroboration audit independently
+    verified exchange-wallets-binance.yaml's own source (a live binance.com
+    blog post) as Binance's own disclosure, so that address is now
+    VASP_DISCLOSED, not TAG_ATTESTED -- see
+    exchange_tags._VASP_DISCLOSED_SOURCES. crypto.com's source (a
+    CEO's personal tweet, not the corporate account) was audited the same
+    way and explicitly did NOT qualify, so it still illustrates the
+    TAG_ATTESTED boundary this test is actually about.
     """
     from cybertrace.integrations import exchange_tags
     if not (exchange_tags.available() and exchange_tags.index_available()):
         pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
-    binance = "34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo"     # tagged category=exchange
+    cryptocom = "bc1qpy4jwethqenp4r7hqls660wy8287vw0my32lmy"  # tagged category=exchange
     with EvidenceStore(str(tmp_path / "e.db")) as store:
         addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
         sid = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
         enrich_bitcoin(store, sid, addr,
-                       {"address": BTC_VALID, "sent_to_addresses": [binance]}, "bitcoin")
+                       {"address": BTC_VALID, "sent_to_addresses": [cryptocom]}, "bitcoin")
 
         hit = next(w for w in wallet_exchange_paths(store) if w["entity_id"] == addr)
         assert hit["attribution"] == "TAG_ATTESTED"
@@ -1284,12 +1293,17 @@ def test_wallet_trace_report_surfaces_a_coinjoin_tag_as_intermediate_intelligenc
     CoinJoin service -> Wallet B -> VASP). The endpoint stays VASP
     attribution (TAG_ATTESTED, unaffected, exactly as before this loop);
     the CoinJoin hop is a separate, structured finding, never the reported
-    exchange and never a VASP field."""
+    exchange and never a VASP field.
+
+    Uses a crypto.com-tagged address, not Binance: Loop 44's VASP_DISCLOSED
+    corroboration audit independently verified Binance's own disclosure
+    source, so a Binance-tagged address is VASP_DISCLOSED now, not
+    TAG_ATTESTED -- see exchange_tags._VASP_DISCLOSED_SOURCES."""
     from cybertrace.integrations import exchange_tags
     if not (exchange_tags.available() and exchange_tags.index_available()):
         pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
     coinjoin_addr = "bc1qnfu52l5vgg0gf2hw98epfvupveepnq7tg5l75h"   # samourai: coinjoin only
-    binance = "34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo"                  # category=exchange
+    cryptocom = "bc1qpy4jwethqenp4r7hqls660wy8287vw0my32lmy"        # category=exchange
     with EvidenceStore(str(tmp_path / "e.db")) as store:
         suspect = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
         sid1 = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
@@ -1298,7 +1312,7 @@ def test_wallet_trace_report_surfaces_a_coinjoin_tag_as_intermediate_intelligenc
         coinjoin_id = store.find_entity("BTC_ADDRESS", coinjoin_addr)
         sid2 = store.insert_snapshot(store.upsert_target("btc:" + coinjoin_addr), {}, "bitcoin")
         enrich_bitcoin(store, sid2, coinjoin_id,
-                       {"address": coinjoin_addr, "sent_to_addresses": [binance]}, "bitcoin")
+                       {"address": coinjoin_addr, "sent_to_addresses": [cryptocom]}, "bitcoin")
 
         report = wallet_trace_report(store, BTC_VALID)
         assert report["hops"] == 2
@@ -1448,12 +1462,17 @@ def test_run_correlation_attaches_service_tags_to_a_wallet_exchange_path(tmp_pat
     """The case-level sibling of test_wallet_trace_report_surfaces_a_coinjoin_
     tag_as_intermediate_intelligence above: same 2-hop shape, but read off
     run_correlation's own results dict rather than a single wallet_trace_report
-    call, proving the Loop 33 finding now survives into the full-case pass."""
+    call, proving the Loop 33 finding now survives into the full-case pass.
+
+    Uses a crypto.com-tagged address, not Binance: Loop 44's VASP_DISCLOSED
+    corroboration audit independently verified Binance's own disclosure
+    source, so a Binance-tagged address is VASP_DISCLOSED now, not
+    TAG_ATTESTED -- see exchange_tags._VASP_DISCLOSED_SOURCES."""
     from cybertrace.integrations import exchange_tags
     if not (exchange_tags.available() and exchange_tags.index_available()):
         pytest.skip("GraphSense TagPacks not downloaded/indexed in this checkout")
     coinjoin_addr = "bc1qnfu52l5vgg0gf2hw98epfvupveepnq7tg5l75h"   # samourai: coinjoin only
-    binance = "34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo"                  # category=exchange
+    cryptocom = "bc1qpy4jwethqenp4r7hqls660wy8287vw0my32lmy"        # category=exchange
     with EvidenceStore(str(tmp_path / "e.db")) as store:
         suspect = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
         sid1 = store.insert_snapshot(store.upsert_target("btc:" + BTC_VALID), {}, "bitcoin")
@@ -1462,11 +1481,11 @@ def test_run_correlation_attaches_service_tags_to_a_wallet_exchange_path(tmp_pat
         coinjoin_id = store.find_entity("BTC_ADDRESS", coinjoin_addr)
         sid2 = store.insert_snapshot(store.upsert_target("btc:" + coinjoin_addr), {}, "bitcoin")
         enrich_bitcoin(store, sid2, coinjoin_id,
-                       {"address": coinjoin_addr, "sent_to_addresses": [binance]}, "bitcoin")
+                       {"address": coinjoin_addr, "sent_to_addresses": [cryptocom]}, "bitcoin")
 
         results = run_correlation(store)
         hit = next(w for w in results["wallet_exchange_paths"] if w["entity_id"] == suspect)
-        assert hit["exchange"] == "Binance.com"
+        assert hit["exchange"] == "crypto.com reserves wallets"
         assert hit["service_tags"] == [{
             "entity_id": coinjoin_id, "value": coinjoin_addr, "hop": 1,
             "category": "coinjoin", "label": "Samourai Wallet",
@@ -1478,12 +1497,12 @@ def test_run_correlation_attaches_service_tags_to_a_wallet_exchange_path(tmp_pat
         brief = render_markdown(results["dossiers"], results)
         assert "## Observed service intelligence" in brief
         vasp_section, _, service_section = brief.partition("## Observed service intelligence")
-        assert "Binance" in vasp_section          # the VASP section, unaffected
+        assert "crypto.com" in vasp_section        # the VASP section, unaffected
         assert coinjoin_addr in service_section
         assert "CoinJoin service" in service_section
         assert "Samourai Wallet" in service_section
         # Separation: the exchange endpoint is not restated as a service hit.
-        assert binance not in service_section
+        assert cryptocom not in service_section
 
         out = tmp_path / "case.html"
         render_dossier_html(results, str(out))

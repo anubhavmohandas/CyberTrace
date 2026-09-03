@@ -289,21 +289,66 @@ def exchange_labels(addresses: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]
 
 
 # Of this corpus's 21 distinct `source` domains for category='exchange'
-# tags, these two are the ones independently verified -- not merely
-# domain-plausible, but cross-checked against a second, independent record:
-# Bitfinex's own verified X/Twitter account linking this exact GitHub repo,
-# and contemporaneous news coverage (CoinDesk and others) of BitMEX's
-# November 2022 proof-of-reserves publication.
-# Binance/Huobi/KuCoin/Deribit/Bybit/OKX are real-looking by domain pattern
-# alone and were explicitly left unverified -- adding them here on
-# domain-plausibility would be exactly the unearned precision this
-# project's REGULATORY_ATTESTED/TAG_ATTESTED split already refuses. Extend
-# this dict only after independently corroborating a new source the same
-# way -- not on domain pattern alone.
+# tags, these eight are the ones independently verified -- not merely
+# domain-plausible, but each cross-checked against a second, independent
+# record the corpus itself does not carry:
+#   Bitfinex  Bitfinex's own verified X/Twitter account linking this exact
+#             GitHub repo.
+#   BitMEX    contemporaneous news coverage (CoinDesk and others) of
+#             BitMEX's November 2022 proof-of-reserves publication.
+#   Binance   binance.com/en/blog itself fetched live (Loop 44 audit): a
+#             real Binance-authored post with an address table (BTC/ETH/
+#             BSC/BNB/TRX), each entry linked to its own explorer.
+#   Huobi     huobi.com/support fetched live (Loop 44): HTX's own "Asset
+#             Transparency" announcement, address table with explorer
+#             links -- one address (143gLvWYUojXaWZRrxquRKpVNTkhmr415B)
+#             cross-checked byte-for-byte against this corpus's own copy.
+#   KuCoin    kucoin.com/blog fetched live (Loop 44): KuCoin's own post,
+#             address table across BTC/ETH/USDT/USDC/KCS.
+#   Bybit     blog.bybit.com now 301-redirects to www.bybit.com/en-US/
+#             learn/post/... -- every hop stays inside bybit.com's own
+#             domain (a site restructuring, not a hijack); the page is
+#             "Statement from Ben [Zhou, Bybit's CEO] on Bybit's wallets"
+#             on Bybit's OWN blog, unlike Crypto.com's case below. Covers
+#             7 of this pack's 8 addresses; the 8th cites a different,
+#             unverified bybithelp.com URL as its own per-tag override and
+#             stays TAG_ATTESTED.
+#   Deribit   insights.deribit.com now 404s (Deribit discontinued its PoR
+#             page 2026-09-01 as part of its Coinbase integration -- see
+#             Loop 44 audit), but the Wayback Machine holds a 2024-09-12
+#             capture of this exact URL under Deribit's own domain,
+#             confirmed to be Deribit's "wallet holdings" disclosure.
+#   OKX       twitter.com/okx -- OKX's own verified corporate account (not
+#             an employee's personal one), confirmed still archived.
+# Crypto.com and SwissBorg were audited the same way and explicitly do NOT
+# qualify, for two different reasons worth recording so a future loop
+# doesn't re-spend the work or promote them on domain-plausibility later:
+#   Crypto.com  its tagpack `source` is twitter.com/kris -- Crypto.com's
+#               CEO's PERSONAL account, not the corporate @cryptocom one.
+#               A personal statement is a materially weaker chain of
+#               custody than a corporate disclosure; needs the corporate
+#               account or an official crypto.com page before promotion.
+#   SwissBorg   its tagpack `source` is a Nansen portfolio dashboard --
+#               Nansen is itself a third-party analytics vendor's own
+#               labeling, not SwissBorg's own publication at all. This is
+#               exactly the "mirror of a third party's claim, not an
+#               independent VASP disclosure" case this tier exists to
+#               exclude -- worse than unverified, not merely unverified.
+# Extend this dict only after independently corroborating a new source the
+# same way -- not on domain pattern alone.
 _VASP_DISCLOSED_SOURCES: Dict[str, str] = {
     "https://github.com/bitfinexcom/pub/blob/main/wallets.txt": "Bitfinex",
     "https://s3-eu-west-1.amazonaws.com/public.bitmex.com/data/porl/"
     "20221115-reserves-763269-20221115D113036434534000.yaml": "BitMEX",
+    "https://www.binance.com/en/blog/community/"
+    "our-commitment-to-transparency-2895840147147652626": "Binance",
+    "https://www.huobi.com/support/en-us/detail/24922606430831": "Huobi",
+    "https://www.kucoin.com/blog/"
+    "transparency-and-trust-a-detailed-list-of-kucoin-s-wallets": "KuCoin",
+    "https://blog.bybit.com/en-US/post/"
+    "statement-from-ben-on-bybit-s-wallets-bltfb7a70c50462875b/": "Bybit",
+    "https://insights.deribit.com/exchange-updates/deribit-wallet-holdings/": "Deribit",
+    "https://twitter.com/okx/status/1590812545346330624": "OKX",
 }
 
 

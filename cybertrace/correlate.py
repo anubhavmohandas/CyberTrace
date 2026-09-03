@@ -2999,8 +2999,8 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
     if results.get("transaction_cross_chain_links"):
         lines += ["## Transaction-level cross-chain links", "",
                   "_Real bridge/swap records from a live third-party source "
-                  "(Wormholescan, THORChain Midgard) -- distinct from Cross-chain "
-                  "links above, which reads the local OFAC/VASP-disclosure/GraphSense "
+                  "(Wormholescan, THORChain Midgard, Across, LI.FI) -- distinct from "
+                  "Cross-chain links above, which reads the local OFAC/VASP-disclosure/GraphSense "
                   "corpora for a SHARED designation. A record here is evidence that "
                   "value moved from one chain to another in ONE transaction; it is "
                   "never treated as proof the source and destination addresses share "
@@ -3427,8 +3427,8 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
     if results.get("transaction_cross_chain_links"):
         out.append("<h2>Transaction-level cross-chain links</h2>"
                    "<p class=dim>Real bridge/swap records from a live third-party source "
-                   "(Wormholescan, THORChain Midgard) -- distinct from Cross-chain links "
-                   "above, which reads the local OFAC/VASP-disclosure/GraphSense corpora "
+                   "(Wormholescan, THORChain Midgard, Across, LI.FI) -- distinct from "
+                   "Cross-chain links above, which reads the local OFAC/VASP-disclosure/GraphSense corpora "
                    "for a SHARED designation. A record here is evidence that value moved "
                    "from one chain to another in ONE transaction; it is never treated as "
                    "proof the source and destination addresses share a controller. No "

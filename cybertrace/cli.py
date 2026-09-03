@@ -543,9 +543,10 @@ def label_exchange_cmd(address: str, exchange: str, db_path: str,
               type=click.Choice(['table', 'json']), help='Output format')
 def trace_cross_chain_cmd(address: str, db_path: str, output_format: str):
     """
-    Query live Wormholescan (bridge transfers) and THORChain Midgard
-    (cross-chain swaps) for ADDRESS, and record any real transaction-level
-    cross-chain links found.
+    Query live Wormholescan (bridge transfers), THORChain Midgard
+    (cross-chain swaps), Across Protocol (bridge deposits) and LI.FI
+    (cross-chain aggregator transfers) for ADDRESS, and record any real
+    transaction-level cross-chain links found.
 
     Distinct from `correlate`'s own cross-chain links: those read the local
     OFAC/VASP-disclosure/GraphSense corpora for a SHARED designation across
@@ -561,14 +562,13 @@ def trace_cross_chain_cmd(address: str, db_path: str, output_format: str):
     import json as _json
 
     from .evidence import EvidenceStore
-    from .modules.cross_chain_module import ThorchainModule, WormholeModule
+    from .modules.cross_chain_module import AcrossModule, LifiModule, ThorchainModule, WormholeModule
 
     async def _fetch() -> list:
         links = []
-        async with WormholeModule() as m:
-            links += (await m.search(address)).summary.get("transaction_cross_chain_links", [])
-        async with ThorchainModule() as m:
-            links += (await m.search(address)).summary.get("transaction_cross_chain_links", [])
+        for module_cls in (WormholeModule, ThorchainModule, AcrossModule, LifiModule):
+            async with module_cls() as m:
+                links += (await m.search(address)).summary.get("transaction_cross_chain_links", [])
         return links
 
     with EvidenceStore(db_path) as store:

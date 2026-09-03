@@ -4,12 +4,13 @@ separate from correlate.cross_chain_links' same-entity groupings (which
 read only the local OFAC/VASP-disclosure/GraphSense corpora and never a
 live transaction).
 
-Wormholescan (bridge transfers) and THORChain Midgard (cross-chain swaps)
-are the two real, free, address-queryable sources this loop's audit
-verified live. A source-supplied record is NEVER read as proof the two
+Wormholescan (bridge transfers), THORChain Midgard (cross-chain swaps),
+Across Protocol (bridge transfers) and LI.FI (cross-chain aggregator) are
+the four real, free, address-queryable sources verified live across Loops
+42 and 44. A source-supplied record is NEVER read as proof the two
 addresses it names share a controller: a bridge/swap moves VALUE across
-chains, and neither source asserts common ownership of both sides. No
-confidence number is invented -- neither source publishes one.
+chains, and no source here asserts common ownership of both sides. No
+confidence number is invented -- none of the four publish one.
 
 WBTC mint/burn is explicitly NOT covered here: the only real, public
 linkage evidence is the WBTC DAO's own on-chain Merchant Guide, which
@@ -17,8 +18,59 @@ covers roughly forty DAO-approved custodian addresses, not general
 suspect tracing -- building it would misrepresent its coverage. Stays
 MISSING/BLOCKED.
 
+Loop 44's DeFi bridge audit (native bridge / DeFi bridge / cross-chain
+messaging / DEX-swap / aggregator are genuinely different evidence
+classes -- collapsing them was the LayerZero mistake Loop 43 caught)
+tested every protocol named in that loop's brief against its real,
+current API and rejected the rest:
+
+  Hop Protocol    -- explorer-api.hop.exchange is dead (Cloudflare
+                     "origin DNS error", confirmed on two independent
+                     fetch paths). No live source, nothing to build on.
+  Synapse         -- api.synapseprotocol.com's own published OpenAPI spec
+                     (/openapi.json) has no address-history endpoint at
+                     all: every route either builds a new quote or needs
+                     a txHash/synapseTxId the investigator would already
+                     have to know. Can't discover a suspect's transfers
+                     from their wallet address alone.
+  Celer cBridge   -- cbridge-prod2.celer.app is alive, but its address-
+                     history RPC (transferHistoryByAddr, every path
+                     variant tried) now answers "Not Implemented"; only
+                     lookup-by-transfer-id still works, which has the
+                     same can't-start-from-a-wallet problem as Synapse.
+  Multichain      -- unreachable (connection failure, not an HTTP error)
+                     -- consistent with its confirmed shutdown after the
+                     July 2023 exploit. Long defunct.
+  Connext         -- rebranded to Everclear, which itself sunset as a
+                     protocol in 2026. Dead.
+  Stargate        -- built on LayerZero's own message layer; re-checking
+                     scan.layerzero-api.com found the identical address/
+                     executor ambiguity Loop 43 already rejected for
+                     LayerZero itself, and no Stargate-specific address-
+                     clean source exists. Same rejection, same reason.
+  Socket, Rango   -- Socket's v2 API is deprecated (v3 needs a paid key);
+                     Rango's public demo key is rejected (403). Neither
+                     could be verified live against a real response in
+                     this audit -- BLOCKED on external access, not
+                     rejected on evidence grounds. Revisit if a key is
+                     ever provisioned.
+
+LI.FI qualifies, but is explicitly an AGGREGATOR, not a bridge: its own
+`/v1/analytics/transfers?wallet=` (no key required, live-verified) only
+ever reports a transaction that was routed through LI.FI's own contracts,
+and its `sending`/`receiving` legs can land on the SAME chain (a plain
+swap, not a cross-chain move at all) -- LifiModule filters those out.
+What makes it usable evidence despite being an aggregator: LI.FI's own
+record names `fromAddress`/`toAddress` as the actual counterparties (not
+a diamond-proxy or executor address) and cites a real source-chain-native
+block-explorer link (etherscan.io, arbiscan.io, basescan.org...) for each
+leg's tx hash -- a third party's own citation, not one this codebase
+constructs. It complements rather than substitutes for Across: a suspect
+who bridged directly via Across's own UI/contracts never touches LI.FI's
+contracts and won't appear there.
+
 Neither module is registered for the general `cybertrace search` dispatch
-(supported_types is empty): both are invoked directly, one address
+(supported_types is empty): all four are invoked directly, one address
 CyberTrace is already tracing at a time, by `cybertrace trace-cross-chain`.
 """
 
@@ -201,5 +253,170 @@ class ThorchainModule(BaseModule):
                 "tx_timestamp": tx_timestamp,
                 "source_api": "thorchain_midgard",
                 "status": action.get("status"),
+            })
+        return out
+
+
+# Standard EIP-155 chain ids, for the CyberTrace-traced chains that are
+# actually EVM chains. Both Across and LI.FI report chain identity this way
+# (unlike Wormhole/THORChain's own custom numbering above) -- not a
+# coincidence, EIP-155 ids are a public standard, so one shared map is
+# correct rather than two copies that could silently drift apart. BTC,
+# TRX and SOL have no EIP-155 id and are absent on purpose: neither source
+# supports them (live-checked, Loop 44), so this map can never manufacture
+# a link to a chain CyberTrace didn't ask for.
+_EVM_CHAIN = {1: "ETH_ADDRESS", 56: "BNB_ADDRESS", 137: "POLYGON_ADDRESS"}
+
+
+class AcrossModule(BaseModule):
+    """Bridge-deposit lookup by address, via app.across.to/api/deposits --
+    free, no API key, verified live (Loop 44 audit). This is the JSON
+    backend Across's own explorer frontend calls; a separate, documented
+    partner API (docs.across.to) exists behind an API key/integratorId,
+    but is not needed here since this endpoint already returns real,
+    complete deposit records without one -- the same evidentiary posture
+    already accepted for Wormholescan and THORChain Midgard in Loop 42.
+    """
+
+    name = "across"
+    description = "Across Protocol bridge deposit lookup (cross-chain, Loop 44)"
+    supported_types: set = set()
+
+    _URL = "https://app.across.to/api/deposits"
+
+    async def search(self, target: str, **options) -> ModuleResult:
+        result = ModuleResult(target=target, target_type="cross_chain_bridge", module=self.name)
+        # `address` matches either side (live-checked) -- one call covers a
+        # suspect who deposited OR one who received, same convenience
+        # Wormholescan's own `address` param already gives that module.
+        data = await self.fetch_json(f"{self._URL}?address={target}&limit=50")
+        if not isinstance(data, list):
+            # The real API returns a bare JSON array (unlike Wormhole/
+            # THORChain's wrapping object) -- None on a failed/exhausted
+            # fetch, any non-list on a malformed/unexpected shape.
+            result.sources["across"] = SourceResult(
+                source="across", success=False, error="request failed or no data")
+            return result
+        links = self._parse(data)
+        result.sources["across"] = SourceResult(
+            source="across", success=True, data={"deposit_count": len(data)})
+        result.summary["transaction_cross_chain_links"] = links
+        return result
+
+    @staticmethod
+    def _parse(data: list) -> List[dict]:
+        out = []
+        for dep in data:
+            if not isinstance(dep, dict):
+                continue
+            src_chain = _EVM_CHAIN.get(dep.get("originChainId"))
+            if src_chain is None:
+                continue  # a chain this codebase doesn't trace
+            depositor = dep.get("depositor")
+            dep_tx = dep.get("depositTxHash")
+            if not depositor or not dep_tx:
+                continue  # no source address or no stable tx to cite
+            out.append({
+                "source_chain": src_chain,
+                "source_address": depositor,
+                "source_tx": dep_tx,
+                "dest_chain": _EVM_CHAIN.get(dep.get("destinationChainId")),
+                "dest_address": dep.get("recipient"),
+                # Only present once Across's relayer has actually filled the
+                # deposit on the destination chain (status == "filled");
+                # None on an unfilled/expired/refunded deposit, left as such
+                # rather than guessed.
+                "dest_tx": dep.get("fillTx"),
+                "mechanism": BRIDGE,
+                # Across's own deposit tx hash -- stable, and the same
+                # reference an investigator would use to look this deposit
+                # up on Across's own explorer.
+                "evidence_ref": dep_tx,
+                "tx_timestamp": dep.get("depositBlockTimestamp"),
+                "source_api": "across",
+                "status": dep.get("status"),
+            })
+        return out
+
+
+class LifiModule(BaseModule):
+    """Cross-chain transfer lookup by address, via li.quest/v1/analytics/
+    transfers -- free, no API key, verified live (Loop 44 audit). LI.FI is
+    an AGGREGATOR: this only surfaces a transfer that went through LI.FI's
+    own contracts (never a bridge used directly), and LI.FI itself mixes
+    same-chain swaps into this endpoint -- `_parse` drops every record
+    whose two legs land on the same chain, since those are not cross-chain
+    evidence at all. See the module docstring above for why LI.FI's own
+    fromAddress/toAddress are trusted the same way Across's depositor/
+    recipient and Wormhole's `from` already are."""
+
+    name = "lifi"
+    description = "LI.FI cross-chain aggregator transfer lookup (Loop 44)"
+    supported_types: set = set()
+
+    _URL = "https://li.quest/v1/analytics/transfers"
+
+    async def search(self, target: str, **options) -> ModuleResult:
+        result = ModuleResult(target=target, target_type="cross_chain_bridge", module=self.name)
+        data = await self.fetch_json(f"{self._URL}?wallet={target}&limit=50")
+        if not isinstance(data, dict):
+            result.sources["lifi"] = SourceResult(
+                source="lifi", success=False, error="request failed or no data")
+            return result
+        transfers = data.get("transfers")
+        if not isinstance(transfers, list):
+            # A 400 (e.g. a malformed address) lands here too: LI.FI
+            # returns {"message": ..., "code": ...} on HTTP 200-incompatible
+            # input, which .get("transfers") correctly yields None for.
+            result.sources["lifi"] = SourceResult(
+                source="lifi", success=False, error="request failed or no data")
+            return result
+        links = self._parse(transfers)
+        result.sources["lifi"] = SourceResult(
+            source="lifi", success=True, data={"transfer_count": len(transfers)})
+        result.summary["transaction_cross_chain_links"] = links
+        return result
+
+    @staticmethod
+    def _parse(transfers: list) -> List[dict]:
+        out = []
+        for t in transfers:
+            if not isinstance(t, dict):
+                continue
+            sending = t.get("sending") if isinstance(t.get("sending"), dict) else {}
+            receiving = t.get("receiving") if isinstance(t.get("receiving"), dict) else {}
+            src_chain = _EVM_CHAIN.get(sending.get("chainId"))
+            dest_chain = _EVM_CHAIN.get(receiving.get("chainId"))
+            if src_chain is None:
+                continue  # a chain this codebase doesn't trace
+            if src_chain == dest_chain and sending.get("chainId") == receiving.get("chainId"):
+                continue  # same-chain swap, not cross-chain evidence
+            from_addr = t.get("fromAddress")
+            src_tx = sending.get("txHash")
+            ref = t.get("transactionId")
+            if not from_addr or not src_tx or not ref:
+                continue  # no source address, no source tx, or no stable reference to cite
+            ts = sending.get("timestamp")
+            try:
+                tx_timestamp = (datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+                                if ts else None)
+            except (ValueError, TypeError, OverflowError, OSError):
+                tx_timestamp = None
+            out.append({
+                "source_chain": src_chain,
+                "source_address": from_addr,
+                "source_tx": src_tx,
+                "dest_chain": dest_chain,
+                "dest_address": t.get("toAddress"),
+                "dest_tx": receiving.get("txHash"),
+                "mechanism": BRIDGE,
+                # LI.FI's own transactionId -- the same reference LI.FI's
+                # explorer link (sending/receiving txLink, both real
+                # third-party block-explorer URLs LI.FI supplies, never
+                # constructed here) resolves against.
+                "evidence_ref": str(ref),
+                "tx_timestamp": tx_timestamp,
+                "source_api": "lifi",
+                "status": t.get("status"),
             })
         return out
