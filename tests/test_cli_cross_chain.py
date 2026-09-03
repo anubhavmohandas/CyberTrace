@@ -81,6 +81,21 @@ def test_links_from_both_sources_are_recorded(tmp_path, monkeypatch):
         assert {r["evidence_ref"] for r in rows} == {"wh-op-1", "BTCTX2"}
 
 
+def test_table_output_cites_the_real_evidence_ref(tmp_path, monkeypatch):
+    """Loop 43: the human-readable table previously showed mechanism/chain/
+    source_api but silently dropped evidence_ref -- only `--output json`
+    carried it, so a table reader had no way to look the record back up.
+    """
+    _mock_one_link_each(monkeypatch)
+    db = str(tmp_path / "case.db")
+    with EvidenceStore(db):
+        pass
+    result = CliRunner().invoke(cli, ["trace-cross-chain", BTC_ADDR, "--db", db])
+    assert result.exit_code == 0, result.output
+    assert "[ref: wh-op-1]" in result.output
+    assert "[ref: BTCTX2]" in result.output
+
+
 def test_refused_once_case_is_closed(tmp_path, monkeypatch):
     _mock_one_link_each(monkeypatch)  # must not even be reached
     db = str(tmp_path / "case.db")

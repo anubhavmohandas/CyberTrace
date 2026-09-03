@@ -265,6 +265,34 @@ def test_trace_wallet_reports_path_and_flags(tmp_path):
     assert report['direction'] == 'UNKNOWN'
 
 
+def test_trace_wallet_table_flags_a_deposit_candidate(tmp_path):
+    """Loop 43 audit: `deposit_candidate` (one hop, one-way flow toward the
+    VASP -- see correlate._is_deposit_candidate) was computed since Loop 41
+    but only ever reached `--output json`; the human-readable table silently
+    dropped it. Mirrors test_correlate.
+    test_a_real_bitfinex_sol_hot_wallet_is_vasp_disclosed_and_hot's DIRECT/
+    TO_VASP setup, via label-exchange instead of the real corpus so this
+    stays self-contained."""
+    from cybertrace.evidence import EvidenceStore, enrich_bitcoin
+
+    db = str(tmp_path / 'case.db')
+    btc = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+    counterparty = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+    with EvidenceStore(db) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", btc)
+        target = store.upsert_target("btc:" + btc)
+        sid = store.insert_snapshot(target, {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": btc, "sent_to_addresses": [counterparty]}, "bitcoin")
+
+    CliRunner().invoke(
+        cli, ['label-exchange', counterparty, '--exchange', 'Test Exchange', '--db', db])
+
+    result = CliRunner().invoke(cli, ['trace-wallet', btc, '--db', db])
+    assert result.exit_code == 0, result.output
+    assert 'possible deposit endpoint' in result.output
+
+
 def test_wallet_verdict_command_requires_a_traced_wallet(tmp_path):
     """Loop 41: wallet-level analyst verdicts. Mirrors
     test_feedback_command_requires_a_real_candidate -- verdict on a wallet

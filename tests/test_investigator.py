@@ -318,6 +318,29 @@ def test_wallet_exchange_answer_cites_a_real_cross_chain_link(store):
     assert any("Cross-chain: Sim Hyon Sop" in c["text"] for c in result["claims"])
 
 
+def test_wallet_exchange_answer_marks_a_transaction_cross_chain_link_observed(store):
+    """Loop 43 audit: a live bridge/swap record (Loop 42) is a first-hand
+    transaction from a third-party source, not a graph-derived relationship
+    -- it was previously tagged kind=INFERRED, the same kind used for genuine
+    graph-proximity inferences, undermining the OBSERVED/INFERRED split the
+    GUI's own Evidence tab advertises. Also checks the citable evidence_ref
+    reaches the claim text, since this claim carries no evidence_ids (the
+    link lives in its own table, not the observations store)."""
+    store.record_cross_chain_tx_link({
+        "source_chain": "BTC_ADDRESS", "source_address": "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
+        "source_tx": "BTCTX1", "dest_chain": "ETH_ADDRESS", "dest_address": "0xdest",
+        "dest_tx": None, "mechanism": "SWAP", "evidence_ref": "real-tx-ref-1",
+        "tx_timestamp": None, "source_api": "thorchain_midgard", "status": "success",
+    })
+
+    result = investigator.answer(store, "tortaxi", "any cross-chain bridge or swap activity?")
+    assert result["mode"] == "deterministic"
+    tx_claims = [c for c in result["claims"] if "Transaction cross-chain" in c["text"]]
+    assert tx_claims, "expected a transaction cross-chain claim"
+    assert tx_claims[0]["kind"] == "OBSERVED"
+    assert "real-tx-ref-1" in tx_claims[0]["text"]
+
+
 def test_boundary_answer_surfaces_a_recorded_analyst_verdict(store):
     """analyst_feedback (candidates.verdict in build_context) was computed
     into context but no answer path ever read it -- "has this candidate

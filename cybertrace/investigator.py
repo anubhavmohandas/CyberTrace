@@ -283,9 +283,16 @@ def _next_steps(ctx: dict) -> dict:
 
 def _wallet_exchange(ctx: dict) -> dict:
     paths = ctx["wallet_exchange_paths"]
-    if not paths:
+    # Loop 43 audit: this guard previously fired on `paths` alone, so a case
+    # with real transaction_cross_chain_links (Loop 42) but no VASP-path
+    # wallet got a blanket "insufficient evidence" for every wallet/chain/
+    # bridge/swap question -- the live bridge/swap evidence was already in
+    # context and simply never reached, the same "computed but unreachable"
+    # gap the deposit_candidate fix above addresses for a different field.
+    if not paths and not ctx.get("transaction_cross_chain_links"):
         return _insufficient("No wallet in this case has a recorded path to an "
-                             "analyst-labeled exchange address.")
+                             "analyst-labeled exchange address, and no live "
+                             "bridge/swap record is on file.")
     # risk/wallet_role are read off the SAME wallet_exchange_paths rows
     # run_correlation already attached them to (_attach_wallet_risk) -- no
     # second score_wallet_risk call, so this answer can never disagree with
@@ -314,6 +321,14 @@ def _wallet_exchange(ctx: dict) -> dict:
         risk_phrase = (f" Risk: {r['risk_level']} (score {r['risk_score']}, {r['risk_policy_version']})."
                        if r.get("risk_score") is not None
                        else " Risk: INSUFFICIENT_EVIDENCE -- not a finding of low risk.")
+        # Computed by wallet_exchange_paths (1-hop, one-way TO_VASP only --
+        # see correlate._is_deposit_candidate) but previously never read past
+        # the JSON report (Loop 43 audit): silently dropped from every prose
+        # surface including this one. Framed as reachability, not identity --
+        # the same caveat _is_deposit_candidate's own docstring gives for why
+        # AT_VASP/INDIRECT/BOTH_WAYS are excluded.
+        deposit_phrase = (" Possible 1-hop deposit endpoint (reachability only, not proof "
+                          "of a customer relationship)." if w.get("deposit_candidate") else "")
         # direct/secondary_vasp_contacts (AT_VASP rows only) are structured
         # fields wallet_exchange_paths already computed -- this was
         # previously narrated only in trace-wallet's own `flags` prose, so a
@@ -343,7 +358,7 @@ def _wallet_exchange(ctx: dict) -> dict:
             "text": f"`{_short(w['value'], 32)}` ({w['chain']}) — {w['proximity']} to {w['exchange']} "
                     f"({w['hops']} hop(s), flow {w['direction']}, "
                     f"{w['attribution']}: {w['attribution_source']}{role}, "
-                    f"reachability {w['confidence']:.2f}).{risk_phrase}{contacts_phrase}",
+                    f"reachability {w['confidence']:.2f}).{deposit_phrase}{risk_phrase}{contacts_phrase}",
             "kind": "INFERRED", "evidence_ids": w["evidence_ids"] + contact_evidence,
             "candidate_ids": [], "finding_ids": [],
         })
@@ -383,16 +398,27 @@ def _wallet_exchange(ctx: dict) -> dict:
         claims.append({
             "text": f"Transaction cross-chain: a {tx['mechanism'].lower()} moved value from "
                     f"{_short(tx['source_address'], 24)} ({tx['source_chain']}) to {dest}, "
-                    f"per {tx['source_api']}"
+                    f"per {tx['source_api']} (ref: {tx['evidence_ref']})"
                     + (f" ({tx['status']})" if tx.get("status") else "") + ".",
-            "kind": "INFERRED", "evidence_ids": [],
+            # A live third party's own transaction record, not a graph-derived
+            # relationship -- OBSERVED, not INFERRED, matching the kind this
+            # module uses everywhere else for a first-hand fact (Loop 43 --
+            # this claim was previously mislabeled INFERRED alongside genuine
+            # graph-proximity inferences, undermining the observed/inferred
+            # split the GUI's own Evidence tab advertises). No evidence_ids:
+            # cross_chain_tx_links is its own table, not the observations
+            # store `evidence_ids` resolves against -- the citation above is
+            # the real reference (evidence_ref), not a fabricated one.
+            "kind": "OBSERVED", "evidence_ids": [],
             "candidate_ids": [], "finding_ids": [],
         })
     not_fresh = [name for name, state in ctx.get("data_source_status", {}).items()
                 if state != "FRESH"]
     chains = ", ".join(sorted({w["chain"] for w in paths}))
-    return {"answer": f"Nearest VASP-attributed address for each traced wallet "
-                      f"(chains involved: {chains}):",
+    answer = (f"Nearest VASP-attributed address for each traced wallet "
+             f"(chains involved: {chains}):") if paths \
+        else "No traced wallet has a recorded path to a VASP; live bridge/swap records only:"
+    return {"answer": answer,
             "claims": claims,
             "limitations": ([
                 f"Data source(s) not fresh: {', '.join(not_fresh)} -- a 'no match' from "

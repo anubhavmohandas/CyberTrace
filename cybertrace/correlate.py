@@ -2921,6 +2921,9 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
             # prose -- a self-attributed suspect's own additional VASP
             # relationship (e.g. direct Binance deposits alongside a primary
             # designation) was invisible in the case-level report.
+            if w.get("deposit_candidate"):
+                lines.append("  - possible 1-hop deposit endpoint (reachability only, "
+                             "not proof of a customer relationship)")
             if w.get("direct_vasp_contacts"):
                 names = ", ".join(sorted({c["exchange"] for c in w["direct_vasp_contacts"]}))
                 lines.append(f"  - also directly reaches: {names}")
@@ -3344,10 +3347,14 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
                 "<br><span class=bad>⚠ also: " +
                 _esc(', '.join(sorted({c['exchange'] for c in also}))) +
                 " (conflicting evidence, not merged)</span>" if also else "")
+            flow_cell = _esc(w['direction']) + (
+                "<br><span class=dim title=\"1-hop, one-way flow toward the VASP -- "
+                "reachability only, not proof of a customer relationship\">possible "
+                "deposit endpoint</span>" if w.get("deposit_candidate") else "")
             out.append(f"<tr><td class=mono>{_esc(w['value'])}</td>"
                        f"<td>{_esc(w['chain'])}</td>"
                        f"<td>{_esc(w['proximity'])}</td><td>{w['hops']}</td>"
-                       f"<td>{_esc(w['direction'])}</td>"
+                       f"<td>{flow_cell}</td>"
                        f"<td class=wrap>{exchange_cell}</td>"
                        f"<td>{_esc(w['wallet_role']) if w.get('wallet_role') else '—'}</td>"
                        f"<td class=wrap>{_esc(w['attribution'])} · "

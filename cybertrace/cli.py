@@ -594,7 +594,8 @@ def trace_cross_chain_cmd(address: str, db_path: str, output_format: str):
             else "destination not supplied"
         click.echo(f"  [{link['mechanism']}] {link['source_address']} ({link['source_chain']}) "
                   f"-> {dest} via {link['source_api']}"
-                  + (f" ({link['status']})" if link.get('status') else ""))
+                  + (f" ({link['status']})" if link.get('status') else "")
+                  + f" [ref: {link['evidence_ref']}]")
     click.echo(f"\n[+] Recorded {len(links)} link(s)", err=True)
 
 
@@ -673,6 +674,9 @@ def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: s
             click.echo(f"  wallet role: {report['wallet_role']} "
                       f"(the VASP's own disclosure, not an inference)")
         click.echo(f"  fund flow:   {report['direction']}")
+        if report.get('deposit_candidate'):
+            click.echo("  [!] possible deposit endpoint: 1 hop, one-way flow toward the VASP "
+                      "(reachability only, not proof of a customer relationship)")
         click.echo(f"  reachability confidence: {report['exchange_confidence']:.2f} "
                   f"(hop decay, not a probability)")
     else:
