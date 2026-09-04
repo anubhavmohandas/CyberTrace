@@ -32,6 +32,9 @@ dependencies = {file = ["requirements.txt"]}
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0.0", "pytest-asyncio>=0.21.0"]
+# experiments/ml_attribution/ only (Loop 46, rejected -- see docs/LOOP46.md).
+# Not a production dependency: nothing cybertrace/ ships imports sklearn.
+ml-experiments = ["numpy>=1.26.0", "scikit-learn>=1.5.0"]
 
 [project.scripts]
 cybertrace = "cybertrace.cli:main"
@@ -43,3 +46,11 @@ Repository = "https://github.com/anubhavmohandas/cybertrace"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["cybertrace*"]
+
+[tool.pytest.ini_options]
+# Default `pytest`/`pytest -q` only collects the production suite --
+# experiments/ (Loop 46's rejected ML experiment; see experiments/
+# ml_attribution/README.md and docs/LOOP46.md) needs scikit-learn and is
+# deliberately never part of what "the tests pass" means for this repo.
+# Run it explicitly: pytest experiments/ml_attribution/
+testpaths = ["tests"]
