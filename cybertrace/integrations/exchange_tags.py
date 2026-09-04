@@ -440,3 +440,48 @@ def vasp_disclosed_labels(addresses: Dict[str, List[str]]) -> Dict[str, Dict[str
     finally:
         conn.close()
     return out
+
+
+def all_exchange_addresses() -> List[Dict[str, Any]]:
+    """Every address this corpus tags category='exchange', across the whole
+    archive -- the raw material for tools/eval_attribution.py's benchmark,
+    which needs to enumerate known-VASP addresses independent of any
+    particular case's own address set (unlike exchange_labels/
+    vasp_disclosed_labels above, which only check addresses a caller already
+    has on hand). Address values are already canonical (see _iter_tag_rows),
+    same as every other read in this module.
+
+    Returns [] -- never raises -- when the archive/index is absent, same
+    degradation contract as exchange_labels.
+    """
+    if not (available() and index_available()):
+        return []
+    conn = sqlite3.connect(f"file:{INDEX_PATH}?mode=ro", uri=True)
+    try:
+        return [{"address": r[0], "currency": r[1], "label": r[2], "pack": r[3]}
+                for r in conn.execute(
+                    "SELECT address, currency, label, pack FROM tags "
+                    "WHERE lower(category)='exchange'")]
+    finally:
+        conn.close()
+
+
+def all_vasp_disclosed() -> List[Dict[str, Any]]:
+    """Every address tagged under a verified VASP_DISCLOSED source (see
+    _VASP_DISCLOSED_SOURCES), across the whole archive -- the enumeration
+    counterpart to vasp_disclosed_labels, for the identical reason
+    all_exchange_addresses exists beside exchange_labels."""
+    if not (available() and index_available()):
+        return []
+    conn = sqlite3.connect(f"file:{INDEX_PATH}?mode=ro", uri=True)
+    try:
+        sources = list(_VASP_DISCLOSED_SOURCES)
+        marks = ",".join("?" * len(sources))
+        return [{"address": r[0], "currency": r[1], "brand": _VASP_DISCLOSED_SOURCES[r[3]],
+                 "role": r[2], "source": r[3]}
+                for r in conn.execute(
+                    f"SELECT address, currency, label, source FROM tags "
+                    f"WHERE lower(category)='exchange' AND source IN ({marks})",
+                    tuple(sources))]
+    finally:
+        conn.close()

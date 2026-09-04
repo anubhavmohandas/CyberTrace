@@ -458,6 +458,48 @@ window.__resources = {
               </sc-if>
             </div>
 
+            <sc-if value="{{ hasCandidateWallets }}" hint-placeholder-val="{{ false }}">
+              <div>
+                <div style="display:flex;align-items:baseline;gap:12px;padding-bottom:12px;border-bottom:1px solid #171c1f">
+                  <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#67716f">NO REACHABILITY HIT — FINGERPRINT-BASED CANDIDATES</div>
+                  <div style="font-size:12px;color:#5a6367">no path to a VASP-attributed address; built from counterparty overlap, cross-chain evidence, and behavioral context — never an ownership claim</div>
+                </div>
+                <sc-for list="{{ candidateWallets }}" as="w" hint-placeholder-count="1">
+                  <div style="border:1px solid #1c2427;border-top:none;background:#0d1012;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px">
+                      <div>
+                        <div style="display:flex;align-items:baseline;gap:8px">
+                          <span style="font:600 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:1px;color:#879196">{{ w.chain }}</span>
+                          <div style="font:500 15px/1 'IBM Plex Mono',monospace;color:#edf2f4">{{ w.address }}</div>
+                        </div>
+                        <div style="color:#879196;font-size:12.5px;margin-top:8px">candidate: <span style="color:#2fb4e8">{{ w.primaryCandidate }}</span> — {{ w.status }}</div>
+                      </div>
+                      <div style="font:600 12px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:{{ w.strengthColor }};border:1px solid {{ w.strengthColor }};padding:6px 10px;flex:none">{{ w.strength }}</div>
+                    </div>
+                    <div style="border-top:1px solid #171c1f;padding-top:14px;display:flex;flex-direction:column;gap:6px">
+                      <sc-for list="{{ w.signals }}" as="s" hint-placeholder-count="1">
+                        <div style="font-size:12px;color:#879196;line-height:1.5">+ {{ s.detail }} <span style="color:#5a6367">[{{ s.source }}]</span></div>
+                      </sc-for>
+                      <sc-if value="{{ w.hasBehavioralNote }}" hint-placeholder-val="{{ false }}">
+                        <div style="font-size:11.5px;color:#5a6367;font-style:italic">context: {{ w.behavioralNote }} (supporting color only, never sufficient alone)</div>
+                      </sc-if>
+                    </div>
+                    <sc-if value="{{ w.hasAlsoAttributed }}" hint-placeholder-val="{{ false }}">
+                      <div style="border-top:1px solid #171c1f;padding-top:14px">
+                        <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#d97a6c;margin-bottom:8px">⚠ ALSO A CANDIDATE FOR (conflicting evidence, not merged)</div>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap">
+                          <sc-for list="{{ w.alsoAttributed }}" as="v" hint-placeholder-count="1">
+                            <span style="font-size:11.5px;color:#d97a6c;border:1px solid #4a2420;padding:4px 9px">{{ v }}</span>
+                          </sc-for>
+                        </div>
+                      </div>
+                    </sc-if>
+                  </div>
+                </sc-for>
+                <div style="border:1px solid #1c2427;border-top:none"></div>
+              </div>
+            </sc-if>
+
             <sc-if value="{{ hasCrossChainLinks }}" hint-placeholder-val="{{ false }}">
               <div>
                 <div style="display:flex;align-items:baseline;gap:12px;padding-bottom:12px;border-bottom:1px solid #171c1f">
@@ -1125,6 +1167,31 @@ function walletRow(w, valueById, openVerdict) {
   };
 }
 
+// Loop 45: strength color for a fingerprint-based candidate -- deliberately
+// NOT the risk palette (RISK_COLOR above): strength is confidence in an
+// attribution, never a danger level, and reusing red/green here would read
+// as "this wallet is risky" for a field that says nothing about risk at all.
+const CANDIDATE_STRENGTH_COLOR = { HIGH: '#2fb4e8', MEDIUM: C.sand, LOW: '#67716f' };
+
+function candidateWalletRow(w) {
+  return {
+    key: w.entity_id,
+    address: short(w.value, 26),
+    chain: (w.chain || '').replace('_ADDRESS', ''),
+    primaryCandidate: w.primary_candidate,
+    status: w.status,
+    strength: w.strength,
+    strengthColor: CANDIDATE_STRENGTH_COLOR[w.strength] || '#67716f',
+    signals: (w.supporting_signals || []).map(s => ({
+      detail: s.detail || s.rule_id, source: s.attribution_source || '',
+    })),
+    alsoAttributed: (w.also_attributed || []).map(c => c.brand + ' (' + c.strength + ')'),
+    hasAlsoAttributed: !!(w.also_attributed && w.also_attributed.length),
+    behavioralNote: w.behavioral_note || '',
+    hasBehavioralNote: !!w.behavioral_note,
+  };
+}
+
 function walletTabVals(cd, openVerdict) {
   const paths = cd.wallet_exchange_paths || [];
   const valueById = {};
@@ -1186,10 +1253,20 @@ function walletTabVals(cd, openVerdict) {
     hasNarrative: !!run.narrative,
   }));
 
+  // Loop 45: wallets with NO wallet_exchange_paths hit at all -- previously
+  // simply absent everywhere, falling through to the "no wallets" message
+  // below even when the fingerprint engine has real signal for them. Kept as
+  // its own list, never merged into `wallets` above: the two fields mean
+  // different things (reachability-attributed vs. fingerprint-candidate) and
+  // a reader needs that distinction to stay visible, not smoothed over.
+  const candidateWallets = (cd.unattributed_wallet_candidates || []).map(candidateWalletRow);
+
   return {
     wallets,
     hasWallets: wallets.length > 0,
-    hasNoWallets: wallets.length === 0,
+    candidateWallets,
+    hasCandidateWallets: candidateWallets.length > 0,
+    hasNoWallets: wallets.length === 0 && candidateWallets.length === 0,
     walletAlerts: wallets.filter(w => w.isAlert),
     hasWalletAlerts: alertIds.size > 0,
     dataSources,

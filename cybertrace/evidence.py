@@ -1697,6 +1697,11 @@ def enrich_bitcoin(store: EvidenceStore, snapshot_id: str, addr_id: str, summary
         addr_id,
         **{k: v for k, v in (("balance", summary.get("balance")),
                              ("tx_count", summary.get("tx_count")),
+                             # BTC-only numeric totals (see bitcoin_module.
+                             # _build_summary) -- attribution.wallet_fingerprint's
+                             # only source for net-flow/avg-tx-value features.
+                             ("total_received", summary.get("total_received_btc")),
+                             ("total_sent", summary.get("total_sent_btc")),
                              ("first_tx", summary.get("first_seen")),
                              ("last_tx", summary.get("last_seen")),
                              ("reported_scam", summary.get("reported_scam")),

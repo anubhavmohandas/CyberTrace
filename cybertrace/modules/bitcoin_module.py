@@ -876,6 +876,13 @@ class BitcoinModule(BaseModule):
             'type': result.target_type,
             'balance': None,
             'tx_count': None,
+            # Numeric BTC totals, distinct from the human-readable 'balance'
+            # string above. Only blockchain.com's rawaddr response reports
+            # these (see _check_blockchain_com) -- None for every other
+            # chain/source, never a manufactured 0, since attribution.py's
+            # fingerprint needs "unknown" and "zero" to stay distinguishable.
+            'total_received_btc': None,
+            'total_sent_btc': None,
             'first_seen': None,
             'last_seen': None,
             'reported_scam': False,
@@ -945,7 +952,14 @@ class BitcoinModule(BaseModule):
             # Transaction count
             if summary['tx_count'] is None and 'tx_count' in data:
                 summary['tx_count'] = data['tx_count']
-            
+
+            # Numeric received/sent totals -- blockchain.com only (see the
+            # summary dict's own comment above).
+            if summary['total_received_btc'] is None and 'total_received_btc' in data:
+                summary['total_received_btc'] = data['total_received_btc']
+            if summary['total_sent_btc'] is None and 'total_sent_btc' in data:
+                summary['total_sent_btc'] = data['total_sent_btc']
+
             # Timestamps
             if summary['first_seen'] is None and 'first_seen' in data:
                 summary['first_seen'] = data['first_seen']

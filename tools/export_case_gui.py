@@ -210,6 +210,14 @@ def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
         "markets": sorted(targets.values()),
         "market_relationships": market_relationships,
         "wallet_exchange_paths": results["wallet_exchange_paths"],
+        # Loop 45: fingerprint-based candidates for wallets the BFS above
+        # found nothing for at all -- see correlate.unattributed_wallet_
+        # candidates. Kept as its own list, not merged into
+        # wallet_exchange_paths above: the two are mutually exclusive by
+        # construction (a wallet only ever appears in one), and merging them
+        # would blur "reachability-attributed" with "fingerprint-candidate"
+        # for a GUI reader who needs that distinction to stay visible.
+        "unattributed_wallet_candidates": results.get("unattributed_wallet_candidates", []),
         "cross_chain_links": results["cross_chain_links"],
         "transaction_cross_chain_links": results.get("transaction_cross_chain_links", []),
         "risk_alerts": results["risk_alerts"],

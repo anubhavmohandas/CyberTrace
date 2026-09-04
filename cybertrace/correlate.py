@@ -1310,6 +1310,51 @@ def _risk_alerts(wallet_paths: List[dict]) -> List[dict]:
         key=lambda w: -(w["risk"]["risk_score"] or 0))
 
 
+def _adjacency(store: EvidenceStore) -> Dict[str, Dict[str, tuple]]:
+    """entity_id -> {peer entity_id -> (observation_ids, flow-marker set)},
+    over TRANSACTED_WITH/PART_OF_CLUSTER/SENT_FUNDS_TO edges (undirected for
+    reachability) -- the shared graph wallet_exchange_paths' BFS and
+    attribution.vasp_candidates' 1-hop counterparty check both read, built
+    once so the two never risk two subtly different implementations of "what
+    does this set of edges mean".
+
+    "evidence_ids" throughout this module means observation ids (what a
+    relationship's evidence row resolves to, per entity_funnel_profile) --
+    not the `evidence` table's own primary key -- so investigator._finalize
+    can resolve every id here the same way it resolves any other claim.
+
+    One entry per (node, peer) carrying the SET of flow markers observed for
+    that pair: True when a stored edge points the way we are walking
+    (following the value), False when we are walking against it, None when
+    the edge never knew.
+
+    Aggregated rather than appended once per edge, because parallel edges
+    between one pair are the normal case, not the exception: enrich_bitcoin
+    writes TRANSACTED_WITH *and* SENT_FUNDS_TO for the same peer by
+    construction. Taking the first edge a BFS happened to reach made the
+    reported direction a function of SQLite's query plan -- with idx_rel_type
+    chosen it saw SENT_FUNDS_TO first and reported TO_VASP; after a plain
+    ANALYZE the planner switches to a rowid scan, TRANSACTED_WITH comes first
+    and the same deposit silently reported UNKNOWN. Callers that walk peers
+    for a hop-distance tie should do so in sorted order for the same reason
+    (see wallet_exchange_paths).
+    """
+    adjacency: Dict[str, Dict[str, tuple]] = defaultdict(dict)
+    for r in store._all(
+            "SELECT r.source_entity_id AS a, r.target_entity_id AS b, r.rtype, "
+            "       ev.observation_ids FROM relationships r "
+            "LEFT JOIN evidence ev ON ev.relationship_id = r.rel_id "
+            "WHERE r.rtype IN ('TRANSACTED_WITH','PART_OF_CLUSTER','SENT_FUNDS_TO') "
+            "AND r.status='ACTIVE'"):
+        obs_ids = json.loads(r["observation_ids"] or "[]")
+        directed = r["rtype"] == "SENT_FUNDS_TO"
+        for src, dst, flow in ((r["a"], r["b"], True if directed else None),
+                               (r["b"], r["a"], False if directed else None)):
+            prev_obs, flows = adjacency[src].get(dst, ([], set()))
+            adjacency[src][dst] = (prev_obs + obs_ids, flows | {flow})
+    return adjacency
+
+
 def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]:
     """For every address with a path to a VASP-attributed address, over
     TRANSACTED_WITH + SENT_FUNDS_TO + PART_OF_CLUSTER edges (undirected for
@@ -1339,39 +1384,7 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
     exchange's customer, and a tagpack entry is not this engine's finding. This
     is a report for an analyst to act on, not a claim the engine makes.
     """
-    # "evidence_ids" throughout this module means observation ids (what a
-    # relationship's evidence row resolves to, per entity_funnel_profile) --
-    # not the `evidence` table's own primary key -- so investigator._finalize
-    # can resolve every id here the same way it resolves any other claim.
-    #
-    # One entry per (node, peer) carrying the SET of flow markers observed for
-    # that pair: True when a stored edge points the way we are walking
-    # (following the value), False when we are walking against it, None when
-    # the edge never knew.
-    #
-    # Aggregated rather than appended once per edge, because parallel edges
-    # between one pair are the normal case, not the exception: enrich_bitcoin
-    # writes TRANSACTED_WITH *and* SENT_FUNDS_TO for the same peer by
-    # construction. Taking the first edge the BFS happened to reach made the
-    # reported direction a function of SQLite's query plan -- with idx_rel_type
-    # chosen it saw SENT_FUNDS_TO first and reported TO_VASP; after a plain
-    # ANALYZE the planner switches to a rowid scan, TRANSACTED_WITH comes first
-    # and the same deposit silently reported UNKNOWN. Peers are also walked in
-    # sorted order so which endpoint wins a hop-distance tie stops depending on
-    # the plan too.
-    adjacency: Dict[str, Dict[str, tuple]] = defaultdict(dict)
-    for r in store._all(
-            "SELECT r.source_entity_id AS a, r.target_entity_id AS b, r.rtype, "
-            "       ev.observation_ids FROM relationships r "
-            "LEFT JOIN evidence ev ON ev.relationship_id = r.rel_id "
-            "WHERE r.rtype IN ('TRANSACTED_WITH','PART_OF_CLUSTER','SENT_FUNDS_TO') "
-            "AND r.status='ACTIVE'"):
-        obs_ids = json.loads(r["observation_ids"] or "[]")
-        directed = r["rtype"] == "SENT_FUNDS_TO"
-        for src, dst, flow in ((r["a"], r["b"], True if directed else None),
-                               (r["b"], r["a"], False if directed else None)):
-            prev_obs, flows = adjacency[src].get(dst, ([], set()))
-            adjacency[src][dst] = (prev_obs + obs_ids, flows | {flow})
+    adjacency = _adjacency(store)
 
     # raw_value, not normalized_value. upsert_entity lowercases the index key
     # (`key = norm.lower()`), which is correct for dedup and destroys a base58
@@ -1552,6 +1565,49 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
                                    if w["hops"] else 0)
 
     return sorted(out, key=lambda w: (w["hops"], w["entity_id"]))
+
+
+def unattributed_wallet_candidates(store: EvidenceStore, max_hops: int = 4) -> List[dict]:
+    """VASP candidates (Loop 45) for every traced wallet that
+    wallet_exchange_paths reports NOTHING for -- no direct attribution of its
+    own and no path to one within `max_hops`. Today that wallet is simply
+    invisible everywhere (the GUI's Wallets tab falls back to "No traced
+    wallet in this case has a path to a labeled exchange yet"); this is the
+    fingerprint-based complement, built from counterparty overlap, real
+    cross-chain bridge/swap evidence, and contextual behavioral notes -- see
+    attribution.vasp_candidates' own module docstring for why this is
+    provably non-overlapping with what the BFS above already covers.
+
+    Each returned row carries `primary_candidate`/`also_attributed`/`status`/
+    `strength` from attribution.vasp_candidates, never a bare score -- a
+    wallet with zero real signal is simply absent from this list too, same
+    "no qualifying evidence, not a claim of zero" discipline as risk.py's
+    INSUFFICIENT_EVIDENCE.
+    """
+    from . import attribution
+
+    wallet_rows = store._all(
+        "SELECT entity_id, normalized_value, raw_value, etype FROM entities "
+        "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS','BNB_ADDRESS','POLYGON_ADDRESS','TRX_ADDRESS','SOL_ADDRESS')")
+    values = {r["entity_id"]: (r["raw_value"] or r["normalized_value"]) for r in wallet_rows}
+    chain_of = {r["entity_id"]: r["etype"] for r in wallet_rows}
+
+    exchange_of = _vasp_endpoints(store, values)
+    already_reached = {w["entity_id"] for w in wallet_exchange_paths(store, max_hops)}
+    adjacency = _adjacency(store)
+
+    out = []
+    for entity_id, value in values.items():
+        if entity_id in exchange_of or entity_id in already_reached:
+            continue  # already attributed or already reachable -- not "unknown"
+        result = attribution.vasp_candidates(
+            store, entity_id, value, chain_of[entity_id],
+            peers=adjacency.get(entity_id, {}), exchange_of=exchange_of, values=values)
+        if result["primary_candidate"] is None:
+            continue
+        out.append({"entity_id": entity_id, "value": value, "chain": chain_of[entity_id],
+                    **result})
+    return sorted(out, key=lambda w: (w["entity_id"]))
 
 
 _TRACE_CHAIN_ETYPES = {"bitcoin": "BTC_ADDRESS", "ethereum": "ETH_ADDRESS",
@@ -1752,6 +1808,13 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4,
 
     hit = next((w for w in wallet_exchange_paths(store, max_hops=max_hops)
                if w["entity_id"] == start_id), None)
+    # Loop 45: only meaningful when there is no reachability hit at all --
+    # see unattributed_wallet_candidates' own docstring for why a wallet WITH
+    # a hit can never additionally have one of these (it would already have
+    # been found by the BFS above).
+    vasp_candidates = None if hit else next(
+        (w for w in unattributed_wallet_candidates(store, max_hops=max_hops)
+         if w["entity_id"] == start_id), None)
     path_ids = hit["path"] if hit else [start_id]
     flags = wallet_path_flags(store, hit, fallback_path_ids=path_ids)
     # The EVM-ambiguity caveat ("0x is Ethereum mainnet only") is about NOT
@@ -1822,6 +1885,12 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4,
         "evidence_ids": hit["evidence_ids"] if hit else [],
         "service_tags": service_tags,
         "risk": risk,
+        # Loop 45: fingerprint-based VASP candidates for a wallet with no
+        # reachability hit above -- see attribution.vasp_candidates. None
+        # when there IS a hit (that case is already fully attributed by
+        # `exchange`/`attribution` above) or when no real signal exists at
+        # all for this wallet either way.
+        "vasp_candidates": vasp_candidates,
         "data_source_status": data_source_status(),
     }
 
@@ -2949,6 +3018,27 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
                 lines.append(f"  - {flag}")
         lines.append("")
 
+    if results.get("unattributed_wallet_candidates"):
+        lines += ["## Wallets with no reachability hit — fingerprint-based VASP candidates", "",
+                  "_These wallets have no path to a VASP-attributed address at all "
+                  "(the section above is empty for them). What follows is built from "
+                  "counterparty overlap, real cross-chain bridge/swap evidence, and "
+                  "contextual behavioral notes — HIGH/MEDIUM/LOW strength, never a "
+                  "percentage, and CANDIDATE/CORROBORATED status, never an ownership "
+                  "claim. See cybertrace/attribution.py._", ""]
+        for w in results["unattributed_wallet_candidates"]:
+            lines.append(f"- `{w['value']}` ({w['chain']}) → **{w['primary_candidate']}** "
+                         f"— {w['strength']} ({w['status']})")
+            for sig in w["supporting_signals"]:
+                lines.append(f"  - {sig.get('detail') or sig['rule_id']} "
+                             f"[{sig['attribution_source']}]")
+            if w.get("also_attributed"):
+                names = ", ".join(f"{c['brand']} ({c['strength']})" for c in w["also_attributed"])
+                lines.append(f"  - ⚠ ALSO a candidate for (conflicting evidence, not merged): {names}")
+            if w.get("behavioral_note"):
+                lines.append(f"  - context: {w['behavioral_note']} (supporting color only)")
+        lines.append("")
+
     service_hits = [(w, tag) for w in results.get("wallet_exchange_paths", [])
                     for tag in w.get("service_tags", [])]
     if service_hits:
@@ -3365,6 +3455,35 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
                        f"<td class=wrap>{verdict_cell}</td></tr>")
         out.append("</table>")
 
+    if results.get("unattributed_wallet_candidates"):
+        out.append("<h2>Wallets with no reachability hit — fingerprint-based VASP candidates</h2>"
+                   "<p class=dim>These wallets have no path to a VASP-attributed address at "
+                   "all (absent from the table above). Built from counterparty overlap, real "
+                   "cross-chain bridge/swap evidence, and contextual behavioral notes — "
+                   "HIGH/MEDIUM/LOW strength, never a percentage; CANDIDATE/CORROBORATED "
+                   "status, never an ownership claim. See cybertrace/attribution.py.</p>"
+                   "<table><tr><th>wallet</th><th>chain</th><th>candidate</th>"
+                   "<th>strength</th><th>status</th><th>supporting signals</th>"
+                   "<th>also a candidate for</th></tr>")
+        for w in results["unattributed_wallet_candidates"]:
+            signals_cell = "<ul>" + "".join(
+                f"<li>{_esc(s.get('detail') or s['rule_id'])} "
+                f"<span class=dim>[{_esc(s['attribution_source'])}]</span></li>"
+                for s in w["supporting_signals"]) + "</ul>"
+            if w.get("behavioral_note"):
+                signals_cell += f"<span class=dim>context: {_esc(w['behavioral_note'])}</span>"
+            also = w.get("also_attributed") or []
+            also_cell = ("<span class=bad>⚠ " + _esc(', '.join(
+                f"{c['brand']} ({c['strength']})" for c in also))
+                + " (conflicting evidence, not merged)</span>") if also else "—"
+            out.append(f"<tr><td class=mono>{_esc(w['value'])}</td>"
+                       f"<td>{_esc(w['chain'])}</td>"
+                       f"<td><b>{_esc(w['primary_candidate'])}</b></td>"
+                       f"<td>{_esc(w['strength'])}</td><td>{_esc(w['status'])}</td>"
+                       f"<td class=wrap>{signals_cell}</td>"
+                       f"<td class=wrap>{also_cell}</td></tr>")
+        out.append("</table>")
+
     service_hits = [(w, tag) for w in results.get("wallet_exchange_paths", [])
                     for tag in w.get("service_tags", [])]
     if service_hits:
@@ -3577,6 +3696,14 @@ def run_correlation(store: EvidenceStore, min_conf: float = 0.35,
     _attach_wallet_flags(store, results["wallet_exchange_paths"])
     _attach_wallet_verdict(store, results["wallet_exchange_paths"])
     results["risk_alerts"] = _risk_alerts(results["wallet_exchange_paths"])
+    # Loop 45: fingerprint-based VASP candidates for the wallets the BFS above
+    # found nothing for at all -- see unattributed_wallet_candidates. Its own
+    # BFS call recomputes wallet_exchange_paths a second time rather than
+    # reusing results["wallet_exchange_paths"] above (that list is about to be
+    # mutated in place by the four _attach_* calls above/below it, and this
+    # function needs the raw, unmutated hit set to decide which wallets to
+    # skip) -- one extra pass over a case's own wallets, not a new query class.
+    results["unattributed_wallet_candidates"] = unattributed_wallet_candidates(store)
     results["data_source_status"] = data_source_status()
     # Persisted `watch` cycles (Loop 42), newest first -- the single canonical
     # read every other surface (Investigator, GUI, Markdown/HTML) slices from,

@@ -681,6 +681,7 @@ def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: s
                   f"(hop decay, not a probability)")
     else:
         click.echo(f"Nearest VASP: none found within {max_hops} hop(s)")
+        _echo_vasp_candidates(report.get('vasp_candidates'))
     if report['flags']:
         click.echo("Flags:")
         for flag in report['flags']:
@@ -699,6 +700,30 @@ def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: s
             click.echo(f"  - {reason}")
 
     _echo_data_source_status(report['data_source_status'])
+
+
+def _echo_vasp_candidates(candidates: Optional[dict]) -> None:
+    """Loop 45: fingerprint-based VASP candidates for a wallet with no
+    reachability hit at all (correlate.unattributed_wallet_candidates) --
+    HIGH/MEDIUM/LOW strength, never a percentage, and every brand named,
+    never just the strongest one. Silent when there is no real signal
+    either -- matches wallet_trace_report's own "None, not a claim of zero"."""
+    if not candidates or not candidates.get('primary_candidate'):
+        return
+    click.echo("VASP candidates (fingerprint-based, no direct reachability -- "
+              "see the evidence behind each):")
+    click.echo(f"  {candidates['primary_candidate']} — {candidates['strength']} "
+              f"({candidates['status']})")
+    for sig in candidates['supporting_signals']:
+        click.echo(f"    + {sig.get('detail') or sig['rule_id']} "
+                  f"[{sig['attribution_source']}]")
+    if candidates['also_attributed']:
+        names = ', '.join(f"{c['brand']} ({c['strength']})" for c in candidates['also_attributed'])
+        click.echo(f"  [!] ALSO a candidate for (conflicting evidence, not merged): {names}",
+                  err=True)
+    if candidates.get('behavioral_note'):
+        click.echo(f"  context: {candidates['behavioral_note']} "
+                  "(supporting color only, never sufficient alone)")
 
 
 def _echo_data_source_status(status: dict) -> None:
@@ -914,6 +939,10 @@ def trace_wallet_batch_cmd(input_file: str, db_path: str, max_hops: int,
         if r['status'] in ('ok', 'duplicate') and r['result'] and r['result']['exchange']:
             line += (f" · {r['result']['exchange']} "
                     f"({r['result']['hops']} hop(s), {r['result']['proximity']})")
+        elif r['status'] in ('ok', 'duplicate') and r['result'] and \
+                (r['result'].get('vasp_candidates') or {}).get('primary_candidate'):
+            cand = r['result']['vasp_candidates']
+            line += f" · candidate: {cand['primary_candidate']} ({cand['strength']}, fingerprint-based)"
         elif r['error']:
             line += f" · {r['error']}"
         click.echo(line)

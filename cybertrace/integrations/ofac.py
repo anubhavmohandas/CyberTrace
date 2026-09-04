@@ -299,3 +299,26 @@ def ofac_labels(addresses: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]]:
     finally:
         conn.close()
     return out
+
+
+def all_addresses() -> List[Dict[str, Any]]:
+    """Every OFAC digital-currency-address record in the local SDN index --
+    the enumeration counterpart to ofac_labels/lookup_address, for
+    tools/eval_attribution.py's benchmark to build real non-VASP negative
+    test cases (a sanctioned darknet market or mixer address -- Hydra
+    Market, Blender.io -- is a real government designation but never a VASP;
+    see this module's own docstring) without needing them ingested into a
+    case first.
+
+    Returns [] -- never raises -- when the archive/index is absent, same
+    degradation contract as ofac_labels.
+    """
+    if not (available() and index_available()):
+        return []
+    conn = sqlite3.connect(f"file:{INDEX_PATH}?mode=ro", uri=True)
+    try:
+        return [{"address": r[0], "currency": r[1], "entity_name": r[2], "profile_id": r[3]}
+                for r in conn.execute(
+                    "SELECT address, currency, entity_name, profile_id FROM addresses")]
+    finally:
+        conn.close()
