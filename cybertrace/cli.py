@@ -662,7 +662,14 @@ def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: s
     if len(report['path']) > 1:
         click.echo("Path: " + " -> ".join(report['path']))
     if report['exchange']:
-        click.echo(f"Nearest VASP: {report['exchange']}")
+        # proximity glued onto the same line as the name (Loop 48 finding: a
+        # bare "Nearest VASP: X" headline, split from proximity on the next
+        # line, reads as an ownership claim to anyone who only captures this
+        # one line -- e.g. a log excerpt or grep) -- same discipline
+        # trace-wallet-batch's summary line and every Markdown/HTML row
+        # already apply.
+        click.echo(f"Nearest VASP: {report['exchange']} "
+                  f"({report['proximity']}, {report['hops']} hop(s))")
         if report.get('also_attributed'):
             names = ', '.join(sorted({c['exchange'] for c in report['also_attributed']}))
             click.echo(f"  [!] ALSO attributed to (conflicting evidence on this SAME "
