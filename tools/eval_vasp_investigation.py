@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Loop 48 benchmark: does separating VASP EXPOSURE from VASP CONTROL cost
-real exposure discovery, and does it actually stop false ownership claims a
-naive (pre-Loop-48) reading of the same evidence would make?
+"""Loop 48 benchmark, moved here in Loop 49 alongside cybertrace.vasp_
+investigation now that it is a production module (see docs/LOOP49.md): does
+separating VASP EXPOSURE from VASP CONTROL cost real exposure discovery, and
+does it actually stop false ownership claims a naive (pre-Loop-48) reading of
+the same evidence would make?
 
 Two parts, both real-data, no synthetic label anywhere in the numbers below:
 
   1. Offline (default, no network): full/near-full local-corpus FPR and
-     recall report (same populations test_vasp_control_attribution.py pins,
+     recall report (same populations tests/test_vasp_investigation.py pins,
      at full corpus scale where that's cheap), plus the section 12 ablation
      (Variant A/B/C/D) over five real, named populations.
   2. `--live` (opt-in, network required): reuses tools/eval_attribution.py's
@@ -15,8 +17,9 @@ Two parts, both real-data, no synthetic label anywhere in the numbers below:
      real, brand-stratified sample are even CONTROL-eligible at all, next to
      the exposure number already reported for Loop 45/47.
 
-No new graph engine, no ML, no learned weight -- see vasp_control_attribution.py's
-own module docstring for the (small, closed) policy this script is testing.
+No new graph engine, no ML, no learned weight -- see cybertrace/vasp_
+investigation.py's own module docstring for the (small, closed) policy this
+script is testing.
 """
 
 from __future__ import annotations
@@ -27,10 +30,9 @@ import sys
 from pathlib import Path
 from typing import List, Tuple
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "tools"))  # eval_attribution.py
-sys.path.insert(0, str(Path(__file__).resolve().parent))  # sibling: vasp_control_attribution.py
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root, same as every tools/*.py
 
-import vasp_control_attribution as vca
+import cybertrace.vasp_investigation as vca
 from cybertrace.correlate import wallet_exchange_paths
 from cybertrace.evidence import EvidenceStore, enrich_bitcoin
 
@@ -180,7 +182,7 @@ def run_ablation(tmp_dir: Path) -> List[dict]:
 # --- Optional live exposure comparison against Loop 45/47 -------------------
 
 def run_live(per_brand: int = 3, max_total: int = 30) -> None:
-    import eval_attribution as ea  # tools/eval_attribution.py, via the sys.path insert above
+    import eval_attribution as ea  # sibling module in this same tools/ directory
 
     corpus = ea.ground_truth_corpus()
     categories = ea.categorize(corpus)

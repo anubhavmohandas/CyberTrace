@@ -2436,6 +2436,71 @@ def test_wallet_trace_report_with_no_metadata_and_no_path_is_still_honest(tmp_pa
         assert report["flags"] == []
 
 
+def test_wallet_trace_report_carries_the_canonical_vasp_investigation_result(tmp_path):
+    """Loop 49: `vasp_investigation` is built from the SAME `hit` this report
+    already computed above it -- primary_vasp/attribution_tier/proximity/hops
+    must agree with the plain `exchange`/`attribution`/`proximity`/`hops`
+    fields, and control must never be established for an ordinary 1-hop
+    reachability finding (Loop 48 policy, unchanged)."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        target = store.upsert_target("btc:" + BTC_VALID)
+        sid = store.insert_snapshot(target, {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": BTC_VALID, "counterparty_addresses": [BTC_OTHER]}, "bitcoin")
+        assert label_exchange(store, BTC_OTHER, "Test Exchange") is not None
+
+        report = wallet_trace_report(store, BTC_VALID)
+        vi = report["vasp_investigation"]
+        assert vi["wallet"] == report["address"]
+        assert vi["primary_vasp"] == report["exchange"]
+        assert vi["proximity"] == report["proximity"] == DIRECT
+        assert vi["hops"] == report["hops"] == 1
+        assert vi["attribution_tier"] == report["attribution"] == ANALYST_ASSERTED
+        assert vi["control_status"] == "NOT_ESTABLISHED"
+        assert vi["evidence"], "a real DIRECT hit must produce at least one evidence item"
+        assert vi["limitations"]
+
+
+def test_run_correlation_attaches_vasp_investigation_to_every_wallet_row(tmp_path):
+    """Case-report-level sibling of the single-wallet test above: every
+    wallet_exchange_paths() row AND every unattributed_wallet_candidates()
+    row in a full run_correlation() pass must carry `vasp_investigation`, and
+    both the Markdown and HTML dossier must render the same control status
+    for it -- never two independently-worded claims about the same wallet
+    (brief section 15, Test 8 -- renderer consistency)."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        target = store.upsert_target("btc:" + BTC_VALID)
+        sid = store.insert_snapshot(target, {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": BTC_VALID, "counterparty_addresses": [BTC_OTHER]}, "bitcoin")
+        assert label_exchange(store, BTC_OTHER, "Test Exchange") is not None
+
+        results = run_correlation(store)
+        by_value = {w["value"]: w for w in results["wallet_exchange_paths"]}
+        # BTC_VALID reaches the exchange's address (DIRECT, 1 hop) -- exposure
+        # only. BTC_OTHER *is* the labeled exchange address (AT_VASP,
+        # ANALYST_ASSERTED) -- the one case Loop 48 policy DOES read as
+        # CONTROL ESTABLISHED. Both rows must carry `vasp_investigation`, and
+        # each must state the control status its own evidence supports --
+        # never a blanket claim for every wallet in the case.
+        assert by_value[BTC_VALID]["vasp_investigation"]["control_status"] == "NOT_ESTABLISHED"
+        exchange_row = next(w for w in results["wallet_exchange_paths"]
+                            if w["proximity"] == "AT_VASP")
+        assert exchange_row["vasp_investigation"]["control_status"] == "ESTABLISHED"
+
+        md = render_markdown(results["dossiers"], results)
+        assert "control/ownership: **NOT_ESTABLISHED**" in md
+        assert "control/ownership: **ESTABLISHED**" in md
+
+        out = tmp_path / "case.html"
+        render_dossier_html(results, str(out))
+        html = out.read_text()
+        assert "control/ownership" in html.lower()
+        assert "NOT_ESTABLISHED" in html
+
+
 def test_two_standalone_lookups_are_not_two_markets(tmp_path):
     """An analyst looking up two IPs is not two markets sharing a host.
 

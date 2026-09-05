@@ -1,4 +1,6 @@
-"""Loop 48 tests: policy unit tests (fast, no store) + real-corpus/real-store
+"""Loop 48 tests (moved from experiments/vasp_control_attribution/ in Loop 49
+now that cybertrace.vasp_investigation is a production module -- see
+docs/LOOP49.md): policy unit tests (fast, no store) + real-corpus/real-store
 negative controls and adversarial cases (offline -- local downloaded OFAC SDN
 / GraphSense TagPacks corpora only, no network, no live blockchain fetch:
 AT_VASP status is a pure local-corpus address lookup, so a bare
@@ -9,24 +11,21 @@ same convention as tests/test_correlate.py.
 Not a re-test of wallet_exchange_paths/attribution.vasp_candidates
 themselves -- tests/test_attribution.py and tests/test_correlate.py already
 cover proximity semantics, tier precedence, and omnibus guards exhaustively
-(see docs/LOOP48.md section 2's audit). These tests are only about this
-module's OWN new decision: the exposure/control policy boundary.
+(see docs/LOOP48.md section 2's audit). The `classify()` tests below are
+unchanged from Loop 48 -- that policy was not touched by this move. The
+`investigate()` tests (bottom of this file) are new: Loop 49's own envelope
+(status/primary_vasp/candidate_vasps/evidence/limitations) built on top of
+the unchanged policy.
 """
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from cybertrace.correlate import wallet_exchange_paths
 from cybertrace.evidence import EvidenceStore, enrich_bitcoin
 
-import vasp_control_attribution as vca
+import cybertrace.vasp_investigation as vca
 
 # Real, independently-attributed addresses (same constants tests/test_correlate.py
 # pins) -- never a fabricated ground-truth claim.
@@ -290,3 +289,112 @@ def test_vasp_disclosed_control_recall_across_a_real_sample(tmp_path):
             if r["control_status"] != vca.ESTABLISHED:
                 misses.append((w["value"], r["control_status"]))
         assert misses == [], f"VASP_DISCLOSED addresses not read as control-established: {misses}"
+
+
+# --- Loop 49: investigate() -- the canonical envelope on top of classify() --
+# (brief section 15, Tests 1-7; Test 8 -- renderer consistency -- lives in
+# tests/test_cli_correlate.py against the real CLI/report output.)
+
+def test_1_strong_direct_vasp_evidence_control_established_only_at_vasp_disclosed():
+    vi = vca.investigate(None, "3BitMEXReserve...", "BTC_ADDRESS", hit=_base_hit(
+        proximity=vca.AT_VASP, hops=0, attribution=vca.VASP_DISCLOSED,
+        attribution_source="Binance self-disclosure (hot wallet): binance.com"))
+    assert vi["primary_vasp"] == "Binance"
+    assert vi["relationship_type"] == "EXPOSURE" and vi["proximity"] == vca.AT_VASP
+    assert vi["attribution_tier"] == vca.VASP_DISCLOSED
+    assert vi["status"] == vca.STRONG_CANDIDATE
+    assert vi["control_status"] == vca.ESTABLISHED and vi["control_confidence"] == vca.HIGH
+
+
+def test_2_normal_vasp_customer_exposure_detected_control_not_established():
+    vi = vca.investigate(None, "1Customer...", "BTC_ADDRESS",
+                         hit=_base_hit(proximity=vca.DIRECT, hops=1))
+    assert vi["primary_vasp"] == "Binance"
+    assert vi["status"] in (vca.STRONG_CANDIDATE, vca.WEAK_CANDIDATE)
+    assert vi["control_status"] == vca.NOT_ESTABLISHED
+
+
+def test_3_ofac_wallet_regulatory_true_exposure_possible_control_not_established():
+    hit = _base_hit(exchange="SUEX OTC S.R.O.", attribution=vca.REGULATORY_ATTESTED,
+                    attribution_source="OFAC SDN", proximity=vca.AT_VASP, hops=0,
+                    direct_vasp_contacts=[{"exchange": "Binance", "attribution": vca.TAG_ATTESTED,
+                                          "attribution_source": "tag", "hops": 1,
+                                          "evidence_ids": []}])
+    vi = vca.investigate(None, "1OfacSuspect...", "BTC_ADDRESS", hit=hit)
+    assert vi["regulatory_context"]["designated"] is True
+    assert vi["primary_vasp"] == "Binance"  # exposure found via a real direct contact
+    assert vi["control_status"] == vca.NOT_ESTABLISHED
+    # A pure regulatory designation with no VASP contact at all: exposure is
+    # simply absent, never forced -- see wallet_trace_report's own "None, not
+    # a claim of zero" discipline.
+    vi_none = vca.investigate(None, "1HydraMarket...", "BTC_ADDRESS", hit=_base_hit(
+        exchange="Hydra Market", attribution=vca.REGULATORY_ATTESTED,
+        attribution_source="OFAC SDN", proximity=vca.AT_VASP, hops=0))
+    assert vi_none["regulatory_context"]["designated"] is True
+    assert vi_none["status"] == vca.INSUFFICIENT_EVIDENCE
+
+
+def test_4_multiple_vasp_candidates_alternatives_and_ambiguity_preserved():
+    candidate = {"primary_candidate": "Binance", "strength": "HIGH",
+                "also_attributed": [{"brand": "BitMEX", "strength": "MEDIUM",
+                                    "status": "CANDIDATE", "sources": ["tag"]}],
+                "supporting_signals": [{"rule_id": "attribution.counterparty_overlap.v1",
+                                       "brand": "Binance", "attribution": vca.TAG_ATTESTED,
+                                       "attribution_source": "tag", "peer_address": "1abc",
+                                       "evidence_ids": [], "detail": "direct counterparty 1abc"}]}
+    vi = vca.investigate(None, "1Unattributed...", "BTC_ADDRESS", candidate=candidate)
+    assert vi["primary_vasp"] == "Binance"
+    assert "BitMEX" in vi["candidate_vasps"]
+    assert vi["status"] == vca.AMBIGUOUS_NEEDS_REVIEW
+
+
+def test_5_no_vasp_evidence_is_insufficient_evidence():
+    vi = vca.investigate(None, "1Nothing...", "BTC_ADDRESS")
+    assert vi["status"] == vca.INSUFFICIENT_EVIDENCE
+    assert vi["primary_vasp"] is None and vi["candidate_vasps"] == []
+
+
+def test_6_cross_chain_corroboration_surfaced_without_duplicate_counting():
+    signal = {"rule_id": "attribution.cross_chain_corroboration.v1", "brand": "Binance",
+             "attribution": vca.TAG_ATTESTED, "attribution_source": "tag",
+             "peer_address": "0xpeer", "peer_chain": "ETH_ADDRESS", "mechanism": "WORMHOLE",
+             "evidence_ref": "wh-123", "evidence_ids": [],
+             "detail": "a real wormhole transaction links this wallet to 0xpeer"}
+    candidate = {"primary_candidate": "Binance", "strength": "MEDIUM", "also_attributed": [],
+                # The SAME underlying signal reported twice (e.g. two internal
+                # mechanisms citing one bridge tx) must collapse to one entry.
+                "supporting_signals": [signal, dict(signal)]}
+    vi = vca.investigate(None, "1CrossChain...", "BTC_ADDRESS", candidate=candidate)
+    assert len(vi["cross_chain_evidence"]) == 1
+    assert vi["cross_chain_evidence"][0]["evidence_ref"] == "wh-123"
+    # A hit-based (already-reachable) wallet carries no cross-chain
+    # corroboration mechanism at all (see _cross_chain_evidence's own
+    # docstring) -- empty, not fabricated.
+    vi_hit = vca.investigate(None, "1Reachable...", "BTC_ADDRESS", hit=_base_hit())
+    assert vi_hit["cross_chain_evidence"] == []
+
+
+def test_7_every_displayed_attribution_has_traceable_evidence(tmp_path):
+    """A real hop's evidence_ids resolve to real, checkable observation
+    records via the exact resolver risk.py's own lineage uses
+    (correlate.evidence_chain) -- never a bare, uncited claim."""
+    from cybertrace.evidence import EvidenceStore, enrich_bitcoin
+    from cybertrace.correlate import wallet_exchange_paths as paths
+
+    btc = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+    counterparty = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+    db = str(tmp_path / "e.db")
+    with EvidenceStore(db) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", btc)
+        sid = store.insert_snapshot(store.upsert_target("btc:" + btc), {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": btc, "counterparty_addresses": [counterparty]}, "bitcoin")
+        from cybertrace.evidence import label_exchange
+        label_exchange(store, counterparty, "Test Exchange")
+
+        hit = next(w for w in paths(store) if w["entity_id"] == addr)
+        assert hit["evidence_ids"], "the hop itself must carry real observation ids"
+        vi = vca.investigate(store, btc, "BTC_ADDRESS", hit=hit)
+        assert vi["evidence"], "a real attribution must produce at least one evidence item"
+        assert any(item["resolved_evidence"] for item in vi["evidence"]), \
+            "at least one evidence item must resolve to a real, checkable observation record"

@@ -689,6 +689,7 @@ def trace_wallet_cmd(address: str, db_path: str, max_hops: int, output_format: s
     else:
         click.echo(f"Nearest VASP: none found within {max_hops} hop(s)")
         _echo_vasp_candidates(report.get('vasp_candidates'))
+    _echo_vasp_investigation(report.get('vasp_investigation'))
     if report['flags']:
         click.echo("Flags:")
         for flag in report['flags']:
@@ -731,6 +732,44 @@ def _echo_vasp_candidates(candidates: Optional[dict]) -> None:
     if candidates.get('behavioral_note'):
         click.echo(f"  context: {candidates['behavioral_note']} "
                   "(supporting color only, never sufficient alone)")
+
+
+def _echo_vasp_investigation(vi: Optional[dict]) -> None:
+    """Loop 49: the canonical VASP investigation result (see
+    cybertrace/vasp_investigation.py) -- one place an investigator reads WHY
+    a VASP was named and, separately, whether ownership/control is actually
+    established, instead of reconstructing that from `exchange`/`attribution`/
+    `proximity` by hand. Never prints an ownership claim the evidence does
+    not support: Control/Ownership is always its own line."""
+    if not vi:
+        return
+    click.echo()
+    click.echo("VASP Attribution")
+    click.echo("-" * 16)
+    if vi['primary_vasp']:
+        relationship = f"{vi['proximity']} {vi['relationship_type']}" if vi['proximity'] \
+            else (vi['relationship_type'] or 'CANDIDATE EXPOSURE')
+        click.echo(f"Primary VASP: {vi['primary_vasp']}")
+        click.echo(f"Relationship: {relationship}")
+        click.echo(f"Confidence: {vi['confidence']}")
+        if vi['hops'] is not None:
+            click.echo(f"Hop Count: {vi['hops']}")
+        if vi['attribution_tier']:
+            click.echo(f"Attribution Tier: {vi['attribution_tier']}")
+        if vi['candidate_vasps']:
+            click.echo(f"Alternative candidate(s): {', '.join(vi['candidate_vasps'])} "
+                      f"— {vi['status']}")
+    else:
+        click.echo(f"Status: {vi['status']}")
+    control_line = f"Control / Ownership: {vi['control_status']}"
+    if vi['control_confidence']:
+        control_line += f" ({vi['control_confidence']} confidence)"
+    click.echo(control_line)
+    if vi['regulatory_context']['designated']:
+        click.echo(f"Regulatory Context: OFAC designation "
+                  f"({vi['regulatory_context']['entity']})")
+    for limitation in vi['limitations']:
+        click.echo(f"  Limitation: {limitation}")
 
 
 def _echo_data_source_status(status: dict) -> None:

@@ -293,6 +293,44 @@ def test_trace_wallet_table_flags_a_deposit_candidate(tmp_path):
     assert 'possible deposit endpoint' in result.output
 
 
+def test_trace_wallet_control_ownership_never_asserted_for_a_direct_customer(tmp_path):
+    """Loop 49: the CLI's new "VASP Attribution" block must state Control /
+    Ownership explicitly, and it must read NOT_ESTABLISHED for an ordinary
+    1-hop customer relationship -- the exact shape Loop 48's own audit found
+    the pre-fix "Nearest VASP: X" headline could otherwise be misread as.
+    Renderer-consistency (brief section 15, Test 8): the JSON report's
+    `vasp_investigation.control_status` must be the SAME string the table
+    output prints, never a second, independently-worded claim.
+    """
+    from cybertrace.evidence import EvidenceStore, enrich_bitcoin
+
+    db = str(tmp_path / 'case.db')
+    btc = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+    counterparty = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+    with EvidenceStore(db) as store:
+        addr = store.upsert_entity("BTC_ADDRESS", btc)
+        target = store.upsert_target("btc:" + btc)
+        sid = store.insert_snapshot(target, {}, "bitcoin")
+        enrich_bitcoin(store, sid, addr,
+                       {"address": btc, "counterparty_addresses": [counterparty]}, "bitcoin")
+    CliRunner().invoke(
+        cli, ['label-exchange', counterparty, '--exchange', 'Test Exchange', '--db', db])
+
+    table = CliRunner().invoke(cli, ['trace-wallet', btc, '--db', db])
+    assert table.exit_code == 0, table.output
+    assert 'VASP Attribution' in table.output
+    assert 'Control / Ownership: NOT_ESTABLISHED' in table.output
+    assert 'Primary VASP: test exchange' in table.output
+
+    js = CliRunner().invoke(cli, ['trace-wallet', btc, '--db', db, '--output', 'json'])
+    report = json.loads(js.output)
+    vi = report['vasp_investigation']
+    assert vi['control_status'] == 'NOT_ESTABLISHED'
+    assert f"Control / Ownership: {vi['control_status']}" in table.output
+    assert vi['primary_vasp'] == 'test exchange'
+    assert vi['limitations']  # a real caveat, not an empty list, whenever exposure exists
+
+
 def test_wallet_verdict_command_requires_a_traced_wallet(tmp_path):
     """Loop 41: wallet-level analyst verdicts. Mirrors
     test_feedback_command_requires_a_real_candidate -- verdict on a wallet

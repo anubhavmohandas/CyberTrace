@@ -388,6 +388,7 @@ window.__resources = {
                         <sc-if value="{{ w.hasDepositCandidate }}" hint-placeholder-val="{{ false }}">
                           <div style="font-size:11px;color:#c2b280;margin-top:8px" title="1-hop, one-way flow toward the VASP -- reachability only, not proof of a customer relationship">possible deposit endpoint</div>
                         </sc-if>
+                        <div style="font-size:11px;color:{{ w.controlColor }};margin-top:8px">{{ w.controlLine }}</div>
                       </div>
                       <div style="padding-left:22px;border-left:1px solid #171c1f">
                         <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:10px">RISK EVIDENCE — {{ w.riskCategories }}</div>
@@ -483,6 +484,7 @@ window.__resources = {
                       <sc-if value="{{ w.hasBehavioralNote }}" hint-placeholder-val="{{ false }}">
                         <div style="font-size:11.5px;color:#5a6367;font-style:italic">context: {{ w.behavioralNote }} (supporting color only, never sufficient alone)</div>
                       </sc-if>
+                      <div style="font-size:11px;color:#67716f;margin-top:4px">{{ w.controlLine }}</div>
                     </div>
                     <sc-if value="{{ w.hasAlsoAttributed }}" hint-placeholder-val="{{ false }}">
                       <div style="border-top:1px solid #171c1f;padding-top:14px">
@@ -1094,8 +1096,21 @@ function buildGraph(cd) {
 // follows for candidates/evidence/graph.
 const RISK_COLOR = { CRITICAL:C.red, HIGH:'#d97a6c', MODERATE:C.sand, LOW:C.green, INSUFFICIENT_EVIDENCE:'#67716f' };
 
+// Loop 49: exposure vs. control/ownership (cybertrace/vasp_investigation.py)
+// -- ESTABLISHED is the rare, narrow case (the suspect address IS a VASP's
+// own disclosed/analyst-cited address); everything else is exposure only,
+// and reads as the neutral/expected default, never an alarm color.
+const CONTROL_COLOR = { ESTABLISHED: '#2fb4e8', NOT_ESTABLISHED: '#67716f', UNKNOWN: '#67716f' };
+
+function controlLine(vi) {
+  if (!vi) return '';
+  const conf = vi.control_confidence ? ' (' + vi.control_confidence + ' confidence)' : '';
+  return 'Control/ownership: ' + vi.control_status + conf + ' — exposure is not ownership';
+}
+
 function walletRow(w, valueById, openVerdict) {
   const risk = w.risk || {};
+  const vi = w.vasp_investigation;
   // A recorded human decision on THIS wallet (Loop 41) -- kept apart from
   // every automated field below it, same shape and same two-color scheme
   // renderVals() already uses for a candidate verdict.
@@ -1141,6 +1156,11 @@ function walletRow(w, valueById, openVerdict) {
     // previously never read past the JSON report (Loop 43 audit) -- silently
     // dropped from every prose/GUI surface. Reachability only, not identity.
     hasDepositCandidate: !!w.deposit_candidate,
+    // Loop 49: exposure vs. control/ownership -- always rendered, never
+    // gated behind an sc-if, so "control is not exposure" is visible on
+    // every wallet card, not only the alarming ones.
+    controlLine: controlLine(vi),
+    controlColor: vi ? (CONTROL_COLOR[vi.control_status] || '#67716f') : '#67716f',
     riskLevel, riskColor: RISK_COLOR[riskLevel] || '#67716f',
     riskScore: risk.risk_score != null ? String(risk.risk_score) : '—',
     riskCategories: (risk.risk_categories || []).join(', '),
@@ -1189,6 +1209,11 @@ function candidateWalletRow(w) {
     hasAlsoAttributed: !!(w.also_attributed && w.also_attributed.length),
     behavioralNote: w.behavioral_note || '',
     hasBehavioralNote: !!w.behavioral_note,
+    // Loop 49: fingerprint-based candidates never reach control ESTABLISHED
+    // (attribution.py's own ATTESTED status is never assigned) -- shown
+    // anyway, same discipline as the reachability wallet card above, so a
+    // reader never has to remember that rule instead of seeing it stated.
+    controlLine: controlLine(w.vasp_investigation),
   };
 }
 

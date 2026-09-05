@@ -1262,6 +1262,30 @@ def _attach_wallet_flags(store: EvidenceStore, wallet_paths: List[dict]) -> None
         w["flags"] = wallet_path_flags(store, w)
 
 
+def _attach_vasp_investigation(store: EvidenceStore, wallet_paths: List[dict]) -> None:
+    """Case-report-level sibling of wallet_trace_report's own `vasp_
+    investigation` field (Loop 49) -- same shape as the other _attach_*
+    helpers above: mutates each already-computed wallet_exchange_paths() row
+    with the canonical, investigator-ready VASP investigation result (see
+    vasp_investigation.investigate), built from that row alone -- it already
+    carries everything classify()/investigate() need (exchange, attribution,
+    proximity, direct_vasp_contacts, ...), no second query.
+    """
+    from .vasp_investigation import investigate
+    for w in wallet_paths:
+        w["vasp_investigation"] = investigate(store, w["value"], w["chain"], hit=w)
+
+
+def _attach_vasp_investigation_candidates(store: EvidenceStore, candidate_wallets: List[dict]) -> None:
+    """Same as _attach_vasp_investigation above, for the Loop 45 fingerprint-
+    candidate list (unattributed_wallet_candidates) instead of the
+    reachability list -- each row already carries everything investigate()
+    needs as `candidate` (primary_candidate/also_attributed/supporting_signals)."""
+    from .vasp_investigation import investigate
+    for w in candidate_wallets:
+        w["vasp_investigation"] = investigate(store, w["value"], w["chain"], candidate=w)
+
+
 def _wallet_verdict(store: EvidenceStore, entity_id: str) -> Optional[dict]:
     """The most recent wallet_feedback row for one wallet entity, or None --
     same shape as build_dossier's own `verdict` (see that function's
@@ -1849,6 +1873,8 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4,
     wallet_address = by_id[start_id]["raw_value"] if start_id in by_id else address
     risk = score_wallet_risk(store, start_id, wallet_address, hit, service_tags)
 
+    from . import vasp_investigation
+
     return {
         "entity_id": start_id,
         "address": wallet_address,
@@ -1892,6 +1918,14 @@ def wallet_trace_report(store: EvidenceStore, address: str, max_hops: int = 4,
         # all for this wallet either way.
         "vasp_candidates": vasp_candidates,
         "data_source_status": data_source_status(),
+        # Loop 49: the canonical, investigator-ready VASP investigation
+        # result (see vasp_investigation.investigate) built on `hit`/
+        # `vasp_candidates` above -- exposure vs. control (Loop 48 policy,
+        # unchanged), evidence, cross-chain corroboration, and limitations,
+        # in one place, so a reader never has to reconstruct it by hand from
+        # the fields above.
+        "vasp_investigation": vasp_investigation.investigate(
+            store, wallet_address, etype, hit=hit, candidate=vasp_candidates),
     }
 
 
@@ -3008,6 +3042,14 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
                 note = f" — {v['note']}" if v["note"] else ""
                 lines.append(f"  - analyst verdict: **{v['outcome']}**{note} "
                              f"(by {v['analyst'] or 'unknown'}, {v['recorded_at']})")
+            # Loop 49: exposure vs. control/ownership, one line, same wording
+            # trace-wallet's CLI and the HTML dossier both use -- never left
+            # implied by proximity/attribution alone.
+            vi = w.get("vasp_investigation")
+            if vi:
+                conf = f" ({vi['control_confidence']} confidence)" if vi["control_confidence"] else ""
+                lines.append(f"  - control/ownership: **{vi['control_status']}**{conf} "
+                             f"— exposure is not ownership")
             # Per-hop cited findings (abuse reports, Elliptic++ dataset
             # labels, GraphSense tagpack hits, the omnibus/hot-wallet
             # endpoint_shared_by warning) -- the same exact list
@@ -3037,6 +3079,10 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
                 lines.append(f"  - ⚠ ALSO a candidate for (conflicting evidence, not merged): {names}")
             if w.get("behavioral_note"):
                 lines.append(f"  - context: {w['behavioral_note']} (supporting color only)")
+            vi = w.get("vasp_investigation")
+            if vi:
+                lines.append(f"  - control/ownership: **{vi['control_status']}** "
+                             f"— exposure is not ownership")
         lines.append("")
 
     service_hits = [(w, tag) for w in results.get("wallet_exchange_paths", [])
@@ -3408,6 +3454,7 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
                    "<th>flow</th>"
                    "<th>VASP</th><th>wallet role</th><th>attributed by</th>"
                    "<th>reachability</th><th>other VASP contacts</th>"
+                   "<th>control/ownership</th>"
                    "<th>evidence</th><th>analyst verdict</th></tr>")
         for w in results["wallet_exchange_paths"]:
             # direct_vasp_contacts/secondary_vasp_contacts (AT_VASP rows only)
@@ -3441,6 +3488,12 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
                 "<br><span class=dim title=\"1-hop, one-way flow toward the VASP -- "
                 "reachability only, not proof of a customer relationship\">possible "
                 "deposit endpoint</span>" if w.get("deposit_candidate") else "")
+            # Loop 49: exposure vs. control/ownership -- never left implied by
+            # proximity/attribution alone, same wording the CLI/Markdown use.
+            vi = w.get("vasp_investigation") or {}
+            control_cell = f"<b>{_esc(vi.get('control_status') or '—')}</b>"
+            if vi.get("control_confidence"):
+                control_cell += f"<br><span class=dim>{_esc(vi['control_confidence'])} confidence</span>"
             out.append(f"<tr><td class=mono>{_esc(w['value'])}</td>"
                        f"<td>{_esc(w['chain'])}</td>"
                        f"<td>{_esc(w['proximity'])}</td><td>{w['hops']}</td>"
@@ -3451,6 +3504,7 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
                        f"{_esc(w['attribution_source'])}</td>"
                        f"<td>{w['confidence']:.2f}</td>"
                        f"<td class=wrap>{_esc(', '.join(sorted(set(contacts)))) if contacts else '—'}</td>"
+                       f"<td class=wrap>{control_cell}</td>"
                        f"<td class=wrap>{evidence_cell}</td>"
                        f"<td class=wrap>{verdict_cell}</td></tr>")
         out.append("</table>")
@@ -3464,7 +3518,7 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
                    "status, never an ownership claim. See cybertrace/attribution.py.</p>"
                    "<table><tr><th>wallet</th><th>chain</th><th>candidate</th>"
                    "<th>strength</th><th>status</th><th>supporting signals</th>"
-                   "<th>also a candidate for</th></tr>")
+                   "<th>also a candidate for</th><th>control/ownership</th></tr>")
         for w in results["unattributed_wallet_candidates"]:
             signals_cell = "<ul>" + "".join(
                 f"<li>{_esc(s.get('detail') or s['rule_id'])} "
@@ -3476,12 +3530,15 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
             also_cell = ("<span class=bad>⚠ " + _esc(', '.join(
                 f"{c['brand']} ({c['strength']})" for c in also))
                 + " (conflicting evidence, not merged)</span>") if also else "—"
+            vi = w.get("vasp_investigation") or {}
+            control_cell = f"<b>{_esc(vi.get('control_status') or '—')}</b>"
             out.append(f"<tr><td class=mono>{_esc(w['value'])}</td>"
                        f"<td>{_esc(w['chain'])}</td>"
                        f"<td><b>{_esc(w['primary_candidate'])}</b></td>"
                        f"<td>{_esc(w['strength'])}</td><td>{_esc(w['status'])}</td>"
                        f"<td class=wrap>{signals_cell}</td>"
-                       f"<td class=wrap>{also_cell}</td></tr>")
+                       f"<td class=wrap>{also_cell}</td>"
+                       f"<td class=wrap>{control_cell}</td></tr>")
         out.append("</table>")
 
     service_hits = [(w, tag) for w in results.get("wallet_exchange_paths", [])
@@ -3695,6 +3752,7 @@ def run_correlation(store: EvidenceStore, min_conf: float = 0.35,
     _attach_wallet_risk(store, results["wallet_exchange_paths"])
     _attach_wallet_flags(store, results["wallet_exchange_paths"])
     _attach_wallet_verdict(store, results["wallet_exchange_paths"])
+    _attach_vasp_investigation(store, results["wallet_exchange_paths"])
     results["risk_alerts"] = _risk_alerts(results["wallet_exchange_paths"])
     # Loop 45: fingerprint-based VASP candidates for the wallets the BFS above
     # found nothing for at all -- see unattributed_wallet_candidates. Its own
@@ -3704,6 +3762,7 @@ def run_correlation(store: EvidenceStore, min_conf: float = 0.35,
     # function needs the raw, unmutated hit set to decide which wallets to
     # skip) -- one extra pass over a case's own wallets, not a new query class.
     results["unattributed_wallet_candidates"] = unattributed_wallet_candidates(store)
+    _attach_vasp_investigation_candidates(store, results["unattributed_wallet_candidates"])
     results["data_source_status"] = data_source_status()
     # Persisted `watch` cycles (Loop 42), newest first -- the single canonical
     # read every other surface (Investigator, GUI, Markdown/HTML) slices from,
