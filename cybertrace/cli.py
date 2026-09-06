@@ -1091,6 +1091,93 @@ def modules_cmd():
         click.echo(f"  {module_name}: {', '.join(inputs)}")
 
 
+@cli.command('providers')
+@click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
+@click.option('--refresh', is_flag=True, help='Bypass the health-check cache')
+def providers_cmd(as_json: bool, refresh: bool):
+    """Check live-provider health: LIVE / DEGRADED / DOWN / NOT_CONFIGURED.
+
+    "Configured" (a key exists) is not the same as "live" (the API actually
+    answered) -- unlike `config --check`, this makes a real, timed request to
+    each provider CyberTrace calls, cached for a few minutes so repeat checks
+    don't spend quota against a rate-limited free-tier key.
+    """
+    import asyncio
+    import json as _json
+
+    from .provider_health import check_all
+
+    entries = asyncio.run(check_all(force=refresh))
+    if as_json:
+        click.echo(_json.dumps([e.to_dict() for e in entries], indent=2))
+        return
+
+    click.echo("\n=== CyberTrace Provider Health ===\n")
+    icon = {'LIVE': '✓', 'DEGRADED': '~', 'DOWN': '✗', 'NOT_CONFIGURED': '-'}
+    for e in entries:
+        latency = f"{e.latency_ms:.0f}ms" if e.latency_ms is not None else '-'
+        click.echo(f"  [{icon.get(e.status, '?')}] {e.provider:22} {e.status:15} {latency:8}  {e.capability}")
+        if e.reason:
+            click.echo(f"        {e.reason}")
+    live = sum(1 for e in entries if e.status == 'LIVE')
+    click.echo(f"\n  {live}/{len(entries)} providers live. No provider here has an "
+               f"automatic fallback today -- see each row's reason when DOWN/NOT_CONFIGURED.\n")
+
+
+@cli.command('detect')
+@click.argument('address')
+@click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
+def detect_cmd(address: str, as_json: bool):
+    """Detect an address's format and, for an ambiguous EVM address, probe
+    which networks it actually has activity on.
+
+    Format alone never proves network identity: a 0x address is valid on
+    Ethereum, BNB Chain and Polygon at once (see chain_caveat). For those,
+    this runs a live check against each chain CyberTrace supports and reports
+    which show real transaction history -- not just which "could" match.
+    """
+    import asyncio
+    import json as _json
+
+    from .detector import btc_address_family, chain_caveat, detect_input_type
+    from .modules.bitcoin_module import BitcoinModule
+
+    specific, module_type = detect_input_type(address)
+    out = {'address': address, 'format': specific, 'module_type': module_type,
+           'caveat': chain_caveat(specific), 'btc_family': None, 'networks': None}
+
+    if specific in ('btc_legacy', 'btc_bech32'):
+        out['btc_family'] = btc_address_family(address)
+    elif specific == 'ethereum':
+        async def _go():
+            async with BitcoinModule() as m:
+                return await m.probe_evm_networks(address)
+        out['networks'] = asyncio.run(_go())
+
+    if as_json:
+        click.echo(_json.dumps(out, indent=2))
+        return
+
+    click.echo(f"\nFormat detected: {out['format']} → module: {out['module_type']}")
+    if out['btc_family']:
+        click.echo(f"Address family: {out['btc_family']}")
+        click.echo("Bitcoin is a single network — format confirms which chain; it does "
+                   "NOT confirm the address has ever been used. Run `cybertrace search` "
+                   "to check real activity.")
+    if out['caveat']:
+        click.echo(f"[!] {out['caveat']}")
+    if out['networks']:
+        click.echo("\nNetwork activity probe (format ≠ proof of network):")
+        for chain, info in out['networks'].items():
+            if not info['checked']:
+                mark, note = '?', info['error'] or 'could not check'
+            elif info['active']:
+                mark, note = '✓', 'activity found'
+            else:
+                mark, note = '-', 'no activity found'
+            click.echo(f"  [{mark}] {chain:10} {note}")
+
+
 # Shortcut commands for specific modules
 
 @cli.command()

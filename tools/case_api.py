@@ -116,6 +116,33 @@ def run_search(target: str) -> dict:
     return result.to_dict()
 
 
+def provider_health() -> list[dict]:
+    """Live provider health, cached a few minutes -- see provider_health.py
+    for why "a key is set" and "the API actually answered" are kept as two
+    different facts."""
+    from cybertrace.provider_health import check_all
+    return [e.to_dict() for e in asyncio.run(check_all())]
+
+
+def detect_address(address: str) -> dict:
+    """Format detection plus, for an ambiguous EVM address, a live probe of
+    which networks it actually has activity on -- mirrors `cybertrace detect`."""
+    from cybertrace.detector import btc_address_family, chain_caveat, detect_input_type
+    from cybertrace.modules.bitcoin_module import BitcoinModule
+
+    specific, module_type = detect_input_type(address)
+    out = {'address': address, 'format': specific, 'module_type': module_type,
+           'caveat': chain_caveat(specific), 'btc_family': None, 'networks': None}
+    if specific in ('btc_legacy', 'btc_bech32'):
+        out['btc_family'] = btc_address_family(address)
+    elif specific == 'ethereum':
+        async def _go():
+            async with BitcoinModule() as m:
+                return await m.probe_evm_networks(address)
+        out['networks'] = asyncio.run(_go())
+    return out
+
+
 def snapshot_body(cases_dir: Path, case_id: str, snapshot_id: str) -> dict | None:
     db_path = _case_db_path(cases_dir, case_id)
     if db_path is None or not db_path.is_file():
@@ -145,6 +172,19 @@ def make_handler(cases_dir: Path):
             if path == "/api/cases":
                 cases = [case_summary(p) for p in sorted(cases_dir.glob("*.db"))]
                 return self._json(cases)
+            if path == "/api/providers/health":
+                try:
+                    return self._json(provider_health())
+                except Exception as e:
+                    return self._json({"error": f"health check failed: {e}"}, status=502)
+            if path == "/api/detect":
+                address = (parse_qs(urlsplit(self.path).query).get("address") or [""])[0].strip()
+                if not address:
+                    return self._json({"error": "address is required"}, status=400)
+                try:
+                    return self._json(detect_address(address))
+                except Exception as e:
+                    return self._json({"error": f"detect failed: {e}"}, status=502)
             if path == "/api/search":
                 target = (parse_qs(urlsplit(self.path).query).get("q") or [""])[0].strip()
                 if not target:

@@ -171,6 +171,23 @@ def chain_caveat(specific_type: str) -> str:
     return ""
 
 
+def btc_address_family(address: str) -> str:
+    """Bitcoin address family from its prefix alone -- Legacy/P2SH/Native
+    SegWit/Taproot. Format only, same caveat as chain_caveat: this says what
+    shape the string is, never whether it has ever been used on-chain (that
+    needs a real query -- see BitcoinModule / `cybertrace search`)."""
+    a = address.strip().lower()
+    if a.startswith('bc1p'):
+        return 'Taproot (P2TR)'
+    if a.startswith('bc1'):
+        return 'Native SegWit (P2WPKH/P2WSH)'
+    if a.startswith('3'):
+        return 'P2SH (often SegWit-nested)'
+    if a.startswith('1'):
+        return 'Legacy (P2PKH)'
+    return 'unknown'
+
+
 def detect_input_type(input_str: str) -> Tuple[str, str]:
     """
     Detect the type of input string.

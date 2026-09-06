@@ -3085,6 +3085,24 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
                              f"— exposure is not ownership")
         lines.append("")
 
+    if results.get("vasp_relationships"):
+        lines += ["## VASP Relationships", "",
+                  "_Case-level view: every traced wallet's own VASP investigation above, "
+                  "grouped by VASP. Shared VASP exposure is a fact about the VASP, never "
+                  "evidence that two wallets share an owner — no wallet-to-wallet "
+                  "relationship is read or inferred here._", ""]
+        for rel in results["vasp_relationships"]:
+            lines.append(f"- **{rel['vasp']}** — {rel['wallet_count']} wallet(s): "
+                         f"{rel['direct_exposure_count']} direct, "
+                         f"{rel['indirect_exposure_count']} indirect, "
+                         f"{rel['candidate_exposure_count']} candidate, "
+                         f"{rel['control_established_count']} control established")
+            for w in rel["wallets"]:
+                conf = f" ({w['exposure_confidence']})" if w["exposure_confidence"] else ""
+                lines.append(f"  - `{w['wallet']}` ({w['chain']}) — {w['relationship_type']}{conf} "
+                             f"· control: **{w['control_status']}**")
+        lines.append("")
+
     service_hits = [(w, tag) for w in results.get("wallet_exchange_paths", [])
                     for tag in w.get("service_tags", [])]
     if service_hits:
@@ -3541,6 +3559,33 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
                        f"<td class=wrap>{control_cell}</td></tr>")
         out.append("</table>")
 
+    if results.get("vasp_relationships"):
+        out.append("<h2>VASP Relationships</h2>"
+                   "<p class=dim>Case-level view: every traced wallet's own VASP "
+                   "investigation above, grouped by VASP. Shared VASP exposure is a fact "
+                   "about the VASP, never evidence that two wallets share an owner — no "
+                   "wallet-to-wallet relationship is read or inferred here.</p>"
+                   "<table><tr><th>vasp</th><th>wallets</th><th>direct</th>"
+                   "<th>indirect</th><th>candidate</th><th>control established</th></tr>")
+        for rel in results["vasp_relationships"]:
+            out.append(f"<tr><td><b>{_esc(rel['vasp'])}</b></td>"
+                       f"<td>{rel['wallet_count']}</td><td>{rel['direct_exposure_count']}</td>"
+                       f"<td>{rel['indirect_exposure_count']}</td>"
+                       f"<td>{rel['candidate_exposure_count']}</td>"
+                       f"<td>{rel['control_established_count']}</td></tr>")
+        out.append("</table>")
+        out.append("<table><tr><th>vasp</th><th>wallet</th><th>chain</th>"
+                   "<th>relationship</th><th>confidence</th><th>control/ownership</th></tr>")
+        for rel in results["vasp_relationships"]:
+            for w in rel["wallets"]:
+                out.append(f"<tr><td>{_esc(rel['vasp'])}</td>"
+                           f"<td class=mono>{_esc(w['wallet'])}</td>"
+                           f"<td>{_esc(w['chain'])}</td>"
+                           f"<td>{_esc(w['relationship_type'])}</td>"
+                           f"<td>{_esc(w['exposure_confidence']) if w['exposure_confidence'] else '—'}</td>"
+                           f"<td><b>{_esc(w['control_status'])}</b></td></tr>")
+        out.append("</table>")
+
     service_hits = [(w, tag) for w in results.get("wallet_exchange_paths", [])
                     for tag in w.get("service_tags", [])]
     if service_hits:
@@ -3763,6 +3808,14 @@ def run_correlation(store: EvidenceStore, min_conf: float = 0.35,
     # skip) -- one extra pass over a case's own wallets, not a new query class.
     results["unattributed_wallet_candidates"] = unattributed_wallet_candidates(store)
     _attach_vasp_investigation_candidates(store, results["unattributed_wallet_candidates"])
+    # Loop 50: case-level view, built entirely from the per-wallet
+    # investigate() results just attached above -- groups by VASP brand name,
+    # reads no wallet-to-wallet edge, so shared VASP exposure can never be
+    # read as common ownership. See vasp_investigation.aggregate_vasp_
+    # relationships' own docstring and docs/LOOP50.md.
+    from .vasp_investigation import aggregate_vasp_relationships
+    results["vasp_relationships"] = aggregate_vasp_relationships(
+        results["wallet_exchange_paths"], results["unattributed_wallet_candidates"])
     results["data_source_status"] = data_source_status()
     # Persisted `watch` cycles (Loop 42), newest first -- the single canonical
     # read every other surface (Investigator, GUI, Markdown/HTML) slices from,

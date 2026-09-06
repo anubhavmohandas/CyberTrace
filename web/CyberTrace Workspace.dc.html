@@ -525,6 +525,36 @@ window.__resources = {
               </div>
             </sc-if>
 
+            <sc-if value="{{ hasVaspRelationships }}" hint-placeholder-val="{{ false }}">
+              <div>
+                <div style="display:flex;align-items:baseline;gap:12px;padding-bottom:12px;border-bottom:1px solid #171c1f">
+                  <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#67716f">VASP RELATIONSHIPS</div>
+                  <div style="font-size:12px;color:#5a6367">case-level: every traced wallet's own VASP investigation, grouped by VASP — shared exposure is never a same-actor claim</div>
+                </div>
+                <sc-for list="{{ vaspRelationships }}" as="rel" hint-placeholder-count="1">
+                  <div style="border:1px solid #1c2427;border-top:none;background:#0d1012;padding:16px 22px;display:flex;flex-direction:column;gap:10px">
+                    <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap">
+                      <div style="font:500 14px/1 'IBM Plex Mono',monospace;color:#edf2f4">{{ rel.vasp }}</div>
+                      <div style="font-size:11.5px;color:#8a9296">{{ rel.walletCount }} wallet(s)</div>
+                      <div style="font-size:11.5px;color:#8a9296">{{ rel.directCount }} direct</div>
+                      <div style="font-size:11.5px;color:#8a9296">{{ rel.indirectCount }} indirect</div>
+                      <div style="font-size:11.5px;color:#8a9296">{{ rel.candidateCount }} candidate</div>
+                      <div style="font-size:11.5px;color:#8a9296">{{ rel.controlCount }} control established</div>
+                    </div>
+                    <sc-for list="{{ rel.wallets }}" as="w" hint-placeholder-count="2">
+                      <div style="display:flex;align-items:baseline;gap:10px;font-size:11.5px;color:#c5ccd0">
+                        <span style="font-family:'IBM Plex Mono',monospace">{{ w.chain }} · {{ w.value }}</span>
+                        <span style="color:#2fb4e8">{{ w.relationshipType }}</span>
+                        <span style="color:#5a6367">{{ w.confidence }}</span>
+                        <span>control: <b>{{ w.controlStatus }}</b></span>
+                      </div>
+                    </sc-for>
+                  </div>
+                </sc-for>
+                <div style="border:1px solid #1c2427;border-top:none"></div>
+              </div>
+            </sc-if>
+
             <sc-if value="{{ hasTxCrossChainLinks }}" hint-placeholder-val="{{ false }}">
               <div>
                 <div style="display:flex;align-items:baseline;gap:12px;padding-bottom:12px;border-bottom:1px solid #171c1f">
@@ -699,6 +729,32 @@ window.__resources = {
 
         <sc-if value="{{ tabSources }}" hint-placeholder-val="{{ false }}">
           <div style="display:flex;flex-direction:column;gap:26px;max-width:1040px">
+
+            <div>
+              <div style="display:flex;align-items:baseline;justify-content:space-between;padding-bottom:12px;border-bottom:1px solid #171c1f">
+                <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#67716f">PROVIDER HEALTH</div>
+                <div style="font-size:12px;color:#5a6367">live check, not just "key configured" — {{ providerHealthSummary }}</div>
+              </div>
+              <div style="display:flex;flex-direction:column">
+                <sc-for list="{{ providerHealthRows }}" as="p" hint-placeholder-count="4">
+                  <div style="border:1px solid #1c2427;border-top:none;background:#0d1012;padding:12px 16px;display:flex;justify-content:space-between;align-items:flex-start;gap:16px">
+                    <div>
+                      <div style="font:500 12.5px/1 'IBM Plex Mono',monospace;color:#d5dbde">{{ p.id }}</div>
+                      <div style="color:#67716f;font-size:11.5px;margin-top:4px">{{ p.capability }}</div>
+                      <sc-if value="{{ p.reason }}" hint-placeholder-val="{{ false }}">
+                        <div style="color:#8b6a5f;font-size:11px;margin-top:4px">{{ p.reason }}</div>
+                      </sc-if>
+                    </div>
+                    <div style="text-align:right;flex:none">
+                      <div style="font:600 11px/1 'IBM Plex Mono',monospace;letter-spacing:1px;color:{{ p.statusColor }}">{{ p.statusLabel }}</div>
+                      <div style="color:#5a6367;font-size:11px;margin-top:4px">{{ p.latency }}</div>
+                    </div>
+                  </div>
+                </sc-for>
+                <div style="border:1px solid #1c2427;border-top:none;padding:10px 16px;color:#5a6367;font-size:11px">No provider above has an automatic fallback today — each runs alone, or (Bitcoin/Ethereum) several run in parallel and their results are merged, not chained.</div>
+              </div>
+            </div>
+
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
               <sc-for list="{{ sourceGroups }}" as="g" hint-placeholder-count="2">
                 <div style="border:1px solid #1c2427;background:#0d1012;padding:16px 18px">
@@ -943,6 +999,20 @@ window.__resources = {
       <div style="font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#2fb4e8">{{ searchType }}</div>
       <div style="font-size:22px;font-weight:500;color:#edf2f4;margin-top:8px;word-break:break-all">{{ searchTarget }}</div>
 
+      <sc-if value="{{ hasDetectNetworks }}" hint-placeholder-val="{{ false }}">
+        <div style="margin-top:18px;padding:14px 16px;border:1px solid #1c2427;background:#0d1012">
+          <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#67716f">DETECTED NETWORKS — format ≠ proof of network</div>
+          <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:10px">
+            <sc-for list="{{ detectNetworks }}" as="n" hint-placeholder-count="3">
+              <div style="font:500 12px/1 'IBM Plex Mono',monospace;color:{{ n.color }}">{{ n.mark }} {{ n.chain }} <span style="color:#5a6367;font-weight:400">— {{ n.note }}</span></div>
+            </sc-for>
+          </div>
+          <sc-if value="{{ detectCaveat }}" hint-placeholder-val="{{ false }}">
+            <div style="color:#8b6a5f;font-size:11.5px;margin-top:10px">{{ detectCaveat }}</div>
+          </sc-if>
+        </div>
+      </sc-if>
+
       <sc-if value="{{ searching }}" hint-placeholder-val="{{ false }}">
         <div style="margin-top:24px;color:#879196;font-size:13px">searching {{ searchModuleName }}…</div>
       </sc-if>
@@ -1011,6 +1081,8 @@ const API_BASE = (window.__CT_API_BASE || '').replace(/\/$/, '');
 const CASES_URL = API_BASE + '/api/cases';
 const caseUrl = (id) => API_BASE + '/api/case/' + encodeURIComponent(id);
 const searchUrl = (q) => API_BASE + '/api/search?q=' + encodeURIComponent(q);
+const providersUrl = API_BASE + '/api/providers/health';
+const detectUrl = (addr) => API_BASE + '/api/detect?address=' + encodeURIComponent(addr);
 const apiFetch = (url, opts) => fetch(url, window.__CT_API_KEY
   ? { ...opts, headers: { ...(opts && opts.headers), 'X-CT-Api-Key': window.__CT_API_KEY } }
   : opts);
@@ -1286,6 +1358,26 @@ function walletTabVals(cd, openVerdict) {
   // a reader needs that distinction to stay visible, not smoothed over.
   const candidateWallets = (cd.unattributed_wallet_candidates || []).map(candidateWalletRow);
 
+  // Loop 50: case-level VASP relationship view -- every traced wallet's own
+  // vasp_investigation above, grouped by VASP (cd.vasp_relationships is
+  // correlate.run_correlation's own aggregate_vasp_relationships() output,
+  // unchanged). No wallet-to-wallet identity is computed here or upstream:
+  // shared VASP exposure across wallets is shown as a shared row, never a
+  // same-actor claim.
+  const vaspRelationships = (cd.vasp_relationships || []).map(rel => ({
+    vasp: rel.vasp,
+    walletCount: rel.wallet_count,
+    directCount: rel.direct_exposure_count,
+    indirectCount: rel.indirect_exposure_count,
+    candidateCount: rel.candidate_exposure_count,
+    controlCount: rel.control_established_count,
+    wallets: rel.wallets.map(w => ({
+      value: short(w.wallet, 26), chain: (w.chain || '').replace('_ADDRESS', ''),
+      relationshipType: w.relationship_type, confidence: w.exposure_confidence || '',
+      controlStatus: w.control_status,
+    })),
+  }));
+
   return {
     wallets,
     hasWallets: wallets.length > 0,
@@ -1299,6 +1391,8 @@ function walletTabVals(cd, openVerdict) {
     hasStaleDataSource: dataSources.some(d => !d.isFresh),
     crossChainLinks,
     hasCrossChainLinks: crossChainLinks.length > 0,
+    vaspRelationships,
+    hasVaspRelationships: vaspRelationships.length > 0,
     txCrossChainLinks,
     hasTxCrossChainLinks: txCrossChainLinks.length > 0,
     watchHistory,
@@ -1313,7 +1407,9 @@ class Component extends DCLogic {
     evFilter: 'All', scoreOpen: {}, verdict: null, verdictNote: '', outcome: null,
     snapshot: null, snapshotBody: '',
     caseData: null, loadError: null, cases: [],
-    searchResult: null, searching: false, searchError: null, searchOpen: {}
+    searchResult: null, searching: false, searchError: null, searchOpen: {},
+    detectResult: null,
+    providerHealth: [], providerHealthError: null
   };
 
   componentDidMount() {
@@ -1327,6 +1423,18 @@ class Component extends DCLogic {
         else this.setState({ loadError: 'no cases in cases/ yet' });
       })
       .catch(err => this.setState({ loadError: String(err) }));
+    this.loadProviderHealth();
+  }
+
+  loadProviderHealth() {
+    // "A key is configured" and "the API just answered" are different facts
+    // (see cybertrace/provider_health.py) -- this is the live one, cached a
+    // few minutes server-side so opening the workspace repeatedly doesn't
+    // spend quota against a rate-limited free-tier key.
+    apiFetch(providersUrl)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+      .then(providerHealth => this.setState({ providerHealth, providerHealthError: null }))
+      .catch(err => this.setState({ providerHealthError: String(err) }));
   }
 
   loadCase(id) {
@@ -1342,13 +1450,23 @@ class Component extends DCLogic {
   runSearch() {
     const q = (this.state.query || '').trim();
     if (!q) return;
-    this.setState({ view: 'search', searching: true, searchError: null, searchResult: null, searchOpen: {} });
+    this.setState({ view: 'search', searching: true, searchError: null, searchResult: null,
+                    searchOpen: {}, detectResult: null });
     apiFetch(searchUrl(q))
       .then(r => r.json().then(body => ({ ok: r.ok, body })))
       .then(({ ok, body }) => this.setState(ok
         ? { searchResult: body, searching: false }
         : { searchError: body.error || 'search failed', searching: false }))
       .catch(err => this.setState({ searchError: String(err), searching: false }));
+    // Independent of the search above: format detection (and, for an
+    // ambiguous 0x address, a live EVM-network activity probe) is its own
+    // fast check, not part of the multi-source investigation -- see
+    // cybertrace/detector.py + BitcoinModule.probe_evm_networks. Fails
+    // silently on error since the search result above is the primary output.
+    apiFetch(detectUrl(q))
+      .then(r => r.ok ? r.json() : null)
+      .then(detectResult => { if (detectResult) this.setState({ detectResult }); })
+      .catch(() => {});
   }
 
   set(p) { this.setState(p); }
@@ -1492,6 +1610,18 @@ class Component extends DCLogic {
       searchRelated: (st.searchResult && st.searchResult.related) || [],
       hasSearchRelated: !!(st.searchResult && st.searchResult.related && st.searchResult.related.length),
 
+      // Format alone never proves which EVM network a 0x address is really
+      // on (see detector.chain_caveat) -- this is the live per-network
+      // activity probe's result, kept separate from the caveat text itself.
+      hasDetectNetworks: !!(st.detectResult && st.detectResult.networks),
+      detectNetworks: Object.entries((st.detectResult && st.detectResult.networks) || {}).map(([chain, info]) => ({
+        chain,
+        mark: !info.checked ? '?' : info.active ? '✓' : '–',
+        color: !info.checked ? C.mute : info.active ? C.green : '#4c565a',
+        note: !info.checked ? (info.error || 'could not check') : info.active ? 'activity found' : 'no activity found',
+      })),
+      detectCaveat: (st.detectResult && st.detectResult.caveat) || '',
+
       caseHeaderId: cd.case_id || '—',
       caseTitle: cd.title || 'Untitled case',
       caseStatus: cd.status || 'OPEN',
@@ -1519,9 +1649,24 @@ class Component extends DCLogic {
         };
       }),
 
-      sourceHealth: [
-        { name:'Tor', state: st.loadError ? 'ERR' : 'UP', color: st.loadError ? C.red : C.green }
-      ],
+      // Real live-provider health (cybertrace/provider_health.py), not the
+      // single hardcoded "Tor" placeholder this used to be -- grouped to a
+      // count-per-status summary here since the sidebar has no room for all
+      // ~15 rows; the full per-provider breakdown is in the Sources tab.
+      sourceHealth: (() => {
+        const list = st.providerHealth || [];
+        if (!list.length) {
+          return [{ name: st.providerHealthError ? 'providers' : 'loading…',
+                    state: st.providerHealthError ? 'ERR' : '···',
+                    color: st.providerHealthError ? C.red : C.mute }];
+        }
+        const counts = {};
+        list.forEach(p => { counts[p.status] = (counts[p.status] || 0) + 1; });
+        const order = [['LIVE', 'Live', C.green], ['DEGRADED', 'Degraded', C.sand],
+                       ['DOWN', 'Down', C.red], ['NOT_CONFIGURED', 'Not configured', C.mute]];
+        return order.filter(([key]) => counts[key]).map(([key, name, color]) =>
+          ({ name, state: String(counts[key]), color }));
+      })(),
 
       changes: st.loadError
         ? [{ text:'case data failed to load: ' + st.loadError, color:C.red }]
@@ -1574,6 +1719,23 @@ class Component extends DCLogic {
       sourceGroups: [
         { name:'TOR', meta:`${cd.markets.length} targets · ${cd.captures.length} snapshots`, note:'Bounded same-host crawls through a local SOCKS proxy. Nothing leaves the evidence machine.' }
       ],
+
+      // "Configured" (a key exists) and "live" (the API actually answered)
+      // are different facts -- see cybertrace/provider_health.py. No row
+      // here has an automatic fallback: Bitcoin/Ethereum run several
+      // sources in parallel and merge results, everything else has exactly
+      // one live provider, so a "fallback" column would be empty on every
+      // row and is left out rather than shown as a wall of dashes.
+      providerHealthSummary: (st.providerHealth || []).length
+        ? `${(st.providerHealth || []).filter(p => p.status === 'LIVE').length}/${st.providerHealth.length} live`
+        : (st.providerHealthError || 'loading…'),
+      providerHealthRows: (st.providerHealth || []).map(p => ({
+        id: p.provider, capability: p.capability, reason: p.reason || '',
+        statusLabel: p.status,
+        statusColor: p.status === 'LIVE' ? C.green : p.status === 'DEGRADED' ? C.sand
+                    : p.status === 'DOWN' ? C.red : C.mute,
+        latency: p.latency_ms != null ? `${Math.round(p.latency_ms)}ms` : '—',
+      })),
       captures: cd.captures.map(c => ({
         source:c.source, reliability:c.reliability, relColor:c.rel, sha:c.sha, at:c.at,
         status:c.status, statusColor:c.sc,

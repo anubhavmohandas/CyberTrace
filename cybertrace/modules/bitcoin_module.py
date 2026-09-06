@@ -869,6 +869,32 @@ class BitcoinModule(BaseModule):
         return SourceResult(source=source, success=True,
                             data=self._parse_evm_txs(txs, address, token=True))
 
+    async def probe_evm_networks(self, address: str) -> Dict[str, dict]:
+        """Which EVM networks this 0x address actually has activity on.
+
+        Shape alone cannot say Ethereum vs BNB Chain vs Polygon (see
+        detector.chain_caveat) -- this probes all three CyberTrace has a
+        collector for and reports which show real transaction history, so a
+        caller can tell "wrong format" from "right format, wrong chain" from
+        "confirmed active here" instead of assuming Ethereum mainnet by
+        default. Cheap and bounded: reuses each chain's own single-page
+        transaction check, does not paginate deeper.
+        """
+        checks = {
+            'ethereum': self._check_etherscan_transactions(address),
+            'bnb': self._check_evm_transactions(address, 'bnb'),
+            'polygon': self._check_evm_transactions(address, 'polygon'),
+        }
+        results = await asyncio.gather(*checks.values())
+        return {
+            chain: {
+                'checked': res.success,
+                'active': bool(res.success and res.data.get('tx_count')),
+                'error': res.error,
+            }
+            for chain, res in zip(checks.keys(), results)
+        }
+
     def _build_summary(self, result: ModuleResult) -> Dict[str, Any]:
         """Build summary from all source results."""
         summary = {

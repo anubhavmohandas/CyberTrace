@@ -56,7 +56,7 @@ exact `hit` (one `wallet_exchange_paths` row) and `candidate`
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 # Re-exported rather than re-declared: this module's whole point is that it
 # never invents a competing vocabulary for what correlate.py/attribution.py
@@ -505,6 +505,108 @@ def investigate(store, wallet_address: str, chain: Optional[str],
     }
 
 
+# --- Loop 50: case-level VASP relationship aggregation ---------------------
+# Groups the wallet-level investigate() result already attached to every
+# wallet_exchange_paths()/unattributed_wallet_candidates() row (Loop 49, see
+# correlate._attach_vasp_investigation*) by VASP brand name. Not a new
+# attribution algorithm: no new query, no new graph traversal, no wallet-to-
+# wallet correlation. Shared VASP exposure is a fact about a VASP, never
+# evidence that two wallets share an owner -- see docs/LOOP50.md.
+
+RELATIONSHIP_POLICY_VERSION = "vasp-relationships-v1"
+
+DIRECT_EXPOSURE = "DIRECT_EXPOSURE"
+INDIRECT_EXPOSURE = "INDIRECT_EXPOSURE"
+CANDIDATE_EXPOSURE = "CANDIDATE_EXPOSURE"
+
+
+def _relationship_type(proximity: Optional[str]) -> str:
+    if proximity in (AT_VASP, DIRECT):
+        return DIRECT_EXPOSURE
+    if proximity == INDIRECT:
+        return INDIRECT_EXPOSURE
+    return CANDIDATE_EXPOSURE  # no graph hop at all -- attribution.py's own fingerprint signal
+
+
+def _wallet_vasp_relationships(vi: Optional[dict]) -> List[dict]:
+    """One record per (wallet, VASP-brand) pair already named in an
+    investigate() result -- pure reshaping of vi['evidence']/primary_vasp/
+    candidate_vasps, no new query, no new evidence.
+
+    Control can only ever attach to the primary brand (index 0):
+    candidate_vasps are, by construction, secondary contacts -- a peer of the
+    suspect wallet, never its own address (see classify()'s own comment on
+    direct_vasp_contacts/secondary_vasp_contacts) -- so they can never be an
+    AT_VASP self-attribution and can never establish control.
+    """
+    if not vi or not vi.get("primary_vasp"):
+        return []
+    proximity_by_brand: Dict[str, Optional[str]] = {}
+    evidence_by_brand: Dict[str, List[dict]] = {}
+    for item in vi.get("evidence", []):
+        brand = item["brand"]
+        evidence_by_brand.setdefault(brand, []).append(item)
+        proximity_by_brand.setdefault(brand, item.get("proximity"))
+
+    brands = [vi["primary_vasp"], *vi.get("candidate_vasps", [])]
+    out = []
+    for i, brand in enumerate(brands):
+        brand_evidence = evidence_by_brand.get(brand, [])
+        out.append({
+            "vasp": brand,
+            "relationship_type": _relationship_type(proximity_by_brand.get(brand)),
+            "exposure_confidence": vi.get("confidence"),
+            "proximity": proximity_by_brand.get(brand),
+            "hops": brand_evidence[0].get("hops") if brand_evidence else None,
+            "attribution_tier": brand_evidence[0].get("attribution_tier") if brand_evidence else None,
+            "control_status": vi["control_status"] if i == 0 else NOT_ESTABLISHED,
+            "control_confidence": vi.get("control_confidence") if i == 0 else None,
+            "regulatory_context": vi.get("regulatory_context"),
+            "evidence": brand_evidence,
+            "provenance": vi.get("provenance"),
+        })
+    return out
+
+
+def aggregate_vasp_relationships(wallet_paths: List[dict],
+                                 candidate_wallets: List[dict]) -> List[dict]:
+    """Loop 50: the case-level VASP relationship view.
+
+    Groups every traced wallet's own investigate() result (already attached
+    by correlate._attach_vasp_investigation / _attach_vasp_investigation_
+    candidates) by VASP brand name. Reads no wallet-to-wallet edge and no
+    clustering/correlation signal, so it structurally cannot turn "wallet A
+    and wallet B both reached Binance" into "A and B are the same actor" --
+    the output is keyed by (VASP, wallet) pairs, never by a merged identity.
+
+    Per-wallet detail (relationship type, exposure confidence, control,
+    regulatory context, evidence) is preserved in full inside each VASP's
+    `wallets` list -- never collapsed into a single score.
+    """
+    by_vasp: Dict[str, list] = {}
+    for w in list(wallet_paths) + list(candidate_wallets):
+        for rel in _wallet_vasp_relationships(w.get("vasp_investigation")):
+            by_vasp.setdefault(rel["vasp"], []).append({
+                "wallet": w["value"], "chain": w["chain"], "entity_id": w["entity_id"],
+                **{k: v for k, v in rel.items() if k != "vasp"},
+            })
+
+    relationships = []
+    for vasp in sorted(by_vasp):
+        wallets = by_vasp[vasp]
+        relationships.append({
+            "policy_version": RELATIONSHIP_POLICY_VERSION,
+            "vasp": vasp,
+            "wallet_count": len(wallets),
+            "direct_exposure_count": sum(1 for w in wallets if w["relationship_type"] == DIRECT_EXPOSURE),
+            "indirect_exposure_count": sum(1 for w in wallets if w["relationship_type"] == INDIRECT_EXPOSURE),
+            "candidate_exposure_count": sum(1 for w in wallets if w["relationship_type"] == CANDIDATE_EXPOSURE),
+            "control_established_count": sum(1 for w in wallets if w["control_status"] == ESTABLISHED),
+            "wallets": wallets,
+        })
+    return relationships
+
+
 def demo() -> None:
     """Runnable self-check -- Occam's mandatory smallest-thing-that-fails
     check for a branch-heavy classification function. Not the full
@@ -577,6 +679,28 @@ def demo() -> None:
                              "attribution_source": "analyst B", "evidence_ids": []}]})
     assert vi["status"] == AMBIGUOUS_NEEDS_REVIEW
     assert set([vi["primary_vasp"]] + vi["candidate_vasps"]) == {"Binance", "Kraken"}
+
+    # Loop 50: two unrelated wallets both reaching Binance never becomes one
+    # merged wallet-to-wallet claim, and direct/indirect stay distinguishable.
+    vi_a = investigate(None, "1DirectA...", "BTC_ADDRESS", hit={
+        "exchange": "Binance", "attribution": TAG_ATTESTED, "attribution_source": "tag",
+        "proximity": DIRECT, "hops": 1, "direct_vasp_contacts": [],
+        "secondary_vasp_contacts": [], "also_attributed": []})
+    vi_b = investigate(None, "1IndirectB...", "BTC_ADDRESS", hit={
+        "exchange": "Binance", "attribution": TAG_ATTESTED, "attribution_source": "tag",
+        "proximity": INDIRECT, "hops": 2, "direct_vasp_contacts": [],
+        "secondary_vasp_contacts": [], "also_attributed": []})
+    a_row = {"value": "1DirectA...", "chain": "BTC_ADDRESS", "entity_id": "a", "vasp_investigation": vi_a}
+    b_row = {"value": "1IndirectB...", "chain": "BTC_ADDRESS", "entity_id": "b", "vasp_investigation": vi_b}
+    rels = aggregate_vasp_relationships([a_row, b_row], [])
+    assert len(rels) == 1 and rels[0]["vasp"] == "Binance"
+    assert rels[0]["wallet_count"] == 2
+    assert rels[0]["direct_exposure_count"] == 1 and rels[0]["indirect_exposure_count"] == 1
+    assert rels[0]["control_established_count"] == 0
+    wallet_ids = {w["entity_id"] for w in rels[0]["wallets"]}
+    assert wallet_ids == {"a", "b"}, "shared VASP exposure must list distinct wallets, never merge them"
+    assert not any("same_actor" in w or "common_owner" in w for w in rels[0]["wallets"])
+    assert aggregate_vasp_relationships([], []) == []
 
     print("vasp_investigation.demo(): all assertions passed")
 
