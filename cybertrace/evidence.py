@@ -226,6 +226,44 @@ CREATE TABLE IF NOT EXISTS cross_chain_tx_links (
   recorded_at    TEXT NOT NULL
 );
 
+-- Loop 53: one row per (transaction, counterparty-edge, direction) actually
+-- fetched from a chain module's provider -- the raw per-transaction data
+-- every chain module (bitcoin_module.py, tron_module.py, solana_module.py)
+-- already pulls down to compute its counterparty/first_seen/last_seen
+-- aggregates, but previously discarded once those aggregates were built (see
+-- evidence.enrich_bitcoin's docstring and docs/LOOP53.md). No new provider
+-- call: this captures data already fetched under the SAME pagination/depth
+-- caps _TX_SHALLOW_PAGES/_TX_DEEP_PAGES/_DEEP_LIMIT/etc. already enforce.
+--
+-- `value`/`timestamp`/`block`/`fee` are nullable and stay NULL rather than 0
+-- when a chain/source genuinely does not supply them (e.g. a TRC20 transfer
+-- whose amount this codebase does not yet decode) -- see typology.py's own
+-- "never fabricate" discipline, same as every other module here.
+--
+-- Deduplicated on (chain, tx_hash, address, direction, counterparty) so
+-- re-searching the same wallet never grows duplicate rows, and a UTXO tx
+-- touching this address on both sides (rare) can still carry one IN row and
+-- one OUT row without colliding.
+CREATE TABLE IF NOT EXISTS transactions (
+  tx_id        TEXT PRIMARY KEY,
+  chain        TEXT NOT NULL,
+  tx_hash      TEXT NOT NULL,
+  entity_id    TEXT REFERENCES entities(entity_id),
+  address      TEXT NOT NULL,
+  counterparty TEXT,
+  direction    TEXT NOT NULL,     -- IN | OUT
+  asset        TEXT,
+  value        REAL,              -- native units (BTC/ETH/TRX/SOL...), NULL if unknown
+  timestamp    TEXT,               -- ISO8601, NULL if the source didn't supply one
+  block        TEXT,
+  fee          REAL,
+  source       TEXT NOT NULL,     -- collector, e.g. 'bitcoin', 'tron'
+  provider     TEXT NOT NULL,     -- the specific API, e.g. 'blockchain.com', 'trongrid'
+  status       TEXT NOT NULL DEFAULT 'FOUND',  -- FOUND | PARTIAL
+  recorded_at  TEXT NOT NULL,
+  UNIQUE (chain, tx_hash, address, direction, counterparty)
+);
+
 CREATE INDEX IF NOT EXISTS idx_snap_target ON snapshots(target_id);
 CREATE INDEX IF NOT EXISTS idx_ent_type    ON entities(etype);
 CREATE INDEX IF NOT EXISTS idx_obs_snap    ON observations(snapshot_id);
@@ -238,6 +276,9 @@ CREATE INDEX IF NOT EXISTS idx_wallet_feedback_entity ON wallet_feedback(entity_
 CREATE INDEX IF NOT EXISTS idx_watch_runs_checked_at ON watch_runs(checked_at);
 CREATE INDEX IF NOT EXISTS idx_cross_chain_tx_source ON cross_chain_tx_links(source_address);
 CREATE INDEX IF NOT EXISTS idx_cross_chain_tx_dest ON cross_chain_tx_links(dest_address);
+CREATE INDEX IF NOT EXISTS idx_transactions_entity ON transactions(entity_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_address ON transactions(address);
+CREATE INDEX IF NOT EXISTS idx_transactions_timestamp ON transactions(timestamp);
 """
 
 ENTITY_TYPES = {
@@ -1119,6 +1160,54 @@ class EvidenceStore:
         return [dict(r) for r in self._all(
             "SELECT * FROM cross_chain_tx_links ORDER BY recorded_at")]
 
+    def record_transactions(self, entity_id: str, address: str, chain: str,
+                            source: str, rows: List[dict]) -> int:
+        """Persist real per-transaction rows already fetched by a chain
+        module (see the `transactions` table's own schema comment) -- never a
+        new provider call. `rows` are the module's own dicts with whatever
+        subset of {tx_hash, counterparty, direction, asset, value, timestamp,
+        block, fee, provider, status} it could actually populate; a missing
+        field stays NULL, never a fabricated 0/''.
+
+        Refused on a closed/archived case like every other new-evidence
+        write. Deduplicated on the table's own UNIQUE constraint, seeded on
+        the same tuple, so re-searching the same wallet never grows
+        duplicates. Returns how many rows were newly inserted (0 on a
+        wallet with no rows, a real result, not an error).
+        """
+        self._require_open()
+        if not rows:
+            return 0
+        now = utcnow()
+        inserted = 0
+        for row in rows:
+            tx_hash = row.get("tx_hash")
+            direction = row.get("direction")
+            counterparty = row.get("counterparty")
+            if not tx_hash or direction not in ("IN", "OUT"):
+                continue
+            tid = self._id("tx", f"{chain}:{tx_hash}:{address}:{direction}:{counterparty or ''}")
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO transactions (tx_id, chain, tx_hash, entity_id, "
+                "address, counterparty, direction, asset, value, timestamp, block, fee, "
+                "source, provider, status, recorded_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (tid, chain, tx_hash, entity_id, address, counterparty, direction,
+                 row.get("asset"), row.get("value"), row.get("timestamp"), row.get("block"),
+                 row.get("fee"), source, row.get("provider") or source,
+                 row.get("status") or "FOUND", now))
+            inserted += cur.rowcount
+        self.conn.commit()
+        return inserted
+
+    def transactions_for(self, entity_id: str, limit: int = 2000) -> List[dict]:
+        """Every persisted real transaction row for this wallet entity,
+        oldest first -- NULL `timestamp` rows sort first (SQLite: NULL <
+        any string), so a caller ordering a timeline must itself filter
+        those out rather than assume this list is fully time-ordered."""
+        return [dict(r) for r in self._all(
+            "SELECT * FROM transactions WHERE entity_id=? ORDER BY timestamp LIMIT ?",
+            (entity_id, limit))]
+
     def findings(self, ftype: Optional[str] = None) -> List[sqlite3.Row]:
         if ftype:
             return self._all("SELECT * FROM findings WHERE ftype=? ORDER BY confidence DESC",
@@ -1803,6 +1892,18 @@ def enrich_bitcoin(store: EvidenceStore, snapshot_id: str, addr_id: str, summary
             rel = store.upsert_relationship(payer, payee, "SENT_FUNDS_TO",
                                             source_label=collector, observed_at=observed_at)
             store.add_evidence(rel, [obs], note=note)
+
+    # Loop 53: the real per-transaction rows the module already fetched to
+    # build the aggregates above (tx_count/first_seen/counterparty sets) --
+    # see the `transactions` table's own schema comment. Additive only, no
+    # new provider call, no change to any relationship/metadata write above.
+    # Absent for a store's pre-Loop-53 wallets (searched before this shipped)
+    # -- crypto_investigation.normalize_transactions reports those as
+    # NOT_CHECKED, never a fabricated empty-means-none.
+    raw_txs = summary.get("raw_transactions") or []
+    if raw_txs:
+        store.record_transactions(addr_id, summary.get("address") or "", etype,
+                                  collector, raw_txs)
 
 
 # Provenance pseudo-target for facts an analyst asserts directly (as opposed to

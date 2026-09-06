@@ -996,6 +996,95 @@ def trace_wallet_batch_cmd(input_file: str, db_path: str, max_hops: int,
               f"{summary['failed']} failed")
 
 
+@cli.group('crypto')
+def crypto_group():
+    """Crypto investigation workflow commands (Loop 53) -- the canonical,
+    composed result. Wraps trace-wallet/trace-cross-chain/typology/graph/
+    LEA-action logic already built rather than duplicating any of it; use
+    trace-wallet/trace-cross-chain directly for their own narrower output."""
+
+
+@crypto_group.command('investigate')
+@click.argument('address')
+@click.option('--db', 'db_path', required=True, type=click.Path(exists=True, dir_okay=False),
+              help='Evidence store to trace through')
+@click.option('--max-hops', default=4, show_default=True,
+              help='Furthest layering depth to search for a labeled exchange')
+@click.option('--max-transactions', default=500, show_default=True,
+              help='Bound on per-transaction rows read from the transactions table')
+@click.option('--chain', default=None, type=click.Choice(_WALLET_CHAINS),
+              help='Chain ADDRESS was searched on. Required to trace a bnb/polygon '
+                   'wallet -- a 0x address otherwise looks up ethereum only.')
+@click.option('--output', '-o', 'output_format', default='table',
+              type=click.Choice(['table', 'json']), help='Output format')
+def crypto_investigate_cmd(address: str, db_path: str, max_hops: int, max_transactions: int,
+                           chain: Optional[str], output_format: str):
+    """
+    The canonical Loop 53 crypto investigation for a wallet already searched
+    into this case: fund-flow path, investigation graph, VASP exposure/
+    control, behavioral typology signals, cross-chain events (confirmed vs
+    candidate), explainable risk, a chronological timeline, and LEA
+    recommendations -- in one composed result.
+
+    \b
+      cybertrace crypto investigate bc1q... --db case.db
+      cybertrace crypto investigate bc1q... --db case.db --json
+    """
+    from .crypto_investigation import investigate_wallet
+    from .evidence import EvidenceStore
+
+    with EvidenceStore(db_path) as store:
+        result = investigate_wallet(store, address, chain=chain, max_hops=max_hops,
+                                    max_transactions=max_transactions)
+
+    if result is None:
+        click.echo(f"[!] {address!r} was never searched into this case", err=True)
+        sys.exit(1)
+
+    if output_format == 'json':
+        import json as _json
+        click.echo(_json.dumps(result, indent=2))
+        return
+
+    click.echo(f"Wallet: {result['address']} ({result['chain']})")
+    click.echo(f"Transactions: {len(result['transactions'])} recorded "
+              f"({result['transaction_status']})")
+    vi = result['vasp_investigation'] or {}
+    if vi.get('primary_vasp'):
+        click.echo(f"VASP exposure: {vi['primary_vasp']} ({vi.get('attribution_tier')}, "
+                  f"control {vi.get('control_status')})")
+    else:
+        click.echo("VASP exposure: none found")
+    click.echo(f"Graph: {result['graph_summary']['node_count']} node(s), "
+              f"{result['graph_summary']['edge_count']} edge(s)")
+    signals = [s for s in result['typology_signals'] if s['status'] == 'DETECTED']
+    if signals:
+        click.echo("Behavioral signals:")
+        for s in signals:
+            click.echo(f"  - {s['signal']} ({s['severity']}, confidence {s['confidence']}): "
+                      f"{s['explanation']}")
+    else:
+        click.echo("Behavioral signals: none detected")
+    if result['cross_chain_events']:
+        click.echo("Cross-chain events:")
+        for ev in result['cross_chain_events']:
+            click.echo(f"  - {ev['event_type']}: {ev['source_chain']} -> "
+                      f"{ev.get('dest_chain') or 'unknown'} via {ev['source_api']}")
+    risk = result['risk']
+    if risk['risk_score'] is None:
+        click.echo(f"Risk: {risk['risk_level']} ({risk['risk_policy_version']})")
+    else:
+        click.echo(f"Risk: {risk['risk_level']} — score {risk['risk_score']} "
+                  f"({risk['risk_policy_version']}), categories: "
+                  f"{', '.join(risk['risk_categories'])}")
+    if result['recommended_actions']:
+        click.echo("LEA recommendations:")
+        for a in result['recommended_actions']:
+            click.echo(f"  - [{a['confidence']}] {a['action']}: {a['reason']}")
+    else:
+        click.echo("LEA recommendations: none")
+
+
 @cli.command('case')
 @click.option('--db', 'db_path', required=True, type=click.Path(dir_okay=False),
               help='Evidence store to show or update')

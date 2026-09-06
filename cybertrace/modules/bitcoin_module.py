@@ -227,6 +227,16 @@ class BitcoinModule(BaseModule):
             # set stays TRANSACTED_WITH, these become SENT_FUNDS_TO.
             cospend, counterparty = set(), set()
             sent_to, received_from = set(), set()
+            # Loop 53: real per-(tx, counterparty) rows from the SAME loop,
+            # SAME already-fetched `txs` -- no new fetch. OUT rows carry an
+            # exact value (each output IS a distinct, well-defined transfer);
+            # an IN row's value stays None when >1 external input shares the
+            # same tx, since UTXO gives no honest way to split "how much of
+            # what I received came from which signer" -- see the module
+            # docstring's occam note on the change-address heuristic this
+            # codebase deliberately does not build. Direction/hash/timestamp
+            # are never ambiguous either way.
+            raw_transactions: List[dict] = []
             for tx in txs:
                 inputs = {inp.get('prev_out', {}).get('addr') for inp in tx.get('inputs', [])}
                 inputs.discard(None)
@@ -237,10 +247,42 @@ class BitcoinModule(BaseModule):
                 else:
                     counterparty |= inputs - {address}
                 counterparty |= outs
+                tx_hash = tx.get('hash')
+                ts = tx.get('time')
+                iso_ts = (datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+                          if ts else None)
+                block = tx.get('block_height')
+                fee = tx.get('fee')
+                fee_btc = fee / 100_000_000 if fee is not None else None
                 if address in inputs:
                     sent_to |= outs
+                    if tx_hash:
+                        for out in tx.get('out', []):
+                            peer = out.get('addr')
+                            if not peer or peer == address:
+                                continue
+                            raw_transactions.append({
+                                'tx_hash': tx_hash, 'direction': 'OUT', 'counterparty': peer,
+                                'asset': 'BTC', 'value': (out.get('value') or 0) / 100_000_000,
+                                'timestamp': iso_ts, 'block': str(block) if block else None,
+                                'fee': fee_btc, 'provider': 'blockchain.com', 'status': 'FOUND',
+                            })
                 else:
                     received_from |= inputs - {address}
+                    if tx_hash:
+                        external_inputs = inputs - {address}
+                        my_received = sum(o.get('value') or 0 for o in tx.get('out', [])
+                                          if o.get('addr') == address)
+                        single_sender = len(external_inputs) == 1
+                        for peer in external_inputs:
+                            raw_transactions.append({
+                                'tx_hash': tx_hash, 'direction': 'IN', 'counterparty': peer,
+                                'asset': 'BTC',
+                                'value': (my_received / 100_000_000) if single_sender else None,
+                                'timestamp': iso_ts, 'block': str(block) if block else None,
+                                'fee': fee_btc, 'provider': 'blockchain.com',
+                                'status': 'FOUND' if single_sender else 'PARTIAL',
+                            })
             # No [:20] here. Transaction DEPTH is already the bound (the
             # paginated fetch above, hard-capped at _TX_SHALLOW_PAGES/
             # _TX_DEEP_PAGES); slicing the address sets on top of that was a
@@ -255,6 +297,7 @@ class BitcoinModule(BaseModule):
             parsed['sent_to_addresses'] = sorted(sent_to - cospend)
             parsed['received_from_addresses'] = sorted(received_from - cospend)
             parsed['connected_addresses'] = sorted(cospend | counterparty)
+            parsed['raw_transactions'] = raw_transactions
 
         # How far this call actually looked -- makes the sampling window an
         # observable fact instead of a silent implementation detail. Distinct
@@ -771,7 +814,10 @@ class BitcoinModule(BaseModule):
             return None, str(result) if result else 'No data returned'
         return result, None
 
-    def _parse_evm_txs(self, txs: List[dict], address: str, token: bool) -> Dict[str, Any]:
+    _NATIVE_ASSET = {'ethereum': 'ETH', 'bnb': 'BNB', 'polygon': 'MATIC'}
+
+    def _parse_evm_txs(self, txs: List[dict], address: str, token: bool,
+                       chain: str = 'ethereum') -> Dict[str, Any]:
         """Shared from/to/timestamp/direction parsing behind
         _check_etherscan_transactions, _check_etherscan_token_transfers, and
         _check_evm_transactions/_check_evm_token_transfers -- account-based
@@ -783,8 +829,13 @@ class BitcoinModule(BaseModule):
         symbols: set = set()
         me = address.lower()
         first_seen = last_seen = None
+        # Loop 53: real per-tx rows, same loop, no new fetch. Unlike Bitcoin's
+        # UTXO ambiguity, account-based from/to/value is always exact -- one
+        # row per tx, direction unambiguous, value never split/approximated.
+        raw_transactions: List[dict] = []
         for tx in txs:
             ts = tx.get('timeStamp')
+            iso = None
             if ts:
                 iso = datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
                 first_seen = iso if first_seen is None else min(first_seen, iso)
@@ -801,6 +852,37 @@ class BitcoinModule(BaseModule):
                 if peer and peer.lower() != me:
                     counterparties.add(peer.lower())
 
+            tx_hash = tx.get('hash')
+            raw_value = tx.get('value')
+            value = None
+            if raw_value is not None:
+                try:
+                    decimals = int(tx.get('tokenDecimal', 18)) if token else 18
+                    value = int(raw_value) / (10 ** decimals)
+                except (TypeError, ValueError):
+                    value = None
+            asset = tx.get('tokenSymbol') if token else self._NATIVE_ASSET.get(chain, 'ETH')
+            fee = None
+            if not token and tx.get('gasUsed') and tx.get('gasPrice'):
+                try:
+                    fee = int(tx['gasUsed']) * int(tx['gasPrice']) / 1e18
+                except (TypeError, ValueError):
+                    fee = None
+            if tx_hash and frm == me and to and to != me:
+                raw_transactions.append({
+                    'tx_hash': tx_hash, 'direction': 'OUT', 'counterparty': to,
+                    'asset': asset, 'value': value, 'timestamp': iso,
+                    'block': tx.get('blockNumber'), 'fee': fee,
+                    'provider': 'etherscan', 'status': 'FOUND',
+                })
+            elif tx_hash and to == me and frm and frm != me:
+                raw_transactions.append({
+                    'tx_hash': tx_hash, 'direction': 'IN', 'counterparty': frm,
+                    'asset': asset, 'value': value, 'timestamp': iso,
+                    'block': tx.get('blockNumber'), 'fee': fee,
+                    'provider': 'etherscan', 'status': 'FOUND',
+                })
+
         peers = sorted(counterparties)[:20]
         out = {
             'first_seen': first_seen, 'last_seen': last_seen,
@@ -808,6 +890,7 @@ class BitcoinModule(BaseModule):
             'sent_to_addresses': sorted(sent_to)[:20],
             'received_from_addresses': sorted(received_from)[:20],
             'connected_addresses': peers,
+            'raw_transactions': raw_transactions,
         }
         if token:
             out['token_tx_count'] = len(txs)
@@ -857,7 +940,7 @@ class BitcoinModule(BaseModule):
         if txs is None:
             return SourceResult(source=source, success=False, error=error)
         return SourceResult(source=source, success=True,
-                            data=self._parse_evm_txs(txs, address, token=False))
+                            data=self._parse_evm_txs(txs, address, token=False, chain=chain))
 
     async def _check_evm_token_transfers(self, address: str, chain: str) -> SourceResult:
         """ERC-20/BEP-20 counterpart of _check_etherscan_token_transfers, for
@@ -867,7 +950,7 @@ class BitcoinModule(BaseModule):
         if txs is None:
             return SourceResult(source=source, success=False, error=error)
         return SourceResult(source=source, success=True,
-                            data=self._parse_evm_txs(txs, address, token=True))
+                            data=self._parse_evm_txs(txs, address, token=True, chain=chain))
 
     async def probe_evm_networks(self, address: str) -> Dict[str, dict]:
         """Which EVM networks this 0x address actually has activity on.
@@ -946,6 +1029,10 @@ class BitcoinModule(BaseModule):
             # _check_etherscan_token_transfers.
             'token_tx_count': None,
             'token_symbols': [],
+            # Loop 53: real per-transaction rows (see the `transactions`
+            # table / evidence.enrich_bitcoin) -- accumulated across every
+            # source that reports them, same as the address sets below.
+            'raw_transactions': [],
         }
 
         # These four accumulate across every source that reports them rather
@@ -1051,6 +1138,8 @@ class BitcoinModule(BaseModule):
             if source.endswith('_token_transfers') and data.get('token_tx_count') is not None:
                 summary['token_tx_count'] = data['token_tx_count']
                 summary['token_symbols'] = data.get('token_symbols') or []
+            if data.get('raw_transactions'):
+                summary['raw_transactions'].extend(data['raw_transactions'])
 
         if connected:
             summary['connected_addresses'] = sorted(connected)

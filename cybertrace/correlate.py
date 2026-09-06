@@ -1287,6 +1287,71 @@ def _attach_vasp_investigation_candidates(store: EvidenceStore, candidate_wallet
         w["vasp_investigation"] = investigate(store, w["value"], w["chain"], candidate=w)
 
 
+def _bare_wallet_rows(store: EvidenceStore, covered_entity_ids: set) -> List[dict]:
+    """Every searched wallet entity NOT already in wallet_exchange_paths or
+    unattributed_wallet_candidates -- a wallet with real transaction/
+    behavioral data but no VASP reachability and no fingerprint candidate at
+    all would otherwise be invisible to typology_signals/cross_chain_events
+    in the case-wide report, even though crypto_investigation.
+    investigate_wallet covers it fine for a single wallet (that path never
+    filters on VASP reachability). Minimal shape: no risk/vasp_investigation/
+    exchange fields (this wallet has none), which _attach_crypto_investigation
+    and lea_actions.recommended_actions_for_wallet already tolerate via
+    plain .get() reads."""
+    rows = []
+    for r in store._all(
+            f"SELECT entity_id, etype, raw_value, normalized_value FROM entities "
+            f"WHERE etype IN ({WALLET_ETYPES_SQL})"):
+        if r["entity_id"] in covered_entity_ids:
+            continue
+        rows.append({"entity_id": r["entity_id"], "chain": r["etype"],
+                    "value": r["raw_value"] or r["normalized_value"]})
+    return rows
+
+
+def _attach_crypto_investigation(store: EvidenceStore, wallet_paths: List[dict]) -> None:
+    """Loop 53 case-report-level sibling of the other _attach_* helpers:
+    mutates each already-computed row with `transactions`/`transaction_
+    status` (Loop 53 canonical per-tx view), `typology_signals` (behavioral
+    anomaly signals), `cross_chain_events` (confirmed/candidate labeling),
+    `timeline`, and `recommended_actions` (LEA next steps) -- read from
+    `store` + fields already attached by `_attach_wallet_risk`/`_attach_
+    vasp_investigation` above, no new traversal. Same shape as
+    crypto_investigation.investigate_wallet's own composition, so the
+    case-wide report and the single-wallet CLI/API path never disagree on
+    what these fields mean. Lazy imports avoid a circular import with
+    crypto_investigation.py (which itself lazily imports this module's own
+    wallet_trace_report/cross_chain_links)."""
+    from . import lea_actions, typology
+    from .crypto_investigation import cross_chain_events as _cross_chain_events
+    from .crypto_investigation import investigation_timeline, normalize_transactions
+    from .investigation_graph import build_from_wallet_trace
+    for w in wallet_paths:
+        entity_id = w.get("entity_id")
+        transactions = normalize_transactions(store, entity_id)
+        signals = typology.typology_signals(store, entity_id)
+        events = _cross_chain_events(store, w["value"], w["chain"], entity_id)
+        w["transactions"] = transactions
+        w["transaction_status"] = "FOUND" if transactions else (
+            "NOT_FOUND" if entity_id else "NOT_CHECKED")
+        w["typology_signals"] = signals
+        w["cross_chain_events"] = events
+        w["timeline"] = investigation_timeline(w, transactions, signals, events)
+        w["recommended_actions"] = lea_actions.recommended_actions_for_wallet(w, signals, events)
+        # Summary counts only (not the full node/edge lists) -- keeps the
+        # case-wide payload small (see Loop 53's own "prevent huge GUI
+        # payloads" requirement) while still giving a reader real graph
+        # metrics; the full graph is available per-wallet via
+        # crypto_investigation.investigate_wallet / `cybertrace crypto
+        # investigate` / the /crypto/investigate API route.
+        # wallet_exchange_paths/unattributed_wallet_candidates rows key the
+        # suspect's own address as "value", not "address" (wallet_trace_
+        # report's own key) -- a merged view, not a mutation of `w`.
+        w["graph_summary"] = build_from_wallet_trace(
+            {**w, "address": w["value"]}, transactions=transactions,
+            cross_chain_events=events).summary()
+
+
 def _wallet_verdict(store: EvidenceStore, entity_id: str) -> Optional[dict]:
     """The most recent wallet_feedback row for one wallet entity, or None --
     same shape as build_dossier's own `verdict` (see that function's
@@ -3172,6 +3237,46 @@ def render_markdown(dossiers: List[dict], results: dict) -> str:
                          + f" · {link['evidence_ref']}")
         lines.append("")
 
+    _crypto_wallet_rows = (results.get("wallet_exchange_paths", [])
+                          + results.get("unattributed_wallet_candidates", [])
+                          + results.get("other_traced_wallets", []))
+    behavior_rows = [(w, s) for w in _crypto_wallet_rows
+                     for s in w.get("typology_signals", []) if s.get("status") == "DETECTED"]
+    if behavior_rows:
+        lines += ["## Behavioral signals", "",
+                  "_Deterministic transaction-shape signals (Loop 53) -- ANOMALOUS/"
+                  "SUSPICIOUS_PATTERN/HIGH_RISK_SIGNAL describes how unusual the shape "
+                  "is, never a finding of criminality. See risk.py's BEHAVIORAL "
+                  "category for how (lightly) these feed the risk score above._", ""]
+        for w, s in behavior_rows:
+            lines.append(f"- `{w['value']}` → **{s['signal']}** ({s['severity']}, "
+                         f"confidence {s['confidence']}): {s['explanation']}")
+        lines.append("")
+
+    timeline_rows = [w for w in _crypto_wallet_rows if w.get("timeline")]
+    if timeline_rows:
+        lines += ["## Investigation timeline", "",
+                  "_Chronological merge of transactions, VASP exposure, behavioral "
+                  "signals, and cross-chain events per wallet -- capped to the first "
+                  "5 entries here; the full timeline is in the JSON/HTML export._", ""]
+        for w in timeline_rows:
+            lines.append(f"- `{w['value']}`:")
+            for entry in w["timeline"][:5]:
+                when = entry["timestamp"] or "(no timestamp)"
+                lines.append(f"  - {when} — {entry['title']}")
+        lines.append("")
+
+    lea_rows = [(w, a) for w in _crypto_wallet_rows
+               for a in w.get("recommended_actions", [])]
+    if lea_rows:
+        lines += ["## LEA recommendations", "",
+                  "_Investigative recommendations, never legal conclusions -- each "
+                  "names the exact evidence that triggered it._", ""]
+        for w, a in lea_rows:
+            lines.append(f"- `{w['value']}` → **{a['action']}** [{a['confidence']}]: "
+                         f"{a['reason']}")
+        lines.append("")
+
     if results.get("watch_history"):
         lines += ["## Watch history", "",
                   "_Every persisted `watch` cycle for this case, newest first -- what "
@@ -3670,6 +3775,51 @@ def render_dossier_html(results: dict, path: str, title: str = "CyberTrace case 
                        f"<td class=mono wrap>{_esc(link['evidence_ref'])}</td></tr>")
         out.append("</table>")
 
+    _crypto_wallet_rows = (results.get("wallet_exchange_paths", [])
+                          + results.get("unattributed_wallet_candidates", [])
+                          + results.get("other_traced_wallets", []))
+    behavior_rows = [(w, s) for w in _crypto_wallet_rows
+                     for s in w.get("typology_signals", []) if s.get("status") == "DETECTED"]
+    if behavior_rows:
+        out.append("<h2>Behavioral signals</h2>"
+                   "<p class=dim>Deterministic transaction-shape signals (Loop 53) -- "
+                   "ANOMALOUS/SUSPICIOUS_PATTERN/HIGH_RISK_SIGNAL describes how unusual "
+                   "the shape is, never a finding of criminality.</p>"
+                   "<table><tr><th>wallet</th><th>signal</th><th>severity</th>"
+                   "<th>confidence</th><th>explanation</th></tr>")
+        for w, s in behavior_rows:
+            out.append(f"<tr><td class=mono>{_esc(w['value'])}</td>"
+                       f"<td>{_esc(s['signal'])}</td><td>{_esc(s['severity'])}</td>"
+                       f"<td>{s['confidence']}</td><td class=wrap>{_esc(s['explanation'])}</td></tr>")
+        out.append("</table>")
+
+    timeline_rows = [w for w in _crypto_wallet_rows if w.get("timeline")]
+    if timeline_rows:
+        out.append("<h2>Investigation timeline</h2>"
+                   "<p class=dim>Chronological merge of transactions, VASP exposure, "
+                   "behavioral signals, and cross-chain events per wallet -- capped to "
+                   "the first 5 entries per wallet.</p>")
+        for w in timeline_rows:
+            out.append(f"<p><strong>{_esc(w['value'])}</strong></p><ul>")
+            for entry in w["timeline"][:5]:
+                when = _esc(entry["timestamp"]) if entry["timestamp"] else "(no timestamp)"
+                out.append(f"<li>{when} — {_esc(entry['title'])}</li>")
+            out.append("</ul>")
+
+    lea_rows = [(w, a) for w in _crypto_wallet_rows
+               for a in w.get("recommended_actions", [])]
+    if lea_rows:
+        out.append("<h2>LEA recommendations</h2>"
+                   "<p class=dim>Investigative recommendations, never legal "
+                   "conclusions -- each names the exact evidence that triggered it.</p>"
+                   "<table><tr><th>wallet</th><th>action</th><th>confidence</th>"
+                   "<th>reason</th></tr>")
+        for w, a in lea_rows:
+            out.append(f"<tr><td class=mono>{_esc(w['value'])}</td>"
+                       f"<td>{_esc(a['action'])}</td><td>{_esc(a['confidence'])}</td>"
+                       f"<td class=wrap>{_esc(a['reason'])}</td></tr>")
+        out.append("</table>")
+
     if results.get("watch_history"):
         out.append("<h2>Watch history</h2>"
                    "<p class=dim>Every persisted `watch` cycle for this case, newest "
@@ -3799,6 +3949,7 @@ def run_correlation(store: EvidenceStore, min_conf: float = 0.35,
     _attach_wallet_flags(store, results["wallet_exchange_paths"])
     _attach_wallet_verdict(store, results["wallet_exchange_paths"])
     _attach_vasp_investigation(store, results["wallet_exchange_paths"])
+    _attach_crypto_investigation(store, results["wallet_exchange_paths"])
     results["risk_alerts"] = _risk_alerts(results["wallet_exchange_paths"])
     # Loop 45: fingerprint-based VASP candidates for the wallets the BFS above
     # found nothing for at all -- see unattributed_wallet_candidates. Its own
@@ -3809,6 +3960,7 @@ def run_correlation(store: EvidenceStore, min_conf: float = 0.35,
     # skip) -- one extra pass over a case's own wallets, not a new query class.
     results["unattributed_wallet_candidates"] = unattributed_wallet_candidates(store)
     _attach_vasp_investigation_candidates(store, results["unattributed_wallet_candidates"])
+    _attach_crypto_investigation(store, results["unattributed_wallet_candidates"])
     # Loop 50: case-level view, built entirely from the per-wallet
     # investigate() results just attached above -- groups by VASP brand name,
     # reads no wallet-to-wallet edge, so shared VASP exposure can never be
@@ -3817,6 +3969,16 @@ def run_correlation(store: EvidenceStore, min_conf: float = 0.35,
     from .vasp_investigation import aggregate_vasp_relationships
     results["vasp_relationships"] = aggregate_vasp_relationships(
         results["wallet_exchange_paths"], results["unattributed_wallet_candidates"])
+    # Loop 53: every OTHER searched wallet -- no VASP reachability, no
+    # fingerprint candidate either -- would otherwise never get typology/
+    # cross-chain/timeline/LEA coverage in the case-wide report, even though
+    # a wallet with real FAN_OUT-worthy transaction data but zero VASP
+    # proximity is exactly the kind of case those signals exist for. Minimal
+    # rows (_bare_wallet_rows), same _attach_crypto_investigation as above.
+    covered = {w["entity_id"] for w in results["wallet_exchange_paths"]} | \
+             {w["entity_id"] for w in results["unattributed_wallet_candidates"]}
+    results["other_traced_wallets"] = _bare_wallet_rows(store, covered)
+    _attach_crypto_investigation(store, results["other_traced_wallets"])
     results["data_source_status"] = data_source_status()
     # Persisted `watch` cycles (Loop 42), newest first -- the single canonical
     # read every other surface (Investigator, GUI, Markdown/HTML) slices from,

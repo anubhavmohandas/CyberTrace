@@ -22,7 +22,7 @@ from cybertrace.correlate import (
 )
 from cybertrace.evidence import EvidenceStore, enrich_bitcoin
 from cybertrace.risk import (
-    CRITICAL, INSUFFICIENT_EVIDENCE, LOW, MODERATE, RISK_POLICY_VERSION,
+    BEHAVIORAL, CRITICAL, INSUFFICIENT_EVIDENCE, LOW, MODERATE, RISK_POLICY_VERSION,
     reconstruct_score, score_wallet_risk,
 )
 
@@ -329,3 +329,68 @@ def test_real_data_case_c_combined_regulatory_and_service_signals(tmp_path):
     assert risk["risk_score"] == 42
     assert risk["risk_level"] == MODERATE
     assert reconstruct_score(risk) == 42
+
+
+# --- Loop 53: BEHAVIORAL category (typology.py integration) -----------------
+
+def test_typology_signals_omitted_is_byte_identical_to_pre_loop_53(tmp_path):
+    """Every pre-Loop-53 caller omits `typology_signals` -- must produce the
+    exact same result as before this loop existed."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        eid = _wallet(store, metadata={"reported_scam": True})
+        without_arg = score_wallet_risk(store, eid, BTC_VALID, hit=None, service_tags=[])
+        with_none = score_wallet_risk(store, eid, BTC_VALID, hit=None, service_tags=[],
+                                      typology_signals=None)
+    assert without_arg == with_none
+
+
+def test_detected_behavioral_signal_adds_behavioral_category(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        eid = _wallet(store)
+        signals = [{"signal": "FAN_OUT", "status": "DETECTED", "severity": "ANOMALOUS",
+                   "confidence": 0.8, "evidence": [], "explanation": "test"}]
+        risk = score_wallet_risk(store, eid, BTC_VALID, hit=None, service_tags=[],
+                                 typology_signals=signals)
+    assert risk["risk_categories"] == [BEHAVIORAL]
+    assert risk["risk_score"] == round(6 * 0.8)  # behavior.fan_out.v1 base * confidence
+    assert risk["risk_level"] == LOW
+
+
+def test_not_evaluated_or_absent_typology_signals_contribute_nothing(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        eid = _wallet(store)
+        signals = [{"signal": "HIGH_ACTIVITY", "status": "NOT_EVALUATED", "severity": None,
+                   "confidence": None, "evidence": [], "explanation": "no data"}]
+        risk = score_wallet_risk(store, eid, BTC_VALID, hit=None, service_tags=[],
+                                 typology_signals=signals)
+    assert risk["risk_score"] is None
+    assert risk["risk_level"] == INSUFFICIENT_EVIDENCE
+
+
+def test_behavioral_category_alone_cannot_reach_high(tmp_path):
+    """Structural cap: even every behavioral rule DETECTED at once must stay
+    under the BEHAVIORAL category ceiling (15), never approach HIGH (75)."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        eid = _wallet(store)
+        signals = [
+            {"signal": s, "status": "DETECTED", "severity": "HIGH_RISK_SIGNAL",
+             "confidence": 0.95, "evidence": [], "explanation": "test"}
+            for s in ("FAN_OUT", "RAPID_FORWARDING", "BURST_ACTIVITY", "PEEL_CHAIN_LIKE")
+        ]
+        risk = score_wallet_risk(store, eid, BTC_VALID, hit=None, service_tags=[],
+                                 typology_signals=signals)
+    assert risk["risk_score"] <= 15
+    assert risk["risk_level"] == LOW
+
+
+def test_signal_with_no_mapped_rule_is_ignored(tmp_path):
+    """HIGH_ACTIVITY/HIGH_VALUE/CONSOLIDATION/DISPERSAL/FAN_IN/
+    DORMANT_TO_ACTIVE describe scale/direction, not a risk-worthy shape --
+    must never silently score under an unmapped rule id."""
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        eid = _wallet(store)
+        signals = [{"signal": "HIGH_ACTIVITY", "status": "DETECTED", "severity": "ANOMALOUS",
+                   "confidence": 0.9, "evidence": [], "explanation": "test"}]
+        risk = score_wallet_risk(store, eid, BTC_VALID, hit=None, service_tags=[],
+                                 typology_signals=signals)
+    assert risk["risk_score"] is None

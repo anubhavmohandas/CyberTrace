@@ -444,6 +444,43 @@ window.__resources = {
                       </div>
                     </sc-if>
 
+                    <sc-if value="{{ w.hasTypologySignals }}" hint-placeholder-val="{{ false }}">
+                      <div style="border-top:1px solid #171c1f;padding-top:14px">
+                        <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:8px">BEHAVIORAL SIGNALS (anomalous, never a finding of criminality)</div>
+                        <div style="display:flex;flex-direction:column;gap:6px">
+                          <sc-for list="{{ w.typologySignals }}" as="s" hint-placeholder-count="1">
+                            <div style="font-size:12px;color:#879196;line-height:1.5"><span style="color:{{ s.severityColor }};font-weight:600">{{ s.signal }}</span> ({{ s.severity }}, confidence {{ s.confidence }}) — {{ s.explanation }}</div>
+                          </sc-for>
+                        </div>
+                      </div>
+                    </sc-if>
+
+                    <sc-if value="{{ w.hasCrossChainEvents }}" hint-placeholder-val="{{ false }}">
+                      <div style="border-top:1px solid #171c1f;padding-top:14px">
+                        <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#2fb4e8;margin-bottom:8px">CROSS-CHAIN EVENTS (confirmed = real transaction, candidate = corpus grouping only)</div>
+                        <div style="display:flex;flex-direction:column;gap:6px">
+                          <sc-for list="{{ w.crossChainEvents }}" as="e" hint-placeholder-count="1">
+                            <div style="font-size:12px;color:#879196;line-height:1.5"><span style="color:{{ e.color }};font-weight:600">{{ e.label }}</span> → {{ e.destLine }} <span style="color:#5a6367">[{{ e.sourceApi }}]</span></div>
+                          </sc-for>
+                        </div>
+                      </div>
+                    </sc-if>
+
+                    <sc-if value="{{ w.hasGraphSummary }}" hint-placeholder-val="{{ false }}">
+                      <div style="font-size:11px;color:#5a6367;border-top:1px solid #171c1f;padding-top:14px">Investigation graph: {{ w.graphSummary }}</div>
+                    </sc-if>
+
+                    <sc-if value="{{ w.hasLeaActions }}" hint-placeholder-val="{{ false }}">
+                      <div style="border-top:1px solid #171c1f;padding-top:14px">
+                        <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#4a9d7f;margin-bottom:8px">LEA RECOMMENDATIONS (investigative next steps, not legal conclusions)</div>
+                        <div style="display:flex;flex-direction:column;gap:6px">
+                          <sc-for list="{{ w.leaActions }}" as="a" hint-placeholder-count="1">
+                            <div style="font-size:12px;color:#879196;line-height:1.5"><span style="color:#4a9d7f;font-weight:600">{{ a.action }}</span> [{{ a.confidence }}] — {{ a.reason }}</div>
+                          </sc-for>
+                        </div>
+                      </div>
+                    </sc-if>
+
                     <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;border-top:1px solid #171c1f;padding-top:14px">
                       <div style="font:400 11.5px/1 'IBM Plex Mono',monospace;color:{{ w.verdictColor }}">{{ w.verdictLabel }}</div>
                       <div onClick="{{ w.openVerdict }}" style="cursor:pointer;border:1px solid #262d31;color:#a7b1b5;padding:6px 13px;font-size:12px" style-hover="border-color:#2fb4e8;color:#2fb4e8">Record verdict</div>
@@ -492,6 +529,90 @@ window.__resources = {
                         <div style="display:flex;gap:8px;flex-wrap:wrap">
                           <sc-for list="{{ w.alsoAttributed }}" as="v" hint-placeholder-count="1">
                             <span style="font-size:11.5px;color:#d97a6c;border:1px solid #4a2420;padding:4px 9px">{{ v }}</span>
+                          </sc-for>
+                        </div>
+                      </div>
+                    </sc-if>
+                    <sc-if value="{{ w.hasTypologySignals }}" hint-placeholder-val="{{ false }}">
+                      <div style="border-top:1px solid #171c1f;padding-top:14px">
+                        <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:8px">BEHAVIORAL SIGNALS</div>
+                        <div style="display:flex;flex-direction:column;gap:6px">
+                          <sc-for list="{{ w.typologySignals }}" as="s" hint-placeholder-count="1">
+                            <div style="font-size:12px;color:#879196;line-height:1.5"><span style="color:{{ s.severityColor }};font-weight:600">{{ s.signal }}</span> ({{ s.severity }}) — {{ s.explanation }}</div>
+                          </sc-for>
+                        </div>
+                      </div>
+                    </sc-if>
+                    <sc-if value="{{ w.hasCrossChainEvents }}" hint-placeholder-val="{{ false }}">
+                      <div style="border-top:1px solid #171c1f;padding-top:14px">
+                        <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#2fb4e8;margin-bottom:8px">CROSS-CHAIN EVENTS</div>
+                        <div style="display:flex;flex-direction:column;gap:6px">
+                          <sc-for list="{{ w.crossChainEvents }}" as="e" hint-placeholder-count="1">
+                            <div style="font-size:12px;color:#879196;line-height:1.5"><span style="color:{{ e.color }};font-weight:600">{{ e.label }}</span> → {{ e.destLine }}</div>
+                          </sc-for>
+                        </div>
+                      </div>
+                    </sc-if>
+                    <sc-if value="{{ w.hasGraphSummary }}" hint-placeholder-val="{{ false }}">
+                      <div style="font-size:11px;color:#5a6367;border-top:1px solid #171c1f;padding-top:14px">Investigation graph: {{ w.graphSummary }}</div>
+                    </sc-if>
+                    <sc-if value="{{ w.hasLeaActions }}" hint-placeholder-val="{{ false }}">
+                      <div style="border-top:1px solid #171c1f;padding-top:14px">
+                        <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#4a9d7f;margin-bottom:8px">LEA RECOMMENDATIONS</div>
+                        <div style="display:flex;flex-direction:column;gap:6px">
+                          <sc-for list="{{ w.leaActions }}" as="a" hint-placeholder-count="1">
+                            <div style="font-size:12px;color:#879196;line-height:1.5"><span style="color:#4a9d7f;font-weight:600">{{ a.action }}</span> [{{ a.confidence }}] — {{ a.reason }}</div>
+                          </sc-for>
+                        </div>
+                      </div>
+                    </sc-if>
+                  </div>
+                </sc-for>
+                <div style="border:1px solid #1c2427;border-top:none"></div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ hasOtherWallets }}" hint-placeholder-val="{{ false }}">
+              <div>
+                <div style="display:flex;align-items:baseline;gap:12px;padding-bottom:12px;border-bottom:1px solid #171c1f">
+                  <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#67716f">OTHER TRACED WALLETS — BEHAVIORAL/CROSS-CHAIN ONLY</div>
+                  <div style="font-size:12px;color:#5a6367">no VASP reachability, no fingerprint candidate — shown only when a real behavioral, cross-chain, or LEA signal exists</div>
+                </div>
+                <sc-for list="{{ otherWallets }}" as="w" hint-placeholder-count="1">
+                  <div style="border:1px solid #1c2427;border-top:none;background:#0d1012;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
+                    <div style="display:flex;align-items:baseline;gap:8px">
+                      <span style="font:600 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:1px;color:#879196">{{ w.chain }}</span>
+                      <div style="font:500 15px/1 'IBM Plex Mono',monospace;color:#edf2f4">{{ w.address }}</div>
+                    </div>
+                    <sc-if value="{{ w.hasTypologySignals }}" hint-placeholder-val="{{ false }}">
+                      <div style="border-top:1px solid #171c1f;padding-top:14px">
+                        <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:8px">BEHAVIORAL SIGNALS</div>
+                        <div style="display:flex;flex-direction:column;gap:6px">
+                          <sc-for list="{{ w.typologySignals }}" as="s" hint-placeholder-count="1">
+                            <div style="font-size:12px;color:#879196;line-height:1.5"><span style="color:{{ s.severityColor }};font-weight:600">{{ s.signal }}</span> ({{ s.severity }}, confidence {{ s.confidence }}) — {{ s.explanation }}</div>
+                          </sc-for>
+                        </div>
+                      </div>
+                    </sc-if>
+                    <sc-if value="{{ w.hasCrossChainEvents }}" hint-placeholder-val="{{ false }}">
+                      <div style="border-top:1px solid #171c1f;padding-top:14px">
+                        <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#2fb4e8;margin-bottom:8px">CROSS-CHAIN EVENTS</div>
+                        <div style="display:flex;flex-direction:column;gap:6px">
+                          <sc-for list="{{ w.crossChainEvents }}" as="e" hint-placeholder-count="1">
+                            <div style="font-size:12px;color:#879196;line-height:1.5"><span style="color:{{ e.color }};font-weight:600">{{ e.label }}</span> → {{ e.destLine }}</div>
+                          </sc-for>
+                        </div>
+                      </div>
+                    </sc-if>
+                    <sc-if value="{{ w.hasGraphSummary }}" hint-placeholder-val="{{ false }}">
+                      <div style="font-size:11px;color:#5a6367;border-top:1px solid #171c1f;padding-top:14px">Investigation graph: {{ w.graphSummary }}</div>
+                    </sc-if>
+                    <sc-if value="{{ w.hasLeaActions }}" hint-placeholder-val="{{ false }}">
+                      <div style="border-top:1px solid #171c1f;padding-top:14px">
+                        <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#4a9d7f;margin-bottom:8px">LEA RECOMMENDATIONS</div>
+                        <div style="display:flex;flex-direction:column;gap:6px">
+                          <sc-for list="{{ w.leaActions }}" as="a" hint-placeholder-count="1">
+                            <div style="font-size:12px;color:#879196;line-height:1.5"><span style="color:#4a9d7f;font-weight:600">{{ a.action }}</span> [{{ a.confidence }}] — {{ a.reason }}</div>
                           </sc-for>
                         </div>
                       </div>
@@ -1101,7 +1222,7 @@ const detectUrl = (addr) => API_BASE + '/api/detect?address=' + encodeURICompone
 const apiFetch = (url, opts) => fetch(url, window.__CT_API_KEY
   ? { ...opts, headers: { ...(opts && opts.headers), 'X-CT-Api-Key': window.__CT_API_KEY } }
   : opts);
-const EMPTY_CASE = { case_id:'', title:'', stats:[], candidates:[], drawers:{}, evidence:[], timeline:[], captures:[], suppressed:[], markets:[], market_relationships:[], notes:[], wallet_exchange_paths:[], risk_alerts:[], data_source_status:{}, case_has_crypto:false };
+const EMPTY_CASE = { case_id:'', title:'', stats:[], candidates:[], drawers:{}, evidence:[], timeline:[], captures:[], suppressed:[], markets:[], market_relationships:[], notes:[], wallet_exchange_paths:[], unattributed_wallet_candidates:[], other_traced_wallets:[], risk_alerts:[], data_source_status:{}, case_has_crypto:false };
 
 const ETYPE_COLOR = { PGP_KEY:C.violet, EMAIL:C.green, BTC_ADDRESS:C.sand, ONION_ADDRESS:C.cyan, IP:'#4c565a' };
 
@@ -1195,6 +1316,55 @@ function controlLine(vi) {
   return 'Control/ownership: ' + vi.control_status + conf + ' — exposure is not ownership';
 }
 
+// Loop 53: severity is never CRIMINAL/FRAUDSTER -- ANOMALOUS is the mildest
+// (dim, same tone as neutral context elsewhere), SUSPICIOUS_PATTERN reuses
+// the amber "worth a second look" tone service tags already use,
+// HIGH_RISK_SIGNAL reuses the same red-orange "ALSO ATTRIBUTED"/alert tone.
+// Deliberately its own palette, never RISK_COLOR: a behavioral signal is not
+// the same claim as a risk score.
+const TYPOLOGY_SEVERITY_COLOR = { ANOMALOUS: '#67716f', SUSPICIOUS_PATTERN: '#c2b280', HIGH_RISK_SIGNAL: '#d97a6c' };
+// Confirmed (a real live transaction) reuses the VASP-blue tone; a
+// corpus-grouping-only candidate reuses the same dim tone
+// CANDIDATE_STRENGTH_COLOR.LOW already uses for "weakest confidence" --
+// never the same color as a confirmed record.
+const CROSS_CHAIN_CONFIDENCE_COLOR = { HIGH_CONFIDENCE: '#2fb4e8', LOW_CONFIDENCE: '#67716f' };
+
+// Shared by walletRow/candidateWalletRow/bareWalletRow: the Loop 53 fields
+// every traced wallet gets regardless of whether it has a VASP hit, a
+// fingerprint candidate, or neither. One function, not three copies, so the
+// three card types can never quietly disagree on what these mean.
+function cryptoPanelVals(w) {
+  const signals = (w.typology_signals || []).filter(s => s.status === 'DETECTED');
+  const events = w.cross_chain_events || [];
+  const actions = w.recommended_actions || [];
+  const gs = w.graph_summary || {};
+  return {
+    typologySignals: signals.map(s => ({
+      signal: s.signal, severity: s.severity,
+      severityColor: TYPOLOGY_SEVERITY_COLOR[s.severity] || '#67716f',
+      confidence: s.confidence != null ? s.confidence.toFixed(2) : '—',
+      explanation: s.explanation,
+    })),
+    hasTypologySignals: signals.length > 0,
+    crossChainEvents: events.map(e => ({
+      isCandidate: e.event_type === 'CROSS_CHAIN_CANDIDATE',
+      label: e.event_type.replace(/_/g, ' '),
+      color: CROSS_CHAIN_CONFIDENCE_COLOR[e.confidence] || '#67716f',
+      destLine: (e.dest_chain || 'unknown chain').replace('_ADDRESS', '')
+        + (e.dest_address ? ' — ' + short(e.dest_address, 20) : ''),
+      sourceApi: e.source_api || '',
+    })),
+    hasCrossChainEvents: events.length > 0,
+    leaActions: actions.map(a => ({
+      action: a.action.replace(/_/g, ' '), confidence: a.confidence, reason: a.reason,
+    })),
+    hasLeaActions: actions.length > 0,
+    graphSummary: (gs.node_count || 0) + ' node(s), ' + (gs.edge_count || 0) + ' edge(s)',
+    hasGraphSummary: !!(gs.node_count),
+    txStatus: w.transaction_status || 'NOT_CHECKED',
+  };
+}
+
 function walletRow(w, valueById, openVerdict) {
   const risk = w.risk || {};
   const vi = w.vasp_investigation;
@@ -1271,6 +1441,7 @@ function walletRow(w, valueById, openVerdict) {
     verdictLabel: v ? ('ANALYST: ' + v.outcome + (v.note ? ' — ' + v.note : '')) : 'NO ANALYST VERDICT RECORDED',
     verdictColor: v ? (v.outcome === 'REJECTED' || v.outcome === 'MALICIOUS' ? C.red : C.green) : '#495255',
     openVerdict: () => openVerdict(w),
+    ...cryptoPanelVals(w),
   };
 }
 
@@ -1301,6 +1472,20 @@ function candidateWalletRow(w) {
     // anyway, same discipline as the reachability wallet card above, so a
     // reader never has to remember that rule instead of seeing it stated.
     controlLine: controlLine(w.vasp_investigation),
+    ...cryptoPanelVals(w),
+  };
+}
+
+// Loop 53: a wallet with real transaction/behavioral data but no VASP
+// reachability hit AND no fingerprint candidate at all -- see
+// correlate._bare_wallet_rows. Lighter card: no risk/exchange/control
+// fields exist for these (never fabricated), only what this loop adds.
+function bareWalletRow(w) {
+  return {
+    key: w.entity_id,
+    address: short(w.value, 26),
+    chain: (w.chain || '').replace('_ADDRESS', ''),
+    ...cryptoPanelVals(w),
   };
 }
 
@@ -1373,6 +1558,12 @@ function walletTabVals(cd, openVerdict) {
   // a reader needs that distinction to stay visible, not smoothed over.
   const candidateWallets = (cd.unattributed_wallet_candidates || []).map(candidateWalletRow);
 
+  // Loop 53: wallets with neither a reachability hit nor a fingerprint
+  // candidate -- previously invisible everywhere; now at least their
+  // behavioral/cross-chain/LEA signals (if any) reach the GUI.
+  const otherWallets = (cd.other_traced_wallets || []).map(bareWalletRow)
+    .filter(w => w.hasTypologySignals || w.hasCrossChainEvents || w.hasLeaActions);
+
   // Loop 50: case-level VASP relationship view -- every traced wallet's own
   // vasp_investigation above, grouped by VASP (cd.vasp_relationships is
   // correlate.run_correlation's own aggregate_vasp_relationships() output,
@@ -1398,7 +1589,9 @@ function walletTabVals(cd, openVerdict) {
     hasWallets: wallets.length > 0,
     candidateWallets,
     hasCandidateWallets: candidateWallets.length > 0,
-    hasNoWallets: wallets.length === 0 && candidateWallets.length === 0,
+    otherWallets,
+    hasOtherWallets: otherWallets.length > 0,
+    hasNoWallets: wallets.length === 0 && candidateWallets.length === 0 && otherWallets.length === 0,
     walletAlerts: wallets.filter(w => w.isAlert),
     hasWalletAlerts: alertIds.size > 0,
     dataSources,

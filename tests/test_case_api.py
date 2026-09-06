@@ -439,3 +439,70 @@ def test_snapshot_endpoint_returns_real_payload(tmp_path):
         status, resp = _get(f"{base}/api/case/does-not-exist/snapshot/{snapshot_id}")
         assert status == 404
         assert "error" in resp
+
+
+# --- Loop 53: crypto/investigate --------------------------------------------
+
+_BTC_VALID = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+_BTC_OTHER = "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+
+
+def _make_crypto_case_db(path: Path) -> None:
+    with EvidenceStore(str(path)) as store:
+        eid = store.upsert_entity("BTC_ADDRESS", _BTC_VALID)
+        store.set_metadata(eid, tx_count=1)
+        store.record_transactions(eid, _BTC_VALID, "BTC_ADDRESS", "bitcoin", [
+            {"tx_hash": "h1", "direction": "OUT", "counterparty": _BTC_OTHER,
+             "asset": "BTC", "value": 0.1, "timestamp": "2026-01-01T00:00:00+00:00"},
+        ])
+        store.update_case(name="crypto smoke case")
+
+
+def test_crypto_investigate_endpoint_returns_composed_result(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    _make_crypto_case_db(cases_dir / "cryptocase.db")
+
+    with _running_server(cases_dir) as base:
+        status, resp = _get(f"{base}/api/case/cryptocase/crypto/investigate?address={_BTC_VALID}")
+        assert status == 200
+        for key in ("wallet_trace", "transactions", "graph", "graph_summary",
+                   "typology_signals", "cross_chain_events", "timeline",
+                   "recommended_actions", "risk", "vasp_investigation"):
+            assert key in resp
+        assert resp["address"] == _BTC_VALID
+        assert len(resp["transactions"]) == 1
+
+
+def test_crypto_investigate_endpoint_requires_address(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    _make_crypto_case_db(cases_dir / "cryptocase.db")
+
+    with _running_server(cases_dir) as base:
+        status, resp = _get(f"{base}/api/case/cryptocase/crypto/investigate")
+        assert status == 400
+        assert "error" in resp
+
+
+def test_crypto_investigate_endpoint_no_such_case(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+
+    with _running_server(cases_dir) as base:
+        status, resp = _get(
+            f"{base}/api/case/does-not-exist/crypto/investigate?address={_BTC_VALID}")
+        assert status == 404
+        assert "error" in resp
+
+
+def test_crypto_investigate_endpoint_wallet_never_searched(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    _make_crypto_case_db(cases_dir / "cryptocase.db")
+
+    with _running_server(cases_dir) as base:
+        status, resp = _get(
+            f"{base}/api/case/cryptocase/crypto/investigate?address={_BTC_OTHER}")
+        assert status == 404
+        assert "never searched" in resp["error"]

@@ -1,7 +1,7 @@
 """Solana (SOL) OSINT module (Loop 38 Section 8)."""
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..integrations import exchange_tags
 from .base import BaseModule, ModuleResult, SourceResult
@@ -114,11 +114,17 @@ class SolanaModule(BaseModule):
         received_from: set = set()
         first_seen = last_seen = None
         fetch_failed = False
+        # Loop 53: real per-tx rows, same N+1 fetch _extract_peer already
+        # reads -- no new RPC call. Value comes from the SAME lamport
+        # balance-change this module already uses for direction (see
+        # _lamport_delta), never a second, unrelated field.
+        raw_transactions: List[dict] = []
         for sig_info in signatures:
             sig = sig_info.get('signature')
             if not sig:
                 continue
             ts = sig_info.get('blockTime')
+            iso = None
             if ts:
                 iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
                 first_seen = iso if first_seen is None else min(first_seen, iso)
@@ -142,6 +148,15 @@ class SolanaModule(BaseModule):
                     sent_to.add(peer)
                 elif direction == 'received':
                     received_from.add(peer)
+                delta = self._lamport_delta(tx, address)
+                fee = ((tx.get('meta') or {}).get('fee') or 0) / _LAMPORTS_PER_SOL
+                raw_transactions.append({
+                    'tx_hash': sig, 'direction': 'OUT' if direction == 'sent' else 'IN',
+                    'counterparty': peer, 'asset': 'SOL',
+                    'value': abs(delta) / _LAMPORTS_PER_SOL if delta is not None else None,
+                    'timestamp': iso, 'block': tx.get('slot'), 'fee': fee,
+                    'provider': 'solana_rpc', 'status': 'FOUND',
+                })
 
         parsed: Dict[str, Any] = {
             'balance_sol': balance_lamports / _LAMPORTS_PER_SOL,
@@ -152,10 +167,31 @@ class SolanaModule(BaseModule):
             'sent_to_addresses': sorted(sent_to)[:20],
             'received_from_addresses': sorted(received_from)[:20],
             'connected_addresses': sorted(counterparties)[:20],
+            'raw_transactions': raw_transactions,
         }
         if fetch_failed:
             parsed['pagination_incomplete'] = True
         return SourceResult(source='solana_rpc', success=True, data=parsed)
+
+    @staticmethod
+    def _lamport_delta(tx: dict, address: str) -> Optional[int]:
+        """This address's own lamport balance change in `tx` -- the same
+        pre/postBalances _extract_peer already reads, factored out rather
+        than changing that function's tested (peer, direction) return shape.
+        """
+        try:
+            keys = tx['transaction']['message']['accountKeys']
+            pre = tx['meta']['preBalances']
+            post = tx['meta']['postBalances']
+        except (KeyError, TypeError):
+            return None
+        addrs = [k if isinstance(k, str) else (k or {}).get('pubkey') for k in keys]
+        if address not in addrs:
+            return None
+        idx = addrs.index(address)
+        if idx >= len(pre) or idx >= len(post):
+            return None
+        return post[idx] - pre[idx]
 
     @staticmethod
     def _extract_peer(tx: dict, address: str) -> Tuple[Optional[str], Optional[str]]:
@@ -258,6 +294,7 @@ class SolanaModule(BaseModule):
             # be confused with a wallet simply having fewer signatures than
             # the requested limit.
             'pagination_incomplete': False,
+            'raw_transactions': [],
         }
 
         for source, res in result.sources.items():
@@ -284,6 +321,8 @@ class SolanaModule(BaseModule):
                 summary['received_from_addresses'] = data['received_from_addresses']
             if source == 'solana_rpc' and data.get('pagination_incomplete'):
                 summary['pagination_incomplete'] = True
+            if data.get('raw_transactions'):
+                summary['raw_transactions'].extend(data['raw_transactions'])
 
             if source == 'exchange_tags' and data.get('tagged'):
                 summary['exchange_tag_categories'] = data.get('categories')

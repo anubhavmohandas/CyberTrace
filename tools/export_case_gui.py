@@ -224,6 +224,11 @@ def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
         # would blur "reachability-attributed" with "fingerprint-candidate"
         # for a GUI reader who needs that distinction to stay visible.
         "unattributed_wallet_candidates": results.get("unattributed_wallet_candidates", []),
+        # Loop 53: every OTHER searched wallet -- no VASP reachability, no
+        # fingerprint candidate either -- so behavioral/cross-chain/LEA
+        # signals for it would otherwise never reach the GUI at all. See
+        # correlate._bare_wallet_rows.
+        "other_traced_wallets": results.get("other_traced_wallets", []),
         # Loop 50: case-level VASP relationship view -- every traced wallet's
         # own VASP investigation above, grouped by VASP. See
         # cybertrace.vasp_investigation.aggregate_vasp_relationships.

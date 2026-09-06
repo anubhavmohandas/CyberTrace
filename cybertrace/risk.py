@@ -94,8 +94,13 @@ MIXING = "MIXING"
 COINJOIN = "COINJOIN"
 DEFI = "DEFI"
 UNKNOWN = "UNKNOWN"
+# Loop 53: typology.py's own DETECTED signals (FAN_OUT/RAPID_FORWARDING/
+# BURST_ACTIVITY/PEEL_CHAIN_LIKE), the first real, non-VASP-attribution,
+# non-third-party-tag behavioral evidence source this codebase has -- see
+# CONTEXTUAL_BEHAVIORAL below, declared since Loop 36 for exactly this.
+BEHAVIORAL = "BEHAVIORAL"
 
-SUPPORTED_CATEGORIES = (SANCTIONS, FRAUD, MIXING, COINJOIN, DEFI, UNKNOWN)
+SUPPORTED_CATEGORIES = (SANCTIONS, FRAUD, MIXING, COINJOIN, DEFI, UNKNOWN, BEHAVIORAL)
 
 # Categories the PS2 problem statement names that this policy deliberately
 # does NOT score, and why -- so "unsupported" is a documented, stable fact
@@ -121,7 +126,17 @@ UNSUPPORTED_CATEGORIES: Dict[str, str] = {
     "LAYERING": "same reason as MONEY_LAUNDERING: intermediate hops are "
                "intermediate hops, not an asserted typology. A future typology "
                "module may consume risk_features; this loop does not build it.",
-    "CROSS_CHAIN": "no cross-chain/bridge evidence source exists in this codebase.",
+    "CROSS_CHAIN": "real transaction-level cross-chain evidence exists since Loop 42/44 "
+                  "(cross_chain_module.py) and is surfaced to an investigator via "
+                  "crypto_investigation.cross_chain_events -- but a confirmed cross-chain "
+                  "hop landing on a VASP-attributed address is exposure, exactly like a "
+                  "same-chain hop (see VASP_EXPOSURE below): it must not score risk just "
+                  "for crossing a chain boundary. The one case that WOULD be a genuine new "
+                  "SANCTIONS signal -- a confirmed bridge/swap landing on a REGULATORY_"
+                  "ATTESTED (OFAC) address on the destination chain -- needs a destination-"
+                  "chain attribution lookup this loop does not build; DEFERRED rather than "
+                  "half-implemented under time pressure against sanctions.flow_reach.v1's "
+                  "own careful invariants.",
     "VASP_EXPOSURE": "VASP attribution is a reachability/attribution concept kept "
                      "deliberately separate from risk (global invariant: risk score "
                      "!= VASP attribution). An ordinary VASP relationship -- any "
@@ -166,6 +181,11 @@ CATEGORY_CAP: Dict[str, int] = {
     COINJOIN: 15,
     DEFI: 6,
     UNKNOWN: 8,
+    # Loop 53: a fresh, uncalibrated signal source (no labelled corpus
+    # backs these thresholds beyond typology.py's own documented policy
+    # numbers) -- capped below MIXING so a wallet flagged only on
+    # transaction-shape heuristics cannot alone reach HIGH.
+    BEHAVIORAL: 15,
 }
 
 # --- rules -------------------------------------------------------------------
@@ -248,6 +268,56 @@ RULES: Dict[str, dict] = {
                "weakest source this policy scores. Filed under UNKNOWN because the "
                "label itself claims no specific illicit category.",
     },
+    # Loop 53: typology.py's own DETECTED signals -- the first rule in this
+    # module to use CONTEXTUAL_BEHAVIORAL (declared unused since Loop 36).
+    # WALLET dimension: these describe this address's OWN transaction shape,
+    # not what its funds later touched. Anomaly != crime (typology.py's own
+    # invariant): a behavioral shape is present-for-visibility, low base,
+    # low category ceiling -- structurally incapable of reaching HIGH alone,
+    # same discipline as service.mixing.v1.
+    "behavior.fan_out.v1": {
+        "category": BEHAVIORAL, "dimension": WALLET, "signal_type": CONTEXTUAL_SIGNAL,
+        "source_strength": CONTEXTUAL_BEHAVIORAL, "base": 6,
+        "why": "A high-fan-out transaction shape (typology.FAN_OUT) is consistent with "
+               "several legitimate patterns (payroll, an exchange hot wallet, a mixer) as "
+               "well as fund dispersal -- contextual signal only, never itself a finding.",
+    },
+    "behavior.rapid_forwarding.v1": {
+        "category": BEHAVIORAL, "dimension": WALLET, "signal_type": CONTEXTUAL_SIGNAL,
+        "source_strength": CONTEXTUAL_BEHAVIORAL, "base": 8,
+        "why": "Funds received and forwarded onward within the hour (typology."
+               "RAPID_FORWARDING) is a shape associated with pass-through wallets, but "
+               "also ordinary custodial/hot-wallet operation -- weighted above a bare "
+               "fan-out shape since the value-conservation match is more specific.",
+    },
+    "behavior.burst_activity.v1": {
+        "category": BEHAVIORAL, "dimension": WALLET, "signal_type": CONTEXTUAL_SIGNAL,
+        "source_strength": CONTEXTUAL_BEHAVIORAL, "base": 4,
+        "why": "A transaction burst (typology.BURST_ACTIVITY) alone says only that "
+               "activity clustered in time -- the weakest of the behavioral signals, "
+               "present for visibility.",
+    },
+    "behavior.peel_chain_like.v1": {
+        "category": BEHAVIORAL, "dimension": WALLET, "signal_type": CONTEXTUAL_SIGNAL,
+        "source_strength": CONTEXTUAL_BEHAVIORAL, "base": 5,
+        "why": "typology.PEEL_CHAIN_LIKE is itself a single-wallet PROXY for a genuinely "
+               "multi-wallet pattern (see that module's own docstring) -- weighted low "
+               "and structurally capped, reflecting that it is the weakest-grounded "
+               "signal typology.py produces.",
+    },
+}
+
+# typology.py signal name -> the risk.py rule it feeds, for DETECTED signals
+# only (NOT_EVALUATED/absent signals contribute nothing -- see
+# _extract_behavioral_features). Deliberately a small, named subset: not
+# every typology signal is risk-worthy (HIGH_ACTIVITY/HIGH_VALUE/
+# CONSOLIDATION/DISPERSAL/FAN_IN/DORMANT_TO_ACTIVE describe scale or
+# direction, not a shape any rule here claims is risk-relevant).
+_BEHAVIORAL_RULE = {
+    "FAN_OUT": "behavior.fan_out.v1",
+    "RAPID_FORWARDING": "behavior.rapid_forwarding.v1",
+    "BURST_ACTIVITY": "behavior.burst_activity.v1",
+    "PEEL_CHAIN_LIKE": "behavior.peel_chain_like.v1",
 }
 
 # category -> GraphSense service_tags category strings that map to it.
@@ -274,11 +344,15 @@ def _add_feature(features: Dict[tuple, dict], fact_key: tuple, **feature) -> Non
 
 def _extract_features(wallet_entity_id: str, wallet_address: str,
                       hit: Optional[dict], service_tags: List[dict],
-                      metadata: dict) -> Dict[tuple, dict]:
+                      metadata: dict, typology_signals: Optional[List[dict]] = None
+                      ) -> Dict[tuple, dict]:
     """Every deduplicated risk-relevant fact this wallet's already-computed
     evidence supports. Reads only what callers already computed
-    (wallet_exchange_paths' `hit`, `service_tags`, `store.metadata`) -- no
-    new traversal, no new integration call.
+    (wallet_exchange_paths' `hit`, `service_tags`, `store.metadata`, and --
+    Loop 53, additive, optional -- `typology_signals`) -- no new traversal,
+    no new integration call. `typology_signals` defaults to None so every
+    existing caller (wallet_trace_report's own score_wallet_risk call) is
+    byte-identical to before this loop.
     """
     from .correlate import REGULATORY_ATTESTED, EXCHANGE_HOP_DECAY
 
@@ -369,6 +443,22 @@ def _extract_features(wallet_entity_id: str, wallet_address: str,
             attribution_source=tag["attribution_source"], raw_confidence=1.0,
             detail=f"transaction path intersects a GraphSense-tagged "
                    f"{tag['category']}{hop_phrase}: {tag['label']}")
+
+    for signal in typology_signals or []:
+        if signal.get("status") != "DETECTED":
+            continue
+        rule_id = _BEHAVIORAL_RULE.get(signal.get("signal"))
+        if rule_id is None:
+            continue
+        # raw_confidence carries typology's own [0,1] confidence -- a real,
+        # bounded number from that module's own policy, not invented here.
+        _add_feature(
+            features, ("BEHAVIORAL", wallet_entity_id, signal["signal"]),
+            rule_id=rule_id, entity_id=wallet_entity_id, address=wallet_address,
+            evidence_ids=[], attribution_source="typology.py",
+            raw_confidence=signal.get("confidence") or 0.5,
+            detail=f"typology signal {signal['signal']} ({signal.get('severity')}): "
+                   f"{signal.get('explanation')}")
 
     return features
 
@@ -505,7 +595,8 @@ def _view(scored: dict) -> dict:
 
 
 def score_wallet_risk(store, wallet_entity_id: str, wallet_address: str,
-                      hit: Optional[dict], service_tags: List[dict]) -> dict:
+                      hit: Optional[dict], service_tags: List[dict],
+                      typology_signals: Optional[List[dict]] = None) -> dict:
     """The risk object for one traced wallet.
 
     `hit` is the wallet_exchange_paths() row for this wallet (may be None if
@@ -514,13 +605,20 @@ def score_wallet_risk(store, wallet_entity_id: str, wallet_address: str,
     correlate._path_service_tags -- passed in rather than recomputed, so this
     function issues no new GraphSense/OFAC query of its own.
 
+    `typology_signals` (Loop 53, optional, default None) is
+    `typology.typology_signals`'s own output for this wallet -- omitted by
+    every pre-Loop-53 caller (wallet_trace_report's own call site), which
+    keeps their result byte-identical to before this loop. Callers that want
+    the BEHAVIORAL category (crypto_investigation.investigate_wallet) pass
+    it explicitly.
+
     Returns risk_score/risk_level/risk_policy_version/risk_categories plus
     wallet_risk/flow_risk/overall_risk sub-views (see module docstring for
     why overall_risk is not their sum) and risk_evidence for lineage.
     """
     metadata = store.metadata(wallet_entity_id) if wallet_entity_id else {}
     features = _extract_features(wallet_entity_id, wallet_address, hit,
-                                 service_tags, metadata)
+                                 service_tags, metadata, typology_signals)
 
     all_contribs = [_contribution(f) for f in features.values()]
     wallet_contribs = [c for c in all_contribs if c["dimension"] == WALLET]

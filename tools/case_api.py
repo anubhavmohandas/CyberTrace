@@ -156,6 +156,27 @@ def snapshot_body(cases_dir: Path, case_id: str, snapshot_id: str) -> dict | Non
         return store.snapshot_payload(snapshot_id)
 
 
+_NO_SUCH_CASE = object()
+
+
+def crypto_investigate(cases_dir: Path, case_id: str, address: str,
+                       chain: Optional[str] = None, max_hops: int = 4,
+                       max_transactions: int = 500):
+    """Loop 53: the canonical crypto investigation result for one wallet
+    already searched into `case_id` -- same `_case_db_path` traversal guard
+    every other case-scoped route already uses. Returns the sentinel
+    `_NO_SUCH_CASE` for "no such case" and a plain `None` for "case exists
+    but this wallet was never searched into it" -- the caller renders each
+    as its own distinct 404 message rather than conflating the two."""
+    db_path = _case_db_path(cases_dir, case_id)
+    if db_path is None or not db_path.is_file():
+        return _NO_SUCH_CASE
+    from cybertrace.crypto_investigation import investigate_wallet
+    with EvidenceStore(str(db_path)) as store:
+        return investigate_wallet(store, address, chain=chain, max_hops=max_hops,
+                                  max_transactions=max_transactions)
+
+
 def make_handler(cases_dir: Path):
     class Handler(SimpleHTTPRequestHandler):
         def _authorized(self) -> bool:
@@ -208,6 +229,27 @@ def make_handler(cases_dir: Path):
                     if payload is None:
                         return self._json({"error": "no such case"}, status=404)
                     return self._json(payload)
+                if rest.endswith("/crypto/investigate"):
+                    case_id = rest[:-len("/crypto/investigate")]
+                    qs = parse_qs(urlsplit(self.path).query)
+                    address = (qs.get("address") or [""])[0].strip()
+                    if not address:
+                        return self._json({"error": "address is required"}, status=400)
+                    chain = (qs.get("chain") or [None])[0]
+                    try:
+                        max_hops = int((qs.get("max_hops") or ["4"])[0])
+                        max_transactions = int((qs.get("max_transactions") or ["500"])[0])
+                    except ValueError:
+                        return self._json({"error": "max_hops/max_transactions must be integers"},
+                                          status=400)
+                    result = crypto_investigate(cases_dir, case_id, address, chain=chain,
+                                                max_hops=max_hops, max_transactions=max_transactions)
+                    if result is _NO_SUCH_CASE:
+                        return self._json({"error": "no such case"}, status=404)
+                    if result is None:
+                        return self._json(
+                            {"error": f"{address!r} was never searched into this case"}, status=404)
+                    return self._json(result)
                 payload = case_payload(cases_dir, rest)
                 if payload is None:
                     return self._json({"error": "no such case"}, status=404)

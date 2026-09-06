@@ -27,6 +27,25 @@ def _decode_trc20_transfer_recipient(data_hex: str) -> Optional[str]:
     return tron_hex_to_address("41" + param[-40:])
 
 
+def _decode_trc20_transfer_raw_amount(data_hex: str) -> Optional[int]:
+    """Raw (undecimalized) transfer() amount from the SAME calldata layout
+    _decode_trc20_transfer_recipient reads -- the 32-byte word immediately
+    after the address param. Returned raw, never divided: TRC20 token
+    decimals vary per contract (6 for USDT-TRC20, 18 for others) and this
+    module makes no extra call to look one up, so a human-readable value
+    would require guessing -- Loop 53's transactions table keeps this as
+    PARTIAL (real amount, undetermined decimals) rather than assume 6/18."""
+    if not data_hex.startswith(_ERC20_TRANSFER_SELECTOR):
+        return None
+    param = data_hex[72:136]
+    if len(param) != 64:
+        return None
+    try:
+        return int(param, 16)
+    except ValueError:
+        return None
+
+
 class TronModule(BaseModule):
     """
     TRON address investigation via TronGrid (official, free-tier no-auth API).
@@ -109,21 +128,41 @@ class TronModule(BaseModule):
         sent_to: set = set()
         received_from: set = set()
         first_seen = last_seen = None
+        # Loop 53: real per-tx rows, same loop, no new fetch. Native
+        # TransferContract carries a real SUN amount (fixed 6 decimals, a
+        # TRON protocol constant -- not token-configurable, so this one
+        # conversion is never a guess). TRC20 (TriggerSmartContract) and
+        # TRC10 (TransferAssetContract) amounts stay PARTIAL: their decimals
+        # vary per contract/asset and this module makes no extra call to
+        # look one up (see _decode_trc20_transfer_raw_amount's own docstring).
+        raw_transactions: List[dict] = []
         for tx in data['data']:
             ts = tx.get('block_timestamp')
+            iso = None
             if ts:
                 iso = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat()
                 first_seen = iso if first_seen is None else min(first_seen, iso)
                 last_seen = iso if last_seen is None else max(last_seen, iso)
+            tx_hash = tx.get('txID')
             for contract in tx.get('raw_data', {}).get('contract', []):
                 ctype = contract.get('type')
                 value = contract.get('parameter', {}).get('value', {})
                 hex_peers: List[Optional[str]] = []
                 owner = to_addr = None
-                if ctype in ('TransferContract', 'TransferAssetContract'):
+                tx_value: Optional[float] = None
+                asset = 'TRX'
+                status = 'FOUND'
+                if ctype == 'TransferContract':
                     hex_peers = [value.get('owner_address'), value.get('to_address')]
                     owner = tron_hex_to_address(value.get('owner_address') or '')
                     to_addr = tron_hex_to_address(value.get('to_address') or '')
+                    amount = value.get('amount')
+                    tx_value = amount / 1_000_000 if isinstance(amount, (int, float)) else None
+                elif ctype == 'TransferAssetContract':
+                    hex_peers = [value.get('owner_address'), value.get('to_address')]
+                    owner = tron_hex_to_address(value.get('owner_address') or '')
+                    to_addr = tron_hex_to_address(value.get('to_address') or '')
+                    asset, status = 'TRC10', 'PARTIAL'  # decimals unknown, see docstring above
                 elif ctype == 'TriggerSmartContract':
                     hex_peers = [value.get('owner_address')]
                     owner = tron_hex_to_address(value.get('owner_address') or '')
@@ -131,11 +170,26 @@ class TronModule(BaseModule):
                     if recipient:
                         counterparties.add(recipient)
                         to_addr = recipient
+                        asset, status = 'TRC20', 'PARTIAL'  # decimals unknown, see docstring above
                 if owner and to_addr and owner != to_addr:
                     if owner == address:
                         sent_to.add(to_addr)
+                        if tx_hash:
+                            raw_transactions.append({
+                                'tx_hash': tx_hash, 'direction': 'OUT', 'counterparty': to_addr,
+                                'asset': asset, 'value': tx_value, 'timestamp': iso,
+                                'block': None, 'fee': None,
+                                'provider': 'trongrid', 'status': status,
+                            })
                     elif to_addr == address:
                         received_from.add(owner)
+                        if tx_hash:
+                            raw_transactions.append({
+                                'tx_hash': tx_hash, 'direction': 'IN', 'counterparty': owner,
+                                'asset': asset, 'value': tx_value, 'timestamp': iso,
+                                'block': None, 'fee': None,
+                                'provider': 'trongrid', 'status': status,
+                            })
                 for hex_addr in hex_peers:
                     if not hex_addr:
                         continue
@@ -153,6 +207,7 @@ class TronModule(BaseModule):
             'counterparty_addresses': sorted(counterparties)[:20],
             'sent_to_addresses': sorted(sent_to)[:20],
             'received_from_addresses': sorted(received_from)[:20],
+            'raw_transactions': raw_transactions,
         })
 
     async def _check_exchange_tags(self, address: str) -> SourceResult:
@@ -206,6 +261,7 @@ class TronModule(BaseModule):
             'sent_to_addresses': [],
             'received_from_addresses': [],
             'connected_addresses': [],
+            'raw_transactions': [],
         }
 
         for source, res in result.sources.items():
@@ -230,6 +286,8 @@ class TronModule(BaseModule):
                 summary['sent_to_addresses'] = data['sent_to_addresses']
             if data.get('received_from_addresses'):
                 summary['received_from_addresses'] = data['received_from_addresses']
+            if data.get('raw_transactions'):
+                summary['raw_transactions'].extend(data['raw_transactions'])
 
             if source == 'exchange_tags' and data.get('tagged'):
                 summary['exchange_tag_categories'] = data.get('categories')

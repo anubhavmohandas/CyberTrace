@@ -1496,7 +1496,13 @@ def test_run_correlation_attaches_service_tags_to_a_wallet_exchange_path(tmp_pat
 
         brief = render_markdown(results["dossiers"], results)
         assert "## Observed service intelligence" in brief
-        vasp_section, _, service_section = brief.partition("## Observed service intelligence")
+        vasp_section, _, rest = brief.partition("## Observed service intelligence")
+        # Bounded to this section's OWN body (up to the next "## " header) --
+        # Loop 53 added later sections (e.g. "Investigation timeline") that
+        # legitimately restate a wallet's VASP exposure elsewhere in the
+        # document; this test's own separation claim is about the service-
+        # intelligence renderer specifically, not the whole rest of the file.
+        service_section, _, _ = rest.partition("\n## ")
         assert "crypto.com" in vasp_section        # the VASP section, unaffected
         assert coinjoin_addr in service_section
         assert "CoinJoin service" in service_section
