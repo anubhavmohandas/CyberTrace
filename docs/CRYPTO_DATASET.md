@@ -13,6 +13,13 @@ Nothing in `cybertrace/` imports this pipeline; it cannot regress Loop
 45/48/49/50, and its labels (below) must never be read as an OFAC-equivalent
 or law-enforcement finding.
 
+**This benchmark is Bitcoin-dominant, not evenly split across chains.**
+Bitcoin (via the already-local Elliptic++ corpus) supplies 1,124,460 of the
+1,127,460 total records; Ethereum is represented by a 3,000-address
+stratified enrichment sample, not a comparably large or independent
+Ethereum corpus. See §5 for the exact breakdown before drawing any
+cross-chain conclusion from this data.
+
 ## 2. Sourcing decisions
 
 | Source | Verdict | Reason |
@@ -73,8 +80,11 @@ or law-enforcement finding.
   because the license requires it.
 - **Label index:** `addr_labels_balanced.csv` (decompressed from the
   3.9MB `.csv.zst` via the system `zstd`/`unzstd` binary — no new Python
-  dependency). **114,771** labeled Ethereum addresses: **60,118 non-scam**,
-  **54,653 scam** (pre-balanced by the dataset's own author). Also carries
+  dependency). **114,771** labeled Ethereum addresses are available in this
+  index: **60,118 non-scam**, **54,653 scam** (pre-balanced by the dataset's
+  own author). **Only 3,000 of these 114,771 are actually enriched and
+  included in the benchmark** (see below) — the 114,771 figure describes
+  the source's own size, not this benchmark's Ethereum coverage. Also carries
   `description` (scam category, e.g. "phishing"), `activity_start_ts`/
   `activity_end_ts` (sometimes empty even for a labeled scam address — a
   real, valid record, not a parse failure), and `is_contract`.
@@ -184,13 +194,30 @@ under `data/`). The exact current counts:
 including the full `deferred_sources` reasoning already in §2 above — trimmed
 here to avoid repeating it twice.)
 
-**1,127,460 total rows** — comfortably past the 50k–100k floor and well into
-the 200k–500k+ strong-target band, from two independently-sourced,
-independently-licensed, differently-labeled datasets. The Ethereum live
-enrichment completed with **100% fetch success** on the full 3,000-address
-default sample (0 failures, 0 not-yet-checked) — a real result, not assumed;
-a production run against a less cooperative sample would show a mix of
-`success`/`failed` here, and that would be the correct, honest outcome too.
+**1,127,460 normalized records/observations**, broken down precisely:
+
+- **203,769** Bitcoin transaction nodes
+- **920,691** deduplicated Bitcoin address-timestep observations — across
+  **822,942 unique Bitcoin wallet addresses** (fewer than 920,691 because a
+  minority of addresses appear at more than one `Time step`; see §3.1 for
+  the full raw/dedup/unique breakdown — never conflate these three numbers)
+- **3,000** Ethereum wallet enrichments
+
+This comfortably clears the 50k–100k floor and reaches the 200k–500k+
+strong-target band by total record count. **It is not an even split across
+chains — this benchmark is Bitcoin-dominant.** Bitcoin accounts for
+1,124,460 of the 1,127,460 records (99.7%); Ethereum is represented by a
+3,000-address **stratified enrichment sample** (1,500 FRAUD + 1,500 LICIT),
+not a comparably large or independently-balanced Ethereum corpus. Treat any
+Ethereum-specific finding from this benchmark as drawn from that bounded
+sample, not from full Ethereum chain coverage — raising `--max-addresses`
+(see §8) grows it, but does not change this asymmetry by default.
+
+The Ethereum live enrichment completed with **100% fetch success** on the
+full 3,000-address default sample (0 failures, 0 not-yet-checked) — a real
+result, not assumed; a production run against a less cooperative sample
+would show a mix of `success`/`failed` here, and that would be the correct,
+honest outcome too.
 
 ## 6. Deduplication
 
