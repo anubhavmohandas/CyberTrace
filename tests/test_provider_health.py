@@ -236,6 +236,56 @@ class TestProbeEvmNetworks:
         assert "Etherscan" in result["polygon"]["error"]
 
 
+def _health(provider, status):
+    return ph.ProviderHealth(provider=provider, capability="x", configured=True,
+                              status=status, latency_ms=1.0, reason=None, checked_at="t")
+
+
+class TestCapabilitySummary:
+    """capability_summary() (Loop 52 §4): PROVIDER HEALTH is not CAPABILITY
+    AVAILABILITY -- one provider being DOWN must not read as the chain it
+    serves being unreachable if another provider covers it."""
+
+    def test_one_live_provider_makes_the_chain_available_even_if_others_are_down(self):
+        entries = [_health("etherscan_ethereum", ph.DOWN), _health("blockchair_ethereum", ph.LIVE)]
+        assert ph.capability_summary(entries)["ethereum"] == ph.AVAILABLE
+
+    def test_all_down_is_unavailable(self):
+        entries = [_health("solana_rpc", ph.DOWN)]
+        assert ph.capability_summary(entries)["solana"] == ph.UNAVAILABLE
+
+    def test_no_live_but_one_degraded_is_degraded(self):
+        entries = [_health("trongrid", ph.DEGRADED)]
+        assert ph.capability_summary(entries)["tron"] == ph.DEGRADED
+
+    def test_missing_provider_entries_are_unavailable_not_a_crash(self):
+        assert ph.capability_summary([])["bitcoin"] == ph.UNAVAILABLE
+
+    def test_every_chain_provider_maps_to_a_real_spec_id(self):
+        """A typo in _CHAIN_PROVIDERS would silently reduce an empty list to
+        UNAVAILABLE forever -- this pins the map against the real spec ids."""
+        spec_ids = {s.id for s in ph._live_provider_specs()}
+        for chain, ids in ph._CHAIN_PROVIDERS.items():
+            assert set(ids) <= spec_ids, f"{chain}: unknown provider id"
+
+    def test_vasp_attribution_is_its_own_bucket_not_folded_into_a_chain(self):
+        """VASP attribution is cross-chain (backed by the 3 offline datasets),
+        so it must be computed and reported separately -- never read off any
+        one chain's live-provider bucket."""
+        entries = [_health("ofac", ph.LIVE), _health("exchange_tags", ph.DOWN),
+                   _health("ellipticpp", ph.DOWN)]
+        summary = ph.capability_summary(entries)
+        assert summary["vasp_attribution"] == ph.AVAILABLE
+        # None of the live crypto providers were given a status, so every
+        # chain bucket must independently read UNAVAILABLE -- proof the ofac
+        # LIVE entry above didn't leak into a chain bucket.
+        for chain in ph._CHAIN_PROVIDERS:
+            assert summary[chain] == ph.UNAVAILABLE
+
+    def test_vasp_attribution_reduces_from_the_offline_dataset_ids_exactly(self):
+        assert set(ph._VASP_ATTRIBUTION_PROVIDERS) == set(ph._OFFLINE_LABELS)
+
+
 class TestBtcAddressFamily:
     def test_legacy(self):
         assert "Legacy" in btc_address_family("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa")

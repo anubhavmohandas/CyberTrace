@@ -29,6 +29,14 @@ from .config import config
 
 LIVE, DEGRADED, DOWN, NOT_CONFIGURED = "LIVE", "DEGRADED", "DOWN", "NOT_CONFIGURED"
 
+# capability_summary()'s output vocabulary -- deliberately distinct from the
+# per-provider LIVE/DOWN/NOT_CONFIGURED states above (PROVIDER HEALTH is not
+# CAPABILITY AVAILABILITY: one provider being DOWN does not mean the chain it
+# serves is unreachable if another provider covers it). DEGRADED is shared
+# with the per-provider vocabulary on purpose -- "usable but degraded" means
+# the same thing at both levels.
+AVAILABLE, UNAVAILABLE = "AVAILABLE", "UNAVAILABLE"
+
 # Above this, a successful response still isn't "fine" to an investigator
 # waiting on it.
 _DEGRADED_LATENCY_MS = 3000.0
@@ -135,6 +143,50 @@ def _live_provider_specs() -> List[_ProviderSpec]:
     ]
 
 
+# Which chain(s) each live provider's capability actually serves -- used only
+# by capability_summary() below, kept separate from _live_provider_specs()
+# because it's a read of that list, not a property of any one probe.
+# chainabuse covers both chains its capability string names ("BTC/ETH abuse
+# reports"); every other provider serves exactly one chain.
+_CHAIN_PROVIDERS: Dict[str, tuple] = {
+    "bitcoin": ("blockchain_info", "blockchair_bitcoin", "blockstream", "cryptoscamdb", "chainabuse"),
+    "ethereum": ("blockchair_ethereum", "chainabuse", "ethplorer", "etherscan_ethereum"),
+    "bnb": ("nodereal_bnb",),
+    "polygon": ("etherscan_polygon",),
+    "tron": ("trongrid",),
+    "solana": ("solana_rpc",),
+}
+# VASP attribution is cross-chain by definition -- it comes from the 3
+# offline datasets (see _OFFLINE_LABELS below), never from a chain's live
+# probes, so it is never folded into one of the chain buckets above.
+_VASP_ATTRIBUTION_PROVIDERS = ("ofac", "exchange_tags", "ellipticpp")
+
+
+def capability_summary(entries: List[ProviderHealth]) -> Dict[str, str]:
+    """Reduces per-provider health into per-CAPABILITY availability (spec
+    section 4): AVAILABLE if at least one provider for that capability is
+    LIVE (e.g. Etherscan DOWN + Alchemy LIVE => Ethereum tx intelligence is
+    still AVAILABLE, not DOWN), DEGRADED if none are LIVE but at least one is
+    DEGRADED, else UNAVAILABLE. Returns one entry per chain in
+    _CHAIN_PROVIDERS plus a separate "vasp_attribution" entry -- VASP
+    attribution is cross-chain and must never be read off a single chain's
+    bucket.
+    """
+    by_id = {e.provider: e.status for e in entries}
+
+    def reduce_for(provider_ids) -> str:
+        statuses = [by_id[i] for i in provider_ids if i in by_id]
+        if any(s == LIVE for s in statuses):
+            return AVAILABLE
+        if any(s == DEGRADED for s in statuses):
+            return DEGRADED
+        return UNAVAILABLE
+
+    summary = {chain: reduce_for(ids) for chain, ids in _CHAIN_PROVIDERS.items()}
+    summary["vasp_attribution"] = reduce_for(_VASP_ATTRIBUTION_PROVIDERS)
+    return summary
+
+
 _OFFLINE_LABELS = {
     "ofac": "OFAC sanctions screening (offline dataset)",
     "exchange_tags": "VASP attribution labels — GraphSense TagPacks (offline dataset)",
@@ -232,6 +284,31 @@ def demo() -> None:
     evm_addr = re.compile(r'^0x[a-fA-F0-9]{40}$')
     for addr in (_ETH_PROBE_ADDR, _BNB_PROBE_ADDR, _POLYGON_PROBE_ADDR):
         assert evm_addr.match(addr), f"malformed EVM probe address: {addr!r}"
+
+    # capability_summary: every id it reduces over must be a real spec/offline
+    # id (a typo here would silently reduce an empty list to UNAVAILABLE).
+    spec_ids = {s.id for s in specs}
+    for chain, ids in _CHAIN_PROVIDERS.items():
+        assert set(ids) <= spec_ids, f"{chain}: unknown provider id in {ids}"
+    assert set(_VASP_ATTRIBUTION_PROVIDERS) == set(_OFFLINE_LABELS)
+
+    def _health(provider, status):
+        return ProviderHealth(provider=provider, capability="x", configured=True,
+                               status=status, latency_ms=1.0, reason=None, checked_at="t")
+
+    # spec section 4's exact example: one provider DOWN does not make the
+    # capability DOWN if another provider for the same chain is LIVE.
+    mixed = [_health("etherscan_ethereum", DOWN), _health("blockchair_ethereum", LIVE)]
+    assert capability_summary(mixed)["ethereum"] == AVAILABLE
+    degraded_only = [_health("trongrid", DEGRADED)]
+    assert capability_summary(degraded_only)["tron"] == DEGRADED
+    all_down = [_health("solana_rpc", DOWN)]
+    assert capability_summary(all_down)["solana"] == UNAVAILABLE
+    # vasp_attribution must reduce from the offline datasets, never a chain.
+    vasp_live = [_health("ofac", LIVE), _health("exchange_tags", DOWN), _health("ellipticpp", DOWN)]
+    assert capability_summary(vasp_live)["vasp_attribution"] == AVAILABLE
+    assert capability_summary([])["vasp_attribution"] == UNAVAILABLE
+
     print("provider_health self-check OK")
 
 

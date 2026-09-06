@@ -1105,11 +1105,13 @@ def providers_cmd(as_json: bool, refresh: bool):
     import asyncio
     import json as _json
 
-    from .provider_health import check_all
+    from .provider_health import capability_summary, check_all
 
     entries = asyncio.run(check_all(force=refresh))
+    capabilities = capability_summary(entries)
     if as_json:
-        click.echo(_json.dumps([e.to_dict() for e in entries], indent=2))
+        click.echo(_json.dumps({"providers": [e.to_dict() for e in entries],
+                                 "capabilities": capabilities}, indent=2))
         return
 
     click.echo("\n=== CyberTrace Provider Health ===\n")
@@ -1122,6 +1124,15 @@ def providers_cmd(as_json: bool, refresh: bool):
     live = sum(1 for e in entries if e.status == 'LIVE')
     click.echo(f"\n  {live}/{len(entries)} providers live. No provider here has an "
                f"automatic fallback today -- see each row's reason when DOWN/NOT_CONFIGURED.\n")
+
+    click.echo("=== Capability Availability ===")
+    click.echo("  (a provider being DOWN does not mean the capability is -- see if another")
+    click.echo("   provider covers the same chain; vasp_attribution is cross-chain, not")
+    click.echo("   part of any one chain's bucket)\n")
+    cap_icon = {'AVAILABLE': '✓', 'DEGRADED': '~', 'UNAVAILABLE': '✗'}
+    for name, status in capabilities.items():
+        click.echo(f"  [{cap_icon.get(status, '?')}] {name:20} {status}")
+    click.echo()
 
 
 @cli.command('detect')

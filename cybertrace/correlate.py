@@ -31,7 +31,8 @@ from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Set
 
-from .evidence import ANALYST_TARGET, _INDEX_SOURCES, EvidenceStore, detect_clones, utcnow
+from .evidence import (ANALYST_TARGET, _INDEX_SOURCES, WALLET_ETYPES_SQL,
+                        EvidenceStore, detect_clones, utcnow)
 from .normalize import _registrable
 
 # Which edges count as which funnel. Keyed on the relationship types `ingest()`
@@ -872,7 +873,7 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
     raw = {r["entity_id"]: (r["raw_value"] or r["normalized_value"], r["etype"])
            for r in store._all(
                "SELECT entity_id, etype, raw_value, normalized_value FROM entities "
-               "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS','BNB_ADDRESS','POLYGON_ADDRESS','TRX_ADDRESS','SOL_ADDRESS')")}
+               f"WHERE etype IN ({WALLET_ETYPES_SQL})")}
     by_currency: Dict[str, List[str]] = defaultdict(list)
     for entity_id, (value, etype) in raw.items():
         currency = _TAG_CURRENCY.get(etype)
@@ -1030,7 +1031,7 @@ def cross_chain_links(store: EvidenceStore) -> List[dict]:
     raw = {r["entity_id"]: (r["raw_value"] or r["normalized_value"], r["etype"])
            for r in store._all(
                "SELECT entity_id, etype, raw_value, normalized_value FROM entities "
-               "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS','BNB_ADDRESS','POLYGON_ADDRESS','TRX_ADDRESS','SOL_ADDRESS')")}
+               f"WHERE etype IN ({WALLET_ETYPES_SQL})")}
     values = {eid: v for eid, (v, _e) in raw.items()}
     exchange_of = _vasp_endpoints(store, values)
 
@@ -1419,7 +1420,7 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
     # raw_value; every other reader was getting the key.
     wallet_rows = store._all(
         "SELECT entity_id, normalized_value, raw_value, etype FROM entities "
-        "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS','BNB_ADDRESS','POLYGON_ADDRESS','TRX_ADDRESS','SOL_ADDRESS')")
+        f"WHERE etype IN ({WALLET_ETYPES_SQL})")
     values = {r["entity_id"]: (r["raw_value"] or r["normalized_value"]) for r in wallet_rows}
     # Same etype string monitor.py's wallets_checked already reports as
     # "chain" (recheck()) -- every EVM chain's address string is otherwise
@@ -1612,7 +1613,7 @@ def unattributed_wallet_candidates(store: EvidenceStore, max_hops: int = 4) -> L
 
     wallet_rows = store._all(
         "SELECT entity_id, normalized_value, raw_value, etype FROM entities "
-        "WHERE etype IN ('BTC_ADDRESS','ETH_ADDRESS','BNB_ADDRESS','POLYGON_ADDRESS','TRX_ADDRESS','SOL_ADDRESS')")
+        f"WHERE etype IN ({WALLET_ETYPES_SQL})")
     values = {r["entity_id"]: (r["raw_value"] or r["normalized_value"]) for r in wallet_rows}
     chain_of = {r["entity_id"]: r["etype"] for r in wallet_rows}
 

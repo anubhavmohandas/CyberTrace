@@ -1549,6 +1549,66 @@ def test_wallet_feedback_round_trips_and_keeps_every_revision(tmp_path):
         assert store.wallet_feedback_for(other) == []
 
 
+def test_wallet_etypes_sql_matches_the_original_hardcoded_literal():
+    """WALLET_ETYPES_SQL replaced an identical hardcoded IN(...) literal
+    duplicated 5 times across correlate.py/monitor.py (Loop 52) -- pins the
+    generated SQL fragment to the exact same 6 quoted etypes so that
+    refactor stays a no-op."""
+    from cybertrace.evidence import WALLET_ETYPES_SQL
+    original_literal = "'BTC_ADDRESS','ETH_ADDRESS','BNB_ADDRESS','POLYGON_ADDRESS','TRX_ADDRESS','SOL_ADDRESS'"
+    assert set(WALLET_ETYPES_SQL.split(",")) == set(original_literal.split(","))
+
+
+# --- case_has_crypto_artifacts (Loop 52) ---------------------------------
+
+def test_empty_case_has_no_crypto_artifacts(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        assert store.case_has_crypto_artifacts() is False
+
+
+def test_a_non_wallet_entity_is_not_a_crypto_artifact(tmp_path):
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        store.upsert_entity("DOMAIN", "example.com")
+        store.upsert_entity("EMAIL", "a@example.com")
+        assert store.case_has_crypto_artifacts() is False
+
+
+_VALID_WALLET_ADDR = {
+    "BTC_ADDRESS": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+    "ETH_ADDRESS": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "BNB_ADDRESS": "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56",
+    "POLYGON_ADDRESS": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+    "TRX_ADDRESS": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+    "SOL_ADDRESS": "So11111111111111111111111111111111111111112",
+}
+
+
+def test_any_single_wallet_etype_makes_the_case_crypto_relevant(tmp_path):
+    """Attribution success is irrelevant here -- a wallet with zero VASP
+    proximity hits is still a crypto artifact (Loop 52 spec section 2).
+    Uses real, format-valid addresses -- upsert_entity silently rejects
+    (returns None, no row written) a value normalize() can't validate, so a
+    placeholder string here would pass this assertion for the wrong reason."""
+    for etype, addr in _VALID_WALLET_ADDR.items():
+        with EvidenceStore(str(tmp_path / f"e_{etype}.db")) as store:
+            assert store.upsert_entity(etype, addr) is not None
+            assert store.case_has_crypto_artifacts() is True
+
+
+def test_xmr_address_is_not_in_wallet_etypes_and_does_not_count(tmp_path):
+    """XMR_ADDRESS exists as an entity type elsewhere in this codebase but is
+    deliberately excluded from WALLET_ETYPES (Monero never appears in a
+    wallet_exchange_paths row) -- must not make a case crypto-relevant here
+    either, for the same reason. Uses the real Monero project donation
+    address -- a placeholder string would fail normalize()'s structural
+    validation and never reach the etype check this test means to exercise."""
+    monero_donation_addr = ("888tNkZrPN6JsEgekjMnABU4TBzc2Dt29EPAvkRxbANsAnjyPbb3iQ1"
+                             "YBRk1UXcdRsiKc9dhwMVgN5S9cQUiyoogDavup3H")
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        assert store.upsert_entity("XMR_ADDRESS", monero_donation_addr) is not None
+        assert store.case_has_crypto_artifacts() is False
+
+
 def test_label_exchange_writes_an_analyst_asserted_fact(tmp_path):
     """label_exchange is the only writer of EXCHANGE_DEPOSIT edges, and it must
     look like analyst_feedback -- provenance-tracked, never an OSINT-derived

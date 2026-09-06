@@ -209,6 +209,12 @@ def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
         "captures": captures, "suppressed": suppressed,
         "markets": sorted(targets.values()),
         "market_relationships": market_relationships,
+        # Loop 52: whether this case has any crypto-address artifact at all
+        # (independent of whether attribution ever succeeded) -- the GUI's
+        # gate for showing crypto/VASP intelligence panels at all, instead of
+        # rendering them unconditionally for every case regardless of
+        # relevance. See EvidenceStore.case_has_crypto_artifacts.
+        "case_has_crypto": store.case_has_crypto_artifacts(),
         "wallet_exchange_paths": results["wallet_exchange_paths"],
         # Loop 45: fingerprint-based candidates for wallets the BFS above
         # found nothing for at all -- see correlate.unattributed_wallet_

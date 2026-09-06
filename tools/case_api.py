@@ -116,12 +116,17 @@ def run_search(target: str) -> dict:
     return result.to_dict()
 
 
-def provider_health() -> list[dict]:
+def provider_health() -> dict:
     """Live provider health, cached a few minutes -- see provider_health.py
     for why "a key is set" and "the API actually answered" are kept as two
-    different facts."""
-    from cybertrace.provider_health import check_all
-    return [e.to_dict() for e in asyncio.run(check_all())]
+    different facts. capability_summary() reduces the per-provider rows to
+    per-chain + cross-chain vasp_attribution availability (Loop 52 §4): one
+    provider being DOWN does not mean the chain it serves is unreachable if
+    another provider covers it."""
+    from cybertrace.provider_health import capability_summary, check_all
+    entries = asyncio.run(check_all())
+    return {"providers": [e.to_dict() for e in entries],
+            "capabilities": capability_summary(entries)}
 
 
 def detect_address(address: str) -> dict:

@@ -330,6 +330,11 @@ CASE_STATUSES = {"OPEN", "CLOSED", "ARCHIVED"}
 WALLET_ETYPES = {"BTC_ADDRESS", "ETH_ADDRESS", "BNB_ADDRESS", "POLYGON_ADDRESS",
                  "TRX_ADDRESS", "SOL_ADDRESS"}
 
+# Pre-built for the several raw "etype IN (...)" SQL literals across
+# correlate.py/monitor.py that filter to WALLET_ETYPES -- one source for the
+# quoted list instead of each call site re-typing the same 6 strings.
+WALLET_ETYPES_SQL = ",".join(f"'{e}'" for e in sorted(WALLET_ETYPES))
+
 # Netblock owners that are anonymity egress rather than origin hosting. The
 # distinction changes the next investigative step, not the score: for a tunnel
 # exit the subscriber logs may never have existed, so a candidate built on one
@@ -949,6 +954,19 @@ class EvidenceStore:
     # never an UPSERT, an unknown outcome or entity_id raises rather than
     # silently no-opping, and this never overwrites the automated wallet_role/
     # attribution/risk fields it sits beside.
+
+    def case_has_crypto_artifacts(self) -> bool:
+        """Whether this case has ever seen a crypto-address entity at all --
+        the gate for whether crypto/VASP intelligence panels are relevant to
+        this case, independent of whether attribution ever succeeded (a
+        wallet with zero VASP proximity hits is still a crypto artifact).
+        Was a hardcoded WALLET_ETYPES IN(...) SQL literal duplicated in 5
+        places (correlate.py x4, monitor.py x1); this is the one shared
+        predicate they now all call."""
+        placeholders = ",".join("?" * len(WALLET_ETYPES))
+        return self._one(
+            f"SELECT 1 FROM entities WHERE etype IN ({placeholders}) LIMIT 1",
+            tuple(WALLET_ETYPES)) is not None
 
     def record_wallet_feedback(self, entity_id: str, outcome: str,
                                note: Optional[str] = None,

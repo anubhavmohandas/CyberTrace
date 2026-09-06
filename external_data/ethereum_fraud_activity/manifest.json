@@ -1,0 +1,30 @@
+{
+  "dataset": "Ethereum Address Behavior Dataset -- GNN + LSTM (Fraud Detection), labeled address index",
+  "description": "A balanced list of ~115k Ethereum addresses labeled scam/non-scam and contract/EOA, built by fesevu from Google's public BigQuery Ethereum chain export (bigquery-public-data.crypto_ethereum.transactions) cross-referenced with Etherscan labels and curated scam lists. Only the small labeled-address index is used here (addr_labels_balanced.csv.zst, 3.9MB) -- the same HF repo also hosts ~73GB of raw transaction-edge parquet (GNN/LSTM training data) that is intentionally NOT downloaded; behavioral features for a bounded sample of these addresses are instead computed by CyberTrace's own live Etherscan integration (see tools/build_crypto_benchmark.py), independent of this static file.",
+  "source_url": "https://huggingface.co/datasets/fesevu/ethereum_fraud_dataset_by_activity",
+  "pipeline_repo": "https://github.com/fesevu/eth-fraud-dataset-pipeline",
+  "kaggle_mirror": "https://www.kaggle.com/datasets/fesevu/ethereum-fraud-dataset-by-activity/data",
+  "license": "cc-by-4.0",
+  "license_note": "Declared by the HuggingFace dataset card (cardData.license). Freely redistributable with attribution -- unlike Elliptic++ (external_data/ellipticpp), this source's license permits committing the small labeled index if ever desired; kept under external_data/*/original/ (gitignored) anyway, for consistency with every other external corpus in this project.",
+  "dataset_version": "as published to HuggingFace main, retrieved 2026-09-06",
+  "retrieved_at": "2026-09-06T00:00:00Z",
+  "distribution_channel": {
+    "channel": "https_direct_download",
+    "url": "https://huggingface.co/datasets/fesevu/ethereum_fraud_dataset_by_activity/resolve/main/addr_labels_balanced.csv.zst",
+    "archive_file": "original/addr_labels_balanced.csv.zst",
+    "archive_sha256": "52941005bd44d2597037e2e1c932e4d25fcf9c855980f442896cb497d1827b39",
+    "archive_size_bytes": 3851967,
+    "decompressed_file": "original/addr_labels_balanced.csv",
+    "decompression_tool": "system zstd/unzstd binary via subprocess -- no new Python dependency"
+  },
+  "schema_notes": {
+    "format": "CSV: address,is_scam,description,activity_start_ts,activity_end_ts,is_contract",
+    "row_count": 114771,
+    "is_scam_distribution": {"0": 60118, "1": 54653},
+    "is_contract_distribution": {"0": 45040, "1": 69721, "unknown_or_malformed": 10},
+    "description_field": "Free-text scam category (e.g. 'phishing') when is_scam=1; usually empty when is_scam=0. Contains embedded commas in some rows -- must be parsed with csv.DictReader, not naive comma-splitting.",
+    "activity_start_ts_end_ts": "Sometimes empty even for is_scam=1 rows -- a labeled scam address with no known on-chain activity window in the source is a real, valid record, not a parsing failure."
+  },
+  "known_limitations": "The address labels here are the author's own curation (BigQuery + Etherscan + scam-list cross-reference), not an OFAC/regulatory designation -- weaker evidentiary tier than external_data/ofac, comparable in spirit to external_data/exchange_tags' community-sourced tags. Behavioral features CyberTrace computes for a sample of these addresses come from a live Etherscan txlist call capped at the most recent 20 transactions per address (see BitcoinModule._fetch_evm_account_txs's own 'shallow-sample-not-full-history' design) -- a real but narrow window, not full transaction history.",
+  "safety_boundary": "A FRAUD/LICIT ground_truth_label from this source is this dataset's own curation, not a regulatory or law-enforcement designation -- must never be rendered as an OFAC-equivalent finding, and this file is never wired into cybertrace/'s live VASP attribution engine (correlate.py/attribution.py) -- it feeds only the standalone research benchmark in tools/build_crypto_benchmark.py."
+}

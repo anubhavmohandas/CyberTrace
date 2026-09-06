@@ -30,7 +30,7 @@ import asyncio
 import json
 from typing import Any, Dict, List, Optional
 
-from .evidence import EvidenceStore, ingest, utcnow
+from .evidence import EvidenceStore, WALLET_ETYPES_SQL, ingest, utcnow
 
 # What a re-check can conclude about one target.
 LIVE_CHANGED, LIVE_SAME, WENT_DARK, BACK_UP = "CHANGED", "UNCHANGED", "DARK", "BACK_UP"
@@ -89,7 +89,7 @@ def wallet_targets(store: EvidenceStore) -> List[dict]:
         "JOIN observations o ON o.entity_id = e.entity_id "
         "JOIN snapshots s ON s.snapshot_id = o.snapshot_id "
         "JOIN targets t ON t.target_id = s.target_id "
-        "WHERE e.etype IN ('BTC_ADDRESS','ETH_ADDRESS','BNB_ADDRESS','POLYGON_ADDRESS','TRX_ADDRESS','SOL_ADDRESS') "
+        f"WHERE e.etype IN ({WALLET_ETYPES_SQL}) "
         "AND o.extraction_method LIKE '%:enrichment' "
         "ORDER BY t.last_seen DESC")
     return [{"entity_id": r["entity_id"], "etype": r["etype"], "address": r["address"],

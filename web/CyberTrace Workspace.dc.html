@@ -730,10 +730,24 @@ window.__resources = {
         <sc-if value="{{ tabSources }}" hint-placeholder-val="{{ false }}">
           <div style="display:flex;flex-direction:column;gap:26px;max-width:1040px">
 
+            <sc-if value="{{ caseCryptoInactive }}" hint-placeholder-val="{{ false }}">
+              <div style="border:1px solid #1c2427;padding:14px 16px;color:#67716f;font-size:12px">
+                Cryptocurrency intelligence is inactive for this case — no wallet/blockchain
+                address artifacts detected. Add a BTC/ETH/BNB/Polygon/TRON/Solana address to
+                activate provider health and VASP attribution panels.
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ caseCryptoRelevant }}" hint-placeholder-val="{{ false }}">
             <div>
               <div style="display:flex;align-items:baseline;justify-content:space-between;padding-bottom:12px;border-bottom:1px solid #171c1f">
                 <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#67716f">PROVIDER HEALTH</div>
                 <div style="font-size:12px;color:#5a6367">live check, not just "key configured" — {{ providerHealthSummary }}</div>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:8px;padding:10px 0;border-bottom:1px solid #171c1f">
+                <sc-for list="{{ capabilityBadges }}" as="cap" hint-placeholder-count="4">
+                  <div style="border:1px solid #1c2427;padding:4px 10px;font:500 10.5px/1 'IBM Plex Mono',monospace;color:{{ cap.color }}">{{ cap.name }} · {{ cap.status }}</div>
+                </sc-for>
               </div>
               <div style="display:flex;flex-direction:column">
                 <sc-for list="{{ providerHealthRows }}" as="p" hint-placeholder-count="4">
@@ -754,6 +768,7 @@ window.__resources = {
                 <div style="border:1px solid #1c2427;border-top:none;padding:10px 16px;color:#5a6367;font-size:11px">No provider above has an automatic fallback today — each runs alone, or (Bitcoin/Ethereum) several run in parallel and their results are merged, not chained.</div>
               </div>
             </div>
+            </sc-if>
 
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
               <sc-for list="{{ sourceGroups }}" as="g" hint-placeholder-count="2">
@@ -1086,7 +1101,7 @@ const detectUrl = (addr) => API_BASE + '/api/detect?address=' + encodeURICompone
 const apiFetch = (url, opts) => fetch(url, window.__CT_API_KEY
   ? { ...opts, headers: { ...(opts && opts.headers), 'X-CT-Api-Key': window.__CT_API_KEY } }
   : opts);
-const EMPTY_CASE = { case_id:'', title:'', stats:[], candidates:[], drawers:{}, evidence:[], timeline:[], captures:[], suppressed:[], markets:[], market_relationships:[], notes:[], wallet_exchange_paths:[], risk_alerts:[], data_source_status:{} };
+const EMPTY_CASE = { case_id:'', title:'', stats:[], candidates:[], drawers:{}, evidence:[], timeline:[], captures:[], suppressed:[], markets:[], market_relationships:[], notes:[], wallet_exchange_paths:[], risk_alerts:[], data_source_status:{}, case_has_crypto:false };
 
 const ETYPE_COLOR = { PGP_KEY:C.violet, EMAIL:C.green, BTC_ADDRESS:C.sand, ONION_ADDRESS:C.cyan, IP:'#4c565a' };
 
@@ -1409,7 +1424,7 @@ class Component extends DCLogic {
     caseData: null, loadError: null, cases: [],
     searchResult: null, searching: false, searchError: null, searchOpen: {},
     detectResult: null,
-    providerHealth: [], providerHealthError: null
+    providerHealth: [], capabilities: {}, providerHealthError: null
   };
 
   componentDidMount() {
@@ -1423,27 +1438,38 @@ class Component extends DCLogic {
         else this.setState({ loadError: 'no cases in cases/ yet' });
       })
       .catch(err => this.setState({ loadError: String(err) }));
-    this.loadProviderHealth();
+    // Not called here unconditionally -- see loadCase, which only fires this
+    // once a case is loaded and known to actually have a crypto artifact.
   }
 
   loadProviderHealth() {
     // "A key is configured" and "the API just answered" are different facts
     // (see cybertrace/provider_health.py) -- this is the live one, cached a
     // few minutes server-side so opening the workspace repeatedly doesn't
-    // spend quota against a rate-limited free-tier key.
+    // spend quota against a rate-limited free-tier key. Only called for a
+    // case with a crypto artifact (see loadCase) -- a non-crypto case has no
+    // use for a ~15-provider health sweep.
     apiFetch(providersUrl)
       .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
-      .then(providerHealth => this.setState({ providerHealth, providerHealthError: null }))
+      .then(({ providers, capabilities }) => this.setState({
+        providerHealth: providers, capabilities: capabilities || {}, providerHealthError: null
+      }))
       .catch(err => this.setState({ providerHealthError: String(err) }));
   }
 
   loadCase(id) {
     apiFetch(caseUrl(id))
       .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
-      .then(data => this.setState({
-        caseData: data, loadError: null,
-        thread: [{ role:'INVESTIGATOR', text:`Loaded ${data.case_id} — ${data.title}. Ask why any candidate is here, or what the engine rejected.`, points:[] }]
-      }))
+      .then(data => {
+        this.setState({
+          caseData: data, loadError: null,
+          thread: [{ role:'INVESTIGATOR', text:`Loaded ${data.case_id} — ${data.title}. Ask why any candidate is here, or what the engine rejected.`, points:[] }]
+        });
+        // Crypto/VASP intelligence is a modular capability, not a global
+        // dashboard feature -- only sweep ~15 providers when this case
+        // actually has a wallet/blockchain-address artifact (spec Loop 52 §2).
+        if (data.case_has_crypto) this.loadProviderHealth();
+      })
       .catch(err => this.setState({ loadError: String(err) }));
   }
 
@@ -1719,6 +1745,19 @@ class Component extends DCLogic {
       sourceGroups: [
         { name:'TOR', meta:`${cd.markets.length} targets · ${cd.captures.length} snapshots`, note:'Bounded same-host crawls through a local SOCKS proxy. Nothing leaves the evidence machine.' }
       ],
+
+      // Crypto/VASP intelligence is a modular capability (Loop 52 §2), not a
+      // permanent global dashboard feature -- this case's own artifacts, not
+      // "does CyberTrace support crypto," decide whether the panel is shown.
+      caseCryptoRelevant: !!cd.case_has_crypto,
+      caseCryptoInactive: !cd.case_has_crypto,
+      // capability_summary()'s per-chain + cross-chain vasp_attribution
+      // reduction (see cybertrace/provider_health.py) -- distinct from the
+      // per-provider rows below: one provider DOWN doesn't mean the chain is.
+      capabilityBadges: Object.entries(st.capabilities || {}).map(([name, status]) => ({
+        name, status,
+        color: status === 'AVAILABLE' ? C.green : status === 'DEGRADED' ? C.sand : C.red,
+      })),
 
       // "Configured" (a key exists) and "live" (the API actually answered)
       // are different facts -- see cybertrace/provider_health.py. No row
