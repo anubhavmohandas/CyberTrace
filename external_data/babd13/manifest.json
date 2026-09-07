@@ -1,0 +1,33 @@
+{
+  "dataset": "BABD-13",
+  "description": "Bitcoin Address Behavior Dataset -- 544,462 labeled Bitcoin addresses across 13 behavior classes, 148 features.",
+  "source_url": "https://www.kaggle.com/datasets/lemonx/babd13",
+  "paper_arxiv": "https://arxiv.org/abs/2204.05746",
+  "citation": "Yuchi Xiang et al. 2024. BABD: A Bitcoin Address Behavior Dataset for Pattern Analysis. IEEE Transactions on Information Forensics and Security.",
+  "code_repo": "https://github.com/Y-Xiang-hub/Bitcoin-Address-Behavior-Analysis (Apache-2.0 -- covers the collection/preprocessing code, NOT a statement about the dataset's own redistribution terms)",
+  "license_status": "UNKNOWN",
+  "license_note": "Kaggle's dataset page states no explicit license (page is JS-rendered, not readable via unauthenticated fetch -- same limitation already documented for other Kaggle sources in docs/CRYPTO_DATASET.md). Treat as non-redistributable, same policy as external_data/ellipticpp: kept local, gitignored, never republished.",
+  "dataset_version": "as downloaded from Kaggle by the project owner, 2026-09-07",
+  "acquisition_note": "Downloaded manually by the project owner via a Kaggle account (this environment has no Kaggle API credentials) and supplied at ~/Downloads/BABD-13.csv; copied into place, not fetched by any script here.",
+  "files": [
+    {"name": "BABD-13.csv", "local": "original/BABD-13.csv", "rows": 544462,
+     "sha256": "766b5d51af956b1a619775e5522d0c15f0c1c2ef272f87949d8bd1a685f332b6"}
+  ],
+  "schema_notes": {
+    "columns": "account (real base58 BTC address), SW (SA=Strong Address / WA=Weak Address -- the paper's own label-confidence distinction), 148 numeric behavioral feature columns, label (0-12).",
+    "label_map": {
+      "0": "BLACKMAIL", "1": "CYBER_SECURITY_SERVICE", "2": "DARKNET_MARKET",
+      "3": "CENTRALIZED_EXCHANGE", "4": "P2P_FINANCIAL_INFRASTRUCTURE",
+      "5": "P2P_FINANCIAL_SERVICE", "6": "GAMBLING", "7": "GOVERNMENT_CRIMINAL_BLACKLIST",
+      "8": "MONEY_LAUNDERING", "9": "PONZI_SCHEME", "10": "MINING_POOL",
+      "11": "TUMBLER", "12": "INDIVIDUAL_WALLET"
+    },
+    "label_map_source": "Cross-checked against arXiv 2204.05746 Table I's per-class address counts -- every one of the 13 counts in the paper matched this CSV's own label-value counts exactly (0:8686, 1:91617, 2:13861, 3:300000, 4:180, 5:9309, 6:105257, 7:27, 8:16, 9:15, 10:1580, 11:12412, 12:1502), confirming the index order independently rather than assuming it."
+  },
+  "data_quality_findings": {
+    "unique_accounts": 542368,
+    "raw_rows": 544462,
+    "exact_duplicate_rows": "~527 rows are byte-identical repeats of another row (same account, same SW, same label) -- deduplicated on ingestion, same policy as external_data/ellipticpp.",
+    "label_conflicts": "1,414 accounts (0.26%) appear more than once with DIFFERENT label values across their rows (3,216 rows total) -- a real upstream data-quality defect, not a parsing error (verified by direct inspection, e.g. account 149w62rY42aZBox8fGcmqNsXUzSStKeq8C is labeled both class 0 (BLACKMAIL) and class 8 (MONEY_LAUNDERING) in different rows). These are never resolved by picking one label arbitrarily -- see tools/build_crypto_benchmark.py's load_babd13_wallets, which marks them ground_truth_label=LABEL_CONFLICT and excludes them from any label-based split or the balanced subset."
+  }
+}

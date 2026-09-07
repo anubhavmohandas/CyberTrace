@@ -148,6 +148,66 @@ class TestLoadEllipticWallets:
         assert rows["addrC"]["split"] == "val"    # timestep 38
 
 
+# --- B1b: BABD-13 wallets (own taxonomy, conflict handling) -----------------
+
+@pytest.fixture
+def babd13_dir(tmp_path, monkeypatch):
+    d = tmp_path / "babd13"
+    header = ["account", "SW", "feat1", "feat2", "label"]
+    rows = [
+        ["addrX", "SA", "1.0", "2.0", "3"],   # CENTRALIZED_EXCHANGE, strong
+        ["addrY", "WA", "0.5", "", "6"],      # GAMBLING, weak, missing feature
+        ["addrZ", "SA", "0.1", "0.2", "0"],   # first claim: BLACKMAIL
+        ["addrZ", "SA", "0.1", "0.2", "8"],   # conflicting claim: MONEY_LAUNDERING
+        ["addrW", "SA", "9.0", "9.0", "12"],
+        ["addrW", "SA", "9.0", "9.0", "12"],  # exact duplicate row
+    ]
+    _write_csv(d / "BABD-13.csv", header, rows)
+    monkeypatch.setattr(bcb, "BABD13_DIR", d)
+    return d
+
+
+class TestLoadBabd13Wallets:
+    def test_missing_corpus_raises_a_clear_error(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bcb, "BABD13_DIR", tmp_path / "does_not_exist")
+        with pytest.raises(FileNotFoundError, match="BABD-13"):
+            bcb.load_babd13_wallets()
+
+    def test_label_index_maps_to_its_own_named_taxonomy(self, babd13_dir):
+        rows = {r["entity_id"]: r for r in bcb.load_babd13_wallets()[0]}
+        assert rows["addrX"]["ground_truth_label"] == "CENTRALIZED_EXCHANGE"
+        assert rows["addrY"]["ground_truth_label"] == "GAMBLING"
+
+    def test_sw_column_becomes_label_confidence(self, babd13_dir):
+        rows = {r["entity_id"]: r for r in bcb.load_babd13_wallets()[0]}
+        assert rows["addrX"]["label_confidence"] == "STRONG"
+        assert rows["addrY"]["label_confidence"] == "WEAK"
+
+    def test_missing_feature_value_is_none_not_zero(self, babd13_dir):
+        rows = {r["entity_id"]: r for r in bcb.load_babd13_wallets()[0]}
+        assert rows["addrY"]["features"]["feat2"] is None
+
+    def test_conflicting_labels_never_pick_one_arbitrarily(self, babd13_dir):
+        rows, _ = bcb.load_babd13_wallets()
+        addrz_rows = [r for r in rows if r["entity_id"] == "addrZ"]
+        # Both claims survive, neither silently dropped in favor of the other.
+        assert len(addrz_rows) == 2
+        assert all(r["ground_truth_label"] == "LABEL_CONFLICT" for r in addrz_rows)
+        assert all(r["label_confidence"] == "CONFLICT" for r in addrz_rows)
+        assert {r["source_label"] for r in addrz_rows} == {"0,8"}
+
+    def test_exact_duplicate_rows_are_removed(self, babd13_dir):
+        rows, raw_count = bcb.load_babd13_wallets()
+        assert raw_count == 6
+        addrw_rows = [r for r in rows if r["entity_id"] == "addrW"]
+        assert len(addrw_rows) == 1
+
+    def test_conflict_rows_excluded_from_balanced_subset(self, babd13_dir):
+        rows, _ = bcb.load_babd13_wallets()
+        balanced = bcb.build_babd13_balanced_subset(rows)
+        assert all(r["ground_truth_label"] != "LABEL_CONFLICT" for r in balanced)
+
+
 # --- B2: Ethereum labels -----------------------------------------------------
 
 class TestLoadEthereumLabels:

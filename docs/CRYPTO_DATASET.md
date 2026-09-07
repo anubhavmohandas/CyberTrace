@@ -1,4 +1,11 @@
-# CyberTrace Crypto Behavioral Benchmark (Loop 52)
+# CyberTrace Crypto Behavioral Benchmark (Loop 52 + Loop 54 addendum)
+
+**Loop 54 addendum (2026-09-07):** added BABD-13 (544,462 labeled Bitcoin
+addresses, 13-class taxonomy) as a fourth source, kept in its own label
+vocabulary and its own output files — see §3.4, §5, and §9. Also evaluated
+and explicitly deferred two further candidate sources (a 43.6M-address
+Kaggle wallet-classification dataset, and the DIAM graph-multigraph corpus)
+— see §2's new rows for why.
 
 ## 1. Purpose
 
@@ -30,6 +37,9 @@ cross-chain conclusion from this data.
 | CryptoXChain-500K (HuggingFace) | **Deferred** | Access-gated — needs a logged-in HF account with granted access, not configured here. Searched for an ungated multi-chain (BCH/DASH/DOGE/LTC) equivalent; nothing credible found. Revisit if access is granted or an alternative surfaces — not a permanent "no multi-chain." |
 | Multi-Cryptocurrency Anomaly Detection Dataset 2025 (Kaggle) | **Deferred** | Kaggle's search UI is JS-rendered; existence/contents could not be verified via an unauthenticated fetch. Per its own public description, ~88% of it is derived from Elliptic (already the authoritative local source here) with only ~10k incremental Ethereum rows — low marginal value even with access. |
 | ~1.62B-row Ethereum activity dataset (unnamed, HuggingFace) | **Deferred** | Not confidently located. Per this project's own rule (never bulk-download a huge unverified source), not pursued speculatively — `fesevu` already fills the independent-Ethereum-source role for this loop. |
+| **BABD-13** (Kaggle, `lemonx/babd13`) | **Used — Loop 54, manually supplied** | Real, peer-reviewed (IEEE TIFS 2024, arXiv 2204.05746): 544,462 labeled Bitcoin addresses, 148 features, 13 behavior classes. Kaggle-only distribution with no unauthenticated download path in this environment (no Kaggle API credentials) — the project owner downloaded it manually and supplied the file. Independently verified, not just trusted: every one of the paper's 13 per-class address counts matched this CSV's own label-value counts exactly (see manifest), confirming the label-index mapping rather than assuming it. See §3.4. |
+| Bitcoin Wallet Classification Public Dataset, 43.6M addresses (Kaggle, `gregorywilder`) | **Deferred** | Same Kaggle-credential blocker as BABD-13, but *also* lower-trust independent of access: single-uploader dataset, no peer-reviewed paper, and its own description states most labels derive from stale WalletExplorer-era blocks with no stated verification methodology. Not worth pursuing even if access is later granted, unless independent label verification surfaces. |
+| DIAM crypto-illicit-account-detection multigraphs (HuggingFace, `Tommy-DING`) | **Deferred** | Verified real and freely downloadable — real CIKM'24 paper, ungated HF repo, checked via direct HTTP HEAD requests (not assumed): 4 files, 1.73GB total, exactly matching the paper's stated feature dimensions (Ethereum 48-dim, Bitcoin-M 69-dim, Bitcoin-L 89-dim). NOT fetched: it's graph-structured (needs `torch`/`torch_geometric`, neither installed in this project), and nothing here consumes graph-ML data yet. Pulling 1.73GB with no consumer would be exactly the kind of speculative scaffolding this benchmark has avoided everywhere else. Revisit only if a graph-ML loop actually starts. |
 
 ## 3. Sources in detail
 
@@ -113,6 +123,81 @@ cross-chain conclusion from this data.
   live network step — filled in by the latest `quality_report.json`, not
   hand-typed here).
 
+### 3.4 BABD-13 (Bitcoin, Loop 54)
+
+- **Location:** `external_data/babd13/original/BABD-13.csv` (see that
+  directory's own `manifest.json` for full provenance/checksum).
+- **Citation:** Xiang et al., "BABD: A Bitcoin Address Behavior Dataset for
+  Pattern Analysis," IEEE Transactions on Information Forensics and
+  Security, 2024 (arXiv:2204.05746).
+- **License:** `UNKNOWN` — same posture as Elliptic++: Kaggle's dataset page
+  states no explicit license and is JS-rendered (unreadable via
+  unauthenticated fetch, same limitation already noted for other Kaggle
+  sources in §2). The dataset's *code* repository is Apache-2.0, but that
+  covers the collection/preprocessing scripts, not the dataset's own
+  redistribution terms. Kept local, gitignored, never republished.
+- **544,462 raw rows, 542,368 unique addresses, real base58 BTC addresses.**
+  148 numeric behavioral features (`PAIa...`/`S...` indicator-category
+  columns — not yet decoded into this benchmark's own
+  `HIGH_ACTIVITY`/`HIGH_VALUE`/`FAN_IN`/`FAN_OUT` flag vocabulary; see §9).
+- **Own 13-class taxonomy, kept as its own `ground_truth_label` vocabulary**
+  — never coerced into Elliptic's ILLICIT/LICIT/UNKNOWN (same precedent as
+  Ethereum's FRAUD/LICIT in §3.2). Label-index mapping (`0`–`12`) was
+  independently verified against the paper's own Table I per-class address
+  counts — every one of the 13 counts matched this CSV's own label-value
+  counts exactly, confirming the index order rather than assuming it from
+  column order alone:
+
+  | Index | Class | Count |
+  |---|---|---:|
+  | 0 | BLACKMAIL | 8,686 |
+  | 1 | CYBER_SECURITY_SERVICE | 91,617 |
+  | 2 | DARKNET_MARKET | 13,861 |
+  | 3 | CENTRALIZED_EXCHANGE | 300,000 |
+  | 4 | P2P_FINANCIAL_INFRASTRUCTURE | 180 |
+  | 5 | P2P_FINANCIAL_SERVICE | 9,309 |
+  | 6 | GAMBLING | 105,257 |
+  | 7 | GOVERNMENT_CRIMINAL_BLACKLIST | 27 |
+  | 8 | MONEY_LAUNDERING | 16 |
+  | 9 | PONZI_SCHEME | 15 |
+  | 10 | MINING_POOL | 1,580 |
+  | 11 | TUMBLER | 12,412 |
+  | 12 | INDIVIDUAL_WALLET | 1,502 |
+
+  (Counts above are the raw CSV's, before dedup/conflict handling — see
+  `quality_report.json`'s `babd13_wallets.label_counts` for the
+  post-processing distribution, which differs slightly because
+  conflict-account rows move to `LABEL_CONFLICT` and duplicates are removed.)
+- **`label_confidence` comes from the source's own `SW` column** (`SA`
+  =`STRONG`, `WA`=`WEAK`) — the paper's own "strong label address / weak
+  label address" distinction, not invented here.
+- **A real, verified data-quality defect: 1,414 accounts (0.26%) carry
+  mutually conflicting labels** across duplicate rows in the published CSV
+  (e.g. one real address is labeled both `BLACKMAIL` and `MONEY_LAUNDERING`
+  in different rows — confirmed by direct inspection, not a parsing
+  artifact). **These are never resolved by picking one label arbitrarily.**
+  `tools/build_crypto_benchmark.py`'s `load_babd13_wallets` marks every row
+  for such an account `ground_truth_label="LABEL_CONFLICT"`,
+  `label_confidence="CONFLICT"`, and excludes them from
+  `build_babd13_balanced_subset` — a training/eval subset must never be
+  handed an address the source itself contradicts on. This is the single
+  most important reason BABD-13 is kept in its own output files rather than
+  merged into the Elliptic-derived Bitcoin rows: blending a conflicting
+  label into an otherwise-clean 3-class column would be a real false-alarm
+  risk for anything downstream that reads `ground_truth_label` naively.
+- **2,466 addresses overlap with the Elliptic++ corpus** (§3.1) —
+  cross-source label agreement/disagreement on this overlap is not
+  evaluated by this loop; flagged in `quality_report.json`'s
+  `babd13_x_elliptic_overlap_addresses` for a future loop to actually check,
+  not silently assumed consistent.
+- **Not computed:** the shared `behavior_flags` vocabulary
+  (`HIGH_ACTIVITY`/`HIGH_VALUE`/`FAN_IN`/`FAN_OUT`) — BABD-13's 148 columns
+  are indicator-category codes, not named tx-count/max-value/degree fields
+  like Elliptic's own features, and guessing a mapping risks a wrong flag on
+  a dataset this benchmark cannot independently re-derive. Left empty
+  (`[]`) rather than guessed; see the `occam:` comment in
+  `load_babd13_wallets` for the upgrade path.
+
 ## 4. Unified schema
 
 Every row carries a common envelope:
@@ -162,7 +247,7 @@ under `data/`). The exact current counts:
 
 ```json
 {
-  "generated_at": "2026-09-06T06:17:39.534243+00:00",
+  "generated_at": "2026-09-07T01:26:57.853364+00:00",
   "sources": {
     "elliptic_transactions": {
       "source": "ellipticpp_local",
@@ -183,10 +268,26 @@ under `data/`). The exact current counts:
       "sampled_addresses": 3000,
       "fetch_status_counts": {"success": 3000},
       "label_counts": {"FRAUD": 1500, "LICIT": 1500}
+    },
+    "babd13_wallets": {
+      "source": "babd13_local",
+      "raw_rows": 544462,
+      "deduplicated_rows": 543932,
+      "unique_addresses": 542368,
+      "label_conflict_accounts": 1414,
+      "label_counts": {"BLACKMAIL": 6765, "LABEL_CONFLICT": 2972,
+        "CYBER_SECURITY_SERVICE": 91610, "DARKNET_MARKET": 13861,
+        "CENTRALIZED_EXCHANGE": 299988, "P2P_FINANCIAL_INFRASTRUCTURE": 180,
+        "P2P_FINANCIAL_SERVICE": 9309, "GAMBLING": 105254,
+        "GOVERNMENT_CRIMINAL_BLACKLIST": 3, "MONEY_LAUNDERING": 2,
+        "PONZI_SCHEME": 14, "MINING_POOL": 1580, "TUMBLER": 11338,
+        "INDIVIDUAL_WALLET": 1056},
+      "confidence_counts": {"STRONG": 532669, "WEAK": 8291, "CONFLICT": 2972}
     }
   },
   "cross_source_duplicate_addresses": 0,
-  "totals": {"total_rows": 1127460}
+  "babd13_x_elliptic_overlap_addresses": 2466,
+  "totals": {"total_rows": 1671392}
 }
 ```
 
@@ -194,7 +295,7 @@ under `data/`). The exact current counts:
 including the full `deferred_sources` reasoning already in §2 above — trimmed
 here to avoid repeating it twice.)
 
-**1,127,460 normalized records/observations**, broken down precisely:
+**1,671,392 normalized records/observations**, broken down precisely:
 
 - **203,769** Bitcoin transaction nodes
 - **920,691** deduplicated Bitcoin address-timestep observations — across
@@ -202,11 +303,17 @@ here to avoid repeating it twice.)
   minority of addresses appear at more than one `Time step`; see §3.1 for
   the full raw/dedup/unique breakdown — never conflate these three numbers)
 - **3,000** Ethereum wallet enrichments
+- **543,932** BABD-13 Bitcoin wallet rows — across **542,368 unique
+  addresses** (§3.4); 2,972 of these rows are the two-sided
+  `LABEL_CONFLICT` entries for 1,414 accounts, kept visible rather than
+  collapsed. 2,466 addresses overlap with the Elliptic++ population above —
+  not deduplicated across sources, since the two carry different label
+  taxonomies (see §6).
 
 This comfortably clears the 50k–100k floor and reaches the 200k–500k+
 strong-target band by total record count. **It is not an even split across
 chains — this benchmark is Bitcoin-dominant.** Bitcoin accounts for
-1,124,460 of the 1,127,460 records (99.7%); Ethereum is represented by a
+1,668,392 of the 1,671,392 records (99.8%); Ethereum is represented by a
 3,000-address **stratified enrichment sample** (1,500 FRAUD + 1,500 LICIT),
 not a comparably large or independently-balanced Ethereum corpus. Treat any
 Ethereum-specific finding from this benchmark as drawn from that bounded
@@ -233,6 +340,16 @@ honest outcome too.
   HuggingFace Elliptic mirrors found during sourcing were deliberately not
   used — see §2 — specifically to avoid the double-counting problem a
   second copy of the same underlying data would create).
+- **Within BABD-13:** ~527 byte-identical raw-row duplicates removed; 1,414
+  accounts (3,216 raw rows) carry genuinely conflicting labels across
+  duplicate rows — **not** deduplicated by picking one, marked
+  `LABEL_CONFLICT` instead and excluded from the balanced subset (§3.4).
+- **BABD-13 vs. Elliptic++ (cross-source, not deduplicated):** 2,466
+  addresses appear in both. Left as-is rather than merged or dropped — the
+  two use incompatible label taxonomies (13-class vs. ILLICIT/LICIT/UNKNOWN),
+  so silently picking one source's label for an overlapping address would be
+  an unverified judgment call this loop does not make. Surfaced in
+  `quality_report.json` for a future loop to actually reconcile.
 
 ## 7. Splits
 
@@ -259,6 +376,14 @@ honest outcome too.
   ~70/30. Lets a future experiment ask "does a model trained primarily on
   Bitcoin generalize to Ethereum" as a first-class question, rather than
   mixing both chains into one shuffled pool.
+- **BABD-13 (Loop 54): kept in its own files, not merged into Dataset A/B**
+  — `babd13_wallets_realistic.jsonl.gz` (natural distribution, all rows
+  including `LABEL_CONFLICT`) and `babd13_wallets_balanced.jsonl.gz`
+  (capped to the smallest of its 13 classes, `LABEL_CONFLICT` excluded
+  outright — see §3.4 for why merging taxonomies would be a false-alarm
+  risk). Same SHA-256-address `source_held_out_train`/`test` split as
+  Ethereum, since BABD-13's public CSV carries no per-row timestamp/time-step
+  column to split on temporally.
 
 ## 8. Reproducibility
 
@@ -266,7 +391,17 @@ honest outcome too.
 python tools/build_crypto_benchmark.py                    # default 3,000-address Ethereum sample
 python tools/build_crypto_benchmark.py --max-addresses 500 --skip-ethereum
 python tools/build_crypto_benchmark.py --refresh           # retry addresses cached as "failed"
+python tools/build_crypto_benchmark.py --skip-babd13       # if BABD-13.csv isn't present locally
 ```
+
+**Caution:** `--skip-ethereum` and `--skip-babd13` skip *loading* that
+source for the current run, and the run still overwrites that source's own
+output file with an empty one — they do not preserve a previous run's
+output. The underlying Ethereum fetch cache is untouched either way (so a
+follow-up plain run re-populates it for free), but a report generated with
+either skip flag understates the true corpus until re-run without it. Use
+skip flags only for fast local iteration on the other source(s), never to
+produce the reference `quality_report.json`.
 
 The Ethereum sample is **deterministic and stable** — `sample_ethereum_addresses`
 always selects the same first N stratified addresses from the source file's
@@ -295,9 +430,30 @@ this means:
   addresses.
 - No mixer/exchange/bridge-interaction behavior flags (§4) — no reliable
   signal in either static source alone.
-- CryptoXChain-500K, the 2025 Kaggle multi-crypto anomaly dataset, and the
-  unverified 1.62B-row Ethereum dataset are deferred, not included — see §2
-  for per-source reasoning.
+- CryptoXChain-500K, the 2025 Kaggle multi-crypto anomaly dataset, the
+  unverified 1.62B-row Ethereum dataset, the 43.6M-address Kaggle wallet-
+  classification dataset, and the DIAM graph-multigraph corpus are all
+  deferred, not included — see §2 for per-source reasoning.
+- BABD-13's 148 features are not mapped into this benchmark's shared
+  `HIGH_ACTIVITY`/`HIGH_VALUE`/`FAN_IN`/`FAN_OUT` flag vocabulary — its
+  columns are indicator-category codes, not named tx-count/degree fields
+  (§3.4); `behavior_flags` is `[]` for every BABD-13 row rather than guessed.
+- BABD-13's cross-source overlap with Elliptic++ (2,466 addresses, §6) has
+  not been reconciled — whether the two sources agree on those addresses'
+  behavior category is an open question, not silently assumed either way.
+- **`babd13_wallets_balanced.jsonl.gz` is 26 rows, not a typo.**
+  `build_babd13_balanced_subset` caps every class to the size of the
+  smallest — the same strategy that works fine for Elliptic's 3 fairly-sized
+  classes breaks down completely across BABD-13's 13, three of which have
+  single-digit counts even before conflict removal (`MONEY_LAUNDERING`: 2,
+  `GOVERNMENT_CRIMINAL_BLACKLIST`: 3, `PONZI_SCHEME`: 14). The result is a
+  real but practically-useless-for-training balanced file (2 rows × 13
+  classes). Not silently reworked into a different balancing scheme this
+  loop — that's a real design decision (e.g. dropping near-empty classes,
+  or per-class thresholds) that deserves its own evaluation, not a default
+  guessed under this loop's own time budget. Use
+  `babd13_wallets_realistic.jsonl.gz`'s natural distribution for anything
+  needing more than a handful of the rarest classes.
 - This benchmark's *definition* (schema, splits, provenance) is this loop's
   deliverable — no ML/anomaly model is trained against it here.
 

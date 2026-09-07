@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""Loop 52 crypto benchmark builder: two independently-sourced, differently-
-labeled, differently-licensed datasets normalized into one schema for future
-anomaly/behavioral research -- NOT a replacement for Loop 45's deterministic
-VASP attribution, which this script never touches.
+"""Loop 52 (+ Loop 54 addendum) crypto benchmark builder: independently-
+sourced, differently-labeled, differently-licensed datasets normalized into
+one schema for future anomaly/behavioral research -- NOT a replacement for
+Loop 45's deterministic VASP attribution, which this script never touches.
 
     python tools/build_crypto_benchmark.py                  # default: 3000-address Ethereum sample
     python tools/build_crypto_benchmark.py --max-addresses 500 --skip-ethereum
     python tools/build_crypto_benchmark.py --refresh         # retry addresses cached as "failed"
+    python tools/build_crypto_benchmark.py --skip-babd13     # if BABD-13.csv isn't present locally
+
+BABD-13 (Loop 54): 544,462 Bitcoin addresses, 13-class taxonomy, Kaggle-only
+(no unauthenticated download path -- manually supplied, see
+external_data/babd13/manifest.json). Kept in its OWN ground_truth_label
+vocabulary and its own output/balanced files, never blended with Elliptic's
+ILLICIT/LICIT/UNKNOWN convention (see load_babd13_wallets).
 
 Bitcoin: external_data/ellipticpp/original/ (already local, verified,
 checksummed -- see that manifest.json). Transaction-level rows are anonymized
@@ -61,6 +68,7 @@ ETH_ORIGINAL_DIR = ETH_DIR / "original"
 ETH_LABEL_URL = ("https://huggingface.co/datasets/fesevu/ethereum_fraud_dataset_by_activity/"
                   "resolve/main/addr_labels_balanced.csv.zst")
 ETH_CACHE_PATH = ETH_DIR / "etherscan_fetch_cache.json"
+BABD13_DIR = _REPO_ROOT / "external_data" / "babd13" / "original"
 OUT_DIR = _REPO_ROOT / "data" / "crypto_benchmark"
 
 DEFAULT_SAMPLE_SIZE = 3000
@@ -70,6 +78,19 @@ _ELLIPTIC_PROVENANCE = ("Elmougy & Liu, KDD'23 (Elliptic++); "
                          "external_data/ellipticpp/manifest.json")
 _ETHEREUM_PROVENANCE = ("fesevu/ethereum_fraud_dataset_by_activity (CC-BY-4.0); "
                          "external_data/ethereum_fraud_activity/manifest.json")
+# Index order independently verified against arXiv 2204.05746 Table I's own
+# per-class address counts (see external_data/babd13/manifest.json) -- not
+# assumed from the column order alone.
+_LABEL_MAP_BABD13 = {
+    "0": "BLACKMAIL", "1": "CYBER_SECURITY_SERVICE", "2": "DARKNET_MARKET",
+    "3": "CENTRALIZED_EXCHANGE", "4": "P2P_FINANCIAL_INFRASTRUCTURE",
+    "5": "P2P_FINANCIAL_SERVICE", "6": "GAMBLING", "7": "GOVERNMENT_CRIMINAL_BLACKLIST",
+    "8": "MONEY_LAUNDERING", "9": "PONZI_SCHEME", "10": "MINING_POOL",
+    "11": "TUMBLER", "12": "INDIVIDUAL_WALLET",
+}
+_BABD13_PROVENANCE = ("Xiang et al., IEEE TIFS 2024 (BABD-13), labels sourced from "
+                       "WalletExplorer via the authors' own scraper; "
+                       "external_data/babd13/manifest.json")
 
 
 def utcnow() -> str:
@@ -202,6 +223,86 @@ def load_elliptic_wallets() -> tuple:
                     features.get("total_txs"), features.get("btc_transacted_max"),
                     features.get("num_txs_as receiver"), features.get("num_txs_as_sender")),
                 "split": "train" if timestep <= 34 else ("val" if timestep <= 42 else "test"),
+            })
+    return rows, raw_count
+
+
+# === B1b: Bitcoin -- BABD-13 (local, user-supplied, no download) ==========
+
+def _require_babd13() -> None:
+    if not (BABD13_DIR / "BABD-13.csv").exists():
+        raise FileNotFoundError(
+            f"{BABD13_DIR} is missing BABD-13.csv -- this is a Kaggle-only dataset with no "
+            "unauthenticated download path (see external_data/babd13/manifest.json); it must "
+            "be downloaded manually and placed there, not fetched by this script.")
+
+
+def load_babd13_wallets() -> tuple:
+    """Address-level rows with BABD-13's own 13-class taxonomy, kept as its
+    own ground_truth_label vocabulary rather than coerced into Elliptic's
+    ILLICIT/LICIT/UNKNOWN -- same precedent as Ethereum's FRAUD/LICIT
+    (spec section 4): different source, different labeling convention,
+    never silently blended.
+
+    1,414 accounts (real data defect, verified -- see manifest) carry
+    mutually CONFLICTING labels across duplicate rows. These are never
+    resolved by picking one arbitrarily: every row for such an account gets
+    ground_truth_label="LABEL_CONFLICT" and is excluded from the balanced
+    subset, so a downstream consumer can never be handed a false single
+    answer for an address the source itself contradicts on.
+
+    Returns (deduplicated_rows, raw_row_count), matching
+    load_elliptic_wallets's own contract.
+    """
+    _require_babd13()
+    by_account: Dict[str, list] = defaultdict(list)
+    raw_count = 0
+    feature_cols: List[str] = []
+    with open(BABD13_DIR / "BABD-13.csv", newline="") as f:
+        reader = csv.DictReader(f)
+        feature_cols = [c for c in reader.fieldnames if c not in ("account", "SW", "label")]
+        for row in reader:
+            raw_count += 1
+            by_account[row["account"]].append(row)
+
+    rows = []
+    for account, acct_rows in by_account.items():
+        distinct_labels = {r["label"] for r in acct_rows}
+        conflict = len(distinct_labels) > 1
+        # De-duplicate byte-identical repeats of the same row; a conflicting
+        # account keeps one row per distinct label so both claims stay visible.
+        seen_keys = set()
+        kept = []
+        for r in acct_rows:
+            key = (r["SW"], r["label"]) if conflict else tuple(r[c] for c in reader.fieldnames)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            kept.append(r)
+        for r in kept:
+            features = {c: _to_float(r[c]) for c in feature_cols}
+            rows.append({
+                "source": "babd13_local", "chain": "bitcoin", "entity_type": "wallet",
+                "entity_id": account, "timestep": None,
+                "ground_truth_label": "LABEL_CONFLICT" if conflict
+                                       else _LABEL_MAP_BABD13.get(r["label"], "UNKNOWN"),
+                "source_label": r["label"] if not conflict else ",".join(sorted(distinct_labels)),
+                "label_confidence": "CONFLICT" if conflict
+                                     else ("STRONG" if r["SW"] == "SA" else "WEAK"),
+                "label_provenance": _BABD13_PROVENANCE,
+                "fetch_status": "success", "fetch_reason": None, "fetched_at": None,
+                "features": features,
+                # occam: BABD-13's 148 columns are indicator-category codes
+                # (PAIa.../S...), not named tx-count/max-value/degree fields
+                # like Elliptic's -- guessing a mapping risks a wrong flag,
+                # so behavior_flags is left empty here rather than guessed.
+                # Upgrade path: decode column semantics from the paper's own
+                # indicator tables if this benchmark starts using BABD-13
+                # for flag-based (not just label-based) research.
+                "behavior_flags": [],
+                "split": "source_held_out_train"
+                         if int(hashlib.sha256(account.encode()).hexdigest(), 16) % 10 < 7
+                         else "source_held_out_test",
             })
     return rows, raw_count
 
@@ -391,6 +492,22 @@ def build_balanced_subset(btc_wallets: List[dict], eth_rows: List[dict]) -> List
     return balanced_btc + balanced_eth
 
 
+def build_babd13_balanced_subset(babd13_wallets: List[dict]) -> List[dict]:
+    """Kept out of build_balanced_subset deliberately: BABD-13 uses its own
+    13-class taxonomy (plus LABEL_CONFLICT), not Elliptic's ILLICIT/LICIT/
+    UNKNOWN -- capping across both label spaces in one balance pass would
+    silently treat e.g. "GAMBLING" and "ILLICIT" as comparable classes,
+    which they are not. LABEL_CONFLICT rows are excluded outright: a
+    balanced *training* subset must never hand a model an address the
+    source itself gave two different answers for."""
+    clean = [r for r in babd13_wallets if r["ground_truth_label"] != "LABEL_CONFLICT"]
+    by_label: Dict[str, List[dict]] = defaultdict(list)
+    for r in clean:
+        by_label[r["ground_truth_label"]].append(r)
+    cap = min((len(v) for v in by_label.values()), default=0)
+    return [r for label in by_label for r in by_label[label][:cap]]
+
+
 # === Quality report =========================================================
 
 def _label_counts(rows: List[dict]) -> dict:
@@ -401,10 +518,14 @@ def _label_counts(rows: List[dict]) -> dict:
 
 
 def build_quality_report(btc_tx: List[dict], btc_wallets: List[dict], btc_wallet_raw_count: int,
-                          eth_rows: List[dict]) -> dict:
+                          eth_rows: List[dict], babd13_wallets: Optional[List[dict]] = None,
+                          babd13_raw_count: int = 0) -> dict:
     fetch_counts: Dict[str, int] = defaultdict(int)
     for r in eth_rows:
         fetch_counts[r["fetch_status"]] += 1
+    babd13_wallets = babd13_wallets or []
+    conflict_accounts = {r["entity_id"] for r in babd13_wallets
+                          if r["ground_truth_label"] == "LABEL_CONFLICT"}
     return {
         "generated_at": utcnow(),
         "sources": {
@@ -425,10 +546,22 @@ def build_quality_report(btc_tx: List[dict], btc_wallets: List[dict], btc_wallet
                 "fetch_status_counts": dict(fetch_counts),
                 "label_counts": _label_counts(eth_rows),
             },
+            "babd13_wallets": {
+                "source": "babd13_local", "raw_rows": babd13_raw_count,
+                "deduplicated_rows": len(babd13_wallets),
+                "unique_addresses": len({r["entity_id"] for r in babd13_wallets}),
+                "label_conflict_accounts": len(conflict_accounts),
+                "label_counts": _label_counts(babd13_wallets),
+                "confidence_counts": dict(
+                    (k, sum(1 for r in babd13_wallets if r["label_confidence"] == k))
+                    for k in ("STRONG", "WEAK", "CONFLICT")),
+            },
         },
         "cross_source_duplicate_addresses": len(
             {r["entity_id"] for r in btc_wallets} & {r["entity_id"] for r in eth_rows}),
-        "totals": {"total_rows": len(btc_tx) + len(btc_wallets) + len(eth_rows)},
+        "babd13_x_elliptic_overlap_addresses": len(
+            {r["entity_id"] for r in babd13_wallets} & {r["entity_id"] for r in btc_wallets}),
+        "totals": {"total_rows": len(btc_tx) + len(btc_wallets) + len(eth_rows) + len(babd13_wallets)},
         "deferred_sources": {
             "cryptoxchain_500k": "HuggingFace-gated (needs a logged-in account with granted "
                                   "access); no ungated multi-chain equivalent found. Revisit if "
@@ -443,6 +576,20 @@ def build_quality_report(btc_tx: List[dict], btc_wallets: List[dict], btc_wallet
                                   "Ethereum rows.",
             "huggingface_1_62b_row_ethereum_dataset": "Not confidently located; fesevu already "
                                   "fills the independent-Ethereum-source role for this loop.",
+            "kaggle_bitcoin_wallet_classification_43_6m": "Kaggle-gated (no API credentials in "
+                                  "this environment) AND, independent of access, lower-trust than "
+                                  "BABD-13: single-uploader dataset with no peer-reviewed paper, "
+                                  "whose own description states most labels derive from stale "
+                                  "WalletExplorer-era blocks. Not pursued even if access is later "
+                                  "provided, unless independent label verification surfaces.",
+            "diam_multigraphs_huggingface": "Verified real and freely downloadable (CIKM'24 "
+                                  "paper, ungated HF repo, 4 files totaling 1.73GB -- checked via "
+                                  "direct HTTP HEAD requests, not assumed). NOT fetched: graph-"
+                                  "structured (needs torch/torch_geometric, neither installed), "
+                                  "and nothing in this project consumes graph-ML data yet. "
+                                  "Acquiring 1.73GB with no consumer is exactly the kind of "
+                                  "speculative scaffolding this benchmark has avoided elsewhere. "
+                                  "Revisit if a graph-ML loop is actually started.",
         },
     }
 
@@ -470,6 +617,8 @@ def main() -> None:
                          help="retry addresses cached as failed (never re-fetches a success)")
     parser.add_argument("--skip-ethereum", action="store_true",
                          help="Bitcoin only -- for fast local iteration, no network")
+    parser.add_argument("--skip-babd13", action="store_true",
+                         help="Skip BABD-13 -- for runs where the manually-supplied CSV isn't present")
     parser.add_argument("--out-dir", type=Path, default=OUT_DIR)
     args = parser.parse_args()
 
@@ -480,6 +629,15 @@ def main() -> None:
     print("Loading Elliptic++ wallets...")
     btc_wallets, btc_wallet_raw_count = load_elliptic_wallets()
     print(f"  {btc_wallet_raw_count} raw rows -> {len(btc_wallets)} after dedup")
+
+    babd13_wallets: List[dict] = []
+    babd13_raw_count = 0
+    if not args.skip_babd13 and (BABD13_DIR / "BABD-13.csv").exists():
+        print("Loading BABD-13 wallets...")
+        babd13_wallets, babd13_raw_count = load_babd13_wallets()
+        n_conflict = sum(1 for r in babd13_wallets if r["ground_truth_label"] == "LABEL_CONFLICT")
+        print(f"  {babd13_raw_count} raw rows -> {len(babd13_wallets)} unique addresses "
+              f"({n_conflict} with conflicting labels, kept but excluded from balancing)")
 
     eth_rows: List[dict] = []
     if not args.skip_ethereum:
@@ -501,7 +659,13 @@ def main() -> None:
     balanced = build_balanced_subset(btc_wallets, eth_rows)
     write_jsonl(args.out_dir / "balanced_subset.jsonl", balanced)
 
-    report = build_quality_report(btc_tx, btc_wallets, btc_wallet_raw_count, eth_rows)
+    if babd13_wallets:
+        write_jsonl(args.out_dir / "babd13_wallets_realistic.jsonl", babd13_wallets)
+        babd13_balanced = build_babd13_balanced_subset(babd13_wallets)
+        write_jsonl(args.out_dir / "babd13_wallets_balanced.jsonl", babd13_balanced)
+
+    report = build_quality_report(btc_tx, btc_wallets, btc_wallet_raw_count, eth_rows,
+                                   babd13_wallets, babd13_raw_count)
     (args.out_dir / "quality_report.json").write_text(json.dumps(report, indent=2))
     print(f"\nWrote {report['totals']['total_rows']} total rows to {args.out_dir}")
     print(json.dumps(report["totals"], indent=2))
