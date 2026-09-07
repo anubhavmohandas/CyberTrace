@@ -81,6 +81,28 @@ def case_summary(db_path: Path) -> dict:
             "status": info.get("status", "OPEN")}
 
 
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def create_case(cases_dir: Path, title: str) -> dict:
+    """A brand-new, empty case -- EvidenceStore(path) already creates the
+    schema plus an initial OPEN case_info row for a path that doesn't exist
+    yet (see EvidenceStore.__init__), so this only has to pick a free
+    filename stem and set the display title: the same two steps
+    `cybertrace case --db new.db --name "..."` already does from the CLI.
+    Slugified so the id always satisfies _CASE_ID_RE like every other
+    case_id this server accepts."""
+    base = _SLUG_RE.sub("-", title.strip().lower()).strip("-")[:48] or "case"
+    case_id, n = base, 2
+    while (cases_dir / f"{case_id}.db").exists():
+        case_id = f"{base}-{n}"
+        n += 1
+    with EvidenceStore(str(cases_dir / f"{case_id}.db")) as store:
+        store.update_case(name=title)
+        status = store.case_info().get("status", "OPEN")
+    return {"id": case_id, "title": title, "status": status}
+
+
 def case_payload(cases_dir: Path, case_id: str) -> dict | None:
     db_path = _case_db_path(cases_dir, case_id)
     if db_path is None or not db_path.is_file():
@@ -260,6 +282,8 @@ def make_handler(cases_dir: Path):
             path = unquote(urlsplit(self.path).path)
             if path.startswith("/api/") and not self._authorized():
                 return self._json({"error": "unauthorized"}, status=401)
+            if path == "/api/case":
+                return self._create_case()
             if path.startswith("/api/case/") and path.endswith("/wallet-verdict"):
                 case_id = path[len("/api/case/"):-len("/wallet-verdict")]
                 return self._save_wallet_verdict(case_id)
@@ -270,6 +294,17 @@ def make_handler(cases_dir: Path):
                 case_id = path[len("/api/case/"):-len("/investigator")]
                 return self._investigator_answer(case_id)
             return self._json({"error": "not found"}, status=404)
+
+        def _create_case(self) -> None:
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except json.JSONDecodeError:
+                return self._json({"error": "invalid JSON body"}, status=400)
+            title = (body.get("title") or "").strip()
+            if not title:
+                return self._json({"error": "title is required"}, status=400)
+            return self._json(create_case(cases_dir, title), status=201)
 
         def _investigator_answer(self, case_id: str) -> None:
             db_path = _case_db_path(cases_dir, case_id)

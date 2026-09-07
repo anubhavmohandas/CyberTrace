@@ -93,18 +93,21 @@ window.__resources = {
       <div onClick="{{ goHome }}" style="cursor:pointer;padding:0 18px"><img src="assets/ct-lockup-a.png" alt="CyberTrace" style="height:18px;display:block" /></div>
       <div style="display:flex;flex-direction:column;gap:1px">
         <div style="padding:0 18px 8px;font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#495255">CASES</div>
-        <div style="padding:7px 18px;color:#2fb4e8;font-size:13px;background:#10171a;border-left:2px solid #2fb4e8">All cases</div>
-        <div style="padding:7px 18px;color:#879196;font-size:13px;border-left:2px solid transparent">Watchlist</div>
+        <div onClick="{{ openAllCases }}" style="cursor:pointer;padding:7px 18px;color:{{ allCasesColor }};background:{{ allCasesBg }};font-size:13px;border-left:2px solid {{ allCasesBorder }}" style-hover="color:#d5dbde">All cases</div>
+        <div onClick="{{ openWatchlist }}" style="cursor:pointer;padding:7px 18px;color:{{ watchlistColor }};background:{{ watchlistBg }};font-size:13px;border-left:2px solid {{ watchlistBorder }}" style-hover="color:#d5dbde">Watchlist</div>
       </div>
     </div>
     <div style="flex:1;min-width:0;padding:34px 40px;overflow-x:hidden">
       <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:24px">
         <div>
-          <div style="font-size:21px;font-weight:500;color:#edf2f4;letter-spacing:-.3px">Cases</div>
-          <div style="color:#7c878c;font-size:12.5px;margin-top:3px">4 active · 2 archived</div>
+          <div style="font-size:21px;font-weight:500;color:#edf2f4;letter-spacing:-.3px">{{ casesPageTitle }}</div>
+          <div style="color:#7c878c;font-size:12.5px;margin-top:3px">{{ casesSummaryLine }}</div>
         </div>
-        <div style="cursor:pointer;border:1px solid #2fb4e8;color:#2fb4e8;padding:8px 18px;font-size:12.5px" style-hover="background:#0f2029">+ New case</div>
+        <div onClick="{{ openNewCase }}" style="cursor:pointer;border:1px solid #2fb4e8;color:#2fb4e8;padding:8px 18px;font-size:12.5px" style-hover="background:#0f2029">+ New case</div>
       </div>
+      <sc-if value="{{ casesListError }}" hint-placeholder-val="{{ false }}">
+        <div style="margin-bottom:16px;border:1px solid #33221f;background:#1a0f0d;color:#d97a6c;padding:12px 14px;font-size:12.5px">{{ casesListError }}</div>
+      </sc-if>
       <div style="display:grid;grid-template-columns:minmax(84px,110px) minmax(0,1.6fr) minmax(72px,104px) minmax(0,1.1fr) minmax(0,1fr);gap:14px;padding:0 16px 9px;font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#495255;border-bottom:1px solid #171c1f">
         <div>CASE</div><div>TITLE</div><div>CONFIDENCE</div><div>LAST CHANGE</div><div style="text-align:right">ANALYST</div>
       </div>
@@ -129,6 +132,29 @@ window.__resources = {
       </sc-for>
     </div>
   </div>
+
+  <sc-if value="{{ newCaseOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="position:fixed;inset:0;background:rgba(4,6,7,.72);z-index:60;display:flex;align-items:center;justify-content:center">
+      <div style="width:440px;background:#0b0e10;border:1px solid #1c2427;animation:ctIn .18s ease">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 22px;border-bottom:1px solid #171c1f">
+          <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#2fb4e8">NEW CASE</div>
+          <div onClick="{{ closeNewCase }}" style="cursor:pointer;color:#67716f;font-size:13px" style-hover="color:#d5dbde">×</div>
+        </div>
+        <div style="padding:22px">
+          <div style="font:500 9.5px/1 'IBM Plex Mono',monospace;letter-spacing:1.2px;color:#5a6367">CASE TITLE — REQUIRED</div>
+          <input value="{{ newCaseTitle }}" onChange="{{ onNewCaseTitle }}" onKeyDown="{{ onNewCaseKey }}" placeholder="e.g. tor.taxi mirror pair" style="width:100%;box-sizing:border-box;margin-top:11px;background:#0d1012;border:1px solid #232a2e;color:#d5dbde;padding:11px 12px;font:400 13px/1 'IBM Plex Sans',sans-serif;outline:none" />
+          <sc-if value="{{ newCaseError }}" hint-placeholder-val="{{ false }}">
+            <div style="margin-top:14px;border:1px solid #33221f;background:#1a0f0d;color:#d97a6c;padding:11px 13px;font-size:12.5px">{{ newCaseError }}</div>
+          </sc-if>
+          <div style="display:flex;gap:9px;margin-top:20px">
+            <div onClick="{{ createNewCase }}" style="cursor:pointer;flex:1;text-align:center;background:{{ newCaseSaveBg }};color:{{ newCaseSaveColor }};padding:11px 0;font-size:12.5px;font-weight:600">{{ newCaseButtonLabel }}</div>
+            <div onClick="{{ closeNewCase }}" style="cursor:pointer;border:1px solid #262d31;color:#a7b1b5;padding:11px 20px;font-size:12.5px" style-hover="color:#d5dbde">Cancel</div>
+          </div>
+          <div style="font:400 10.5px/1.6 'IBM Plex Mono',monospace;color:#3c4548;margin-top:13px">Creates a real, empty evidence store under cases/ -- nothing here is faked in the browser.</div>
+        </div>
+      </div>
+    </div>
+  </sc-if>
 </sc-if>
 
 <sc-if value="{{ isCase }}" hint-placeholder-val="{{ false }}">
@@ -143,9 +169,9 @@ window.__resources = {
       </div>
       <div style="display:flex;flex-direction:column;gap:1px">
         <div style="padding:0 18px 8px;font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#495255">TOOLS</div>
-        <div style="padding:7px 18px;color:#879196;font-size:13px" style-hover="color:#d5dbde">Search</div>
-        <div style="padding:7px 18px;color:#879196;font-size:13px" style-hover="color:#d5dbde">Investigate</div>
-        <div style="padding:7px 18px;color:#879196;font-size:13px" style-hover="color:#d5dbde">Watchlist</div>
+        <div onClick="{{ goSearch }}" style="cursor:pointer;padding:7px 18px;color:#879196;font-size:13px" style-hover="color:#d5dbde">Search</div>
+        <div onClick="{{ goInvestigate }}" style="cursor:pointer;padding:7px 18px;color:#879196;font-size:13px" style-hover="color:#d5dbde">Investigate</div>
+        <div onClick="{{ goCaseWatchlist }}" style="cursor:pointer;padding:7px 18px;color:#879196;font-size:13px" style-hover="color:#d5dbde">Watchlist</div>
       </div>
       <div style="display:flex;flex-direction:column;gap:1px">
         <div style="padding:0 18px 8px;font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#495255">SOURCES</div>
@@ -341,7 +367,7 @@ window.__resources = {
                 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 0;font:400 11px/1 'IBM Plex Mono',monospace">
                   <span style="color:#5a6367;letter-spacing:1px">DATA SOURCES</span>
                   <sc-for list="{{ dataSources }}" as="d" hint-placeholder-count="3">
-                    <span style="color:{{ d.isFresh ? '#4a9d7f' : '#d97a6c' }}">{{ d.name }}={{ d.state }}</span>
+                    <span style="color:{{ d.color }}">{{ d.name }}={{ d.state }}</span>
                   </sc-for>
                   <sc-if value="{{ hasStaleDataSource }}" hint-placeholder-val="{{ false }}">
                     <span style="color:#d97a6c">— not fresh: a "no match" above does not mean "checked, clean"</span>
@@ -1215,6 +1241,7 @@ const C = { cyan:'#2fb4e8', green:'#63c48b', red:'#d97a6c', sand:'#c2b280', viol
 // Left unset, both default to today's local same-origin behavior.
 const API_BASE = (window.__CT_API_BASE || '').replace(/\/$/, '');
 const CASES_URL = API_BASE + '/api/cases';
+const CREATE_CASE_URL = API_BASE + '/api/case';
 const caseUrl = (id) => API_BASE + '/api/case/' + encodeURIComponent(id);
 const searchUrl = (q) => API_BASE + '/api/search?q=' + encodeURIComponent(q);
 const providersUrl = API_BASE + '/api/providers/health';
@@ -1222,6 +1249,40 @@ const detectUrl = (addr) => API_BASE + '/api/detect?address=' + encodeURICompone
 const apiFetch = (url, opts) => fetch(url, window.__CT_API_KEY
   ? { ...opts, headers: { ...(opts && opts.headers), 'X-CT-Api-Key': window.__CT_API_KEY } }
   : opts);
+
+// Every case_api.py error response is JSON ({"error": "..."}) -- read that
+// message instead of a bare status code (used to be two different, inconsistent
+// patterns across this file; one of them silently dropped the body and showed
+// "HTTP 404" for what the backend actually reported as "no such case").
+// A request that never reaches a response at all (server not running, this
+// page opened as a local file instead of through case_api.py, CORS, DNS) always
+// surfaces as a bare `TypeError` with no body to read a reason from -- browsers
+// word that exception differently (Chrome: "Failed to fetch", Safari/WebKit:
+// "Load failed"), and showing that raw wording to an analyst explains nothing
+// actionable. Both cases funnel through here so every call site gets the same
+// fix at once instead of patching each fetch call individually.
+function fetchJson(url, opts) {
+  return apiFetch(url, opts)
+    .then(r => r.ok ? r.json() : r.json().catch(() => ({}))
+      .then(body => Promise.reject(new Error(body.error || ('HTTP ' + r.status)))))
+    .catch(err => {
+      if (err instanceof TypeError) {
+        throw new Error('Cannot reach the CyberTrace API' + (API_BASE ? ' at ' + API_BASE : '') +
+          '. Start it with `python tools/case_api.py` and open this page through that server ' +
+          '(not as a local file) -- see ' + url);
+      }
+      throw err;
+    });
+}
+
+function parseHash() {
+  const h = (window.location.hash || '').replace(/^#\/?/, '');
+  if (h === 'cases') return { view: 'cases' };
+  if (h === 'landing') return { view: 'landing' };
+  const m = h.match(/^case\/(.+)$/);
+  if (m) return { view: 'case', caseId: decodeURIComponent(m[1]) };
+  return { view: null };
+}
 const EMPTY_CASE = { case_id:'', title:'', stats:[], candidates:[], drawers:{}, evidence:[], timeline:[], captures:[], suppressed:[], markets:[], market_relationships:[], notes:[], wallet_exchange_paths:[], unattributed_wallet_candidates:[], other_traced_wallets:[], risk_alerts:[], data_source_status:{}, case_has_crypto:false };
 
 const ETYPE_COLOR = { PGP_KEY:C.violet, EMAIL:C.green, BTC_ADDRESS:C.sand, ONION_ADDRESS:C.cyan, IP:'#4c565a' };
@@ -1507,6 +1568,11 @@ function walletTabVals(cd, openVerdict) {
   const dss = cd.data_source_status || {};
   const dataSources = Object.keys(dss).map(name => ({
     name, state: dss[name], isFresh: dss[name] === 'FRESH',
+    // Precomputed here, not as a `{{ d.isFresh ? x : y }}` ternary in the
+    // markup -- this template engine's {{ }} only resolves dotted paths and
+    // top-level equality, so a ternary inside one silently resolves to
+    // undefined (this color rendered as none/blank until this fix).
+    color: dss[name] === 'FRESH' ? '#4a9d7f' : '#d97a6c',
   }));
   // Loop 41: same entity named on more than one chain by ONE evidence
   // record (an OFAC profile, a VASP's own disclosure, a GraphSense tag, or
@@ -1614,25 +1680,47 @@ class Component extends DCLogic {
     thread: [{ role:'INVESTIGATOR', text:'Ask why any relationship in this case exists, or what the engine rejected. Every answer cites the evidence it used.', points:[] }],
     evFilter: 'All', scoreOpen: {}, verdict: null, verdictNote: '', outcome: null,
     snapshot: null, snapshotBody: '',
-    caseData: null, loadError: null, cases: [],
+    caseData: null, loadError: null, cases: [], casesError: null, sidebarView: 'all',
+    newCaseOpen: false, newCaseTitle: '', newCaseError: null, newCaseSaving: false,
     searchResult: null, searching: false, searchError: null, searchOpen: {},
     detectResult: null,
     providerHealth: [], capabilities: {}, providerHealthError: null
   };
 
   componentDidMount() {
-    const v = this.props.startView;
-    if (v && v !== this.state.view) this.setState({ view: v });
-    apiFetch(CASES_URL)
-      .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+    // Real URL routing (hash-based -- no server-side route to match, this is
+    // served as one static file): makes browser back/forward and a plain
+    // page refresh land back on the case/view that was actually open, instead
+    // of always resetting to the landing page. `startView` (a design-canvas
+    // preview prop) is only the fallback for a first visit with no hash yet.
+    window.addEventListener('hashchange', () => this.navigate(parseHash()));
+    const route = parseHash();
+    this.setState({ view: route.view || this.props.startView || 'landing' });
+    fetchJson(CASES_URL)
       .then(cases => {
-        this.setState({ cases });
-        if (cases[0]) this.loadCase(cases[0].id);
-        else this.setState({ loadError: 'no cases in cases/ yet' });
+        this.setState({ cases, casesError: cases.length ? null : 'no cases in cases/ yet' });
+        const wantId = route.caseId || (cases[0] && cases[0].id);
+        if (wantId) this.loadCase(wantId);
       })
-      .catch(err => this.setState({ loadError: String(err) }));
+      .catch(err => this.setState({ casesError: err.message }));
     // Not called here unconditionally -- see loadCase, which only fires this
     // once a case is loaded and known to actually have a crypto artifact.
+  }
+
+  // Single place every navigation (a click, the browser's own back/forward,
+  // or a page load that starts on a non-empty hash) goes through, so a
+  // refresh or a Back press reproduces the exact same state a click would
+  // have -- see componentDidMount's hashchange listener and every
+  // `window.location.hash = ...` assignment below.
+  navigate(route) {
+    if (route.view === 'case' && route.caseId) {
+      if (!this.state.caseData || this.state.caseData.case_id !== route.caseId) {
+        this.loadCase(route.caseId);
+      }
+      this.setState({ view: 'case', drawer: null, aiOpen: false });
+    } else {
+      this.setState({ view: route.view || 'landing', drawer: null, aiOpen: false });
+    }
   }
 
   loadProviderHealth() {
@@ -1642,17 +1730,15 @@ class Component extends DCLogic {
     // spend quota against a rate-limited free-tier key. Only called for a
     // case with a crypto artifact (see loadCase) -- a non-crypto case has no
     // use for a ~15-provider health sweep.
-    apiFetch(providersUrl)
-      .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+    fetchJson(providersUrl)
       .then(({ providers, capabilities }) => this.setState({
         providerHealth: providers, capabilities: capabilities || {}, providerHealthError: null
       }))
-      .catch(err => this.setState({ providerHealthError: String(err) }));
+      .catch(err => this.setState({ providerHealthError: err.message }));
   }
 
   loadCase(id) {
-    apiFetch(caseUrl(id))
-      .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+    fetchJson(caseUrl(id))
       .then(data => {
         this.setState({
           caseData: data, loadError: null,
@@ -1663,7 +1749,7 @@ class Component extends DCLogic {
         // actually has a wallet/blockchain-address artifact (spec Loop 52 §2).
         if (data.case_has_crypto) this.loadProviderHealth();
       })
-      .catch(err => this.setState({ loadError: String(err) }));
+      .catch(err => this.setState({ loadError: err.message }));
   }
 
   runSearch() {
@@ -1671,12 +1757,9 @@ class Component extends DCLogic {
     if (!q) return;
     this.setState({ view: 'search', searching: true, searchError: null, searchResult: null,
                     searchOpen: {}, detectResult: null });
-    apiFetch(searchUrl(q))
-      .then(r => r.json().then(body => ({ ok: r.ok, body })))
-      .then(({ ok, body }) => this.setState(ok
-        ? { searchResult: body, searching: false }
-        : { searchError: body.error || 'search failed', searching: false }))
-      .catch(err => this.setState({ searchError: String(err), searching: false }));
+    fetchJson(searchUrl(q))
+      .then(body => this.setState({ searchResult: body, searching: false }))
+      .catch(err => this.setState({ searchError: err.message, searching: false }));
     // Independent of the search above: format detection (and, for an
     // ambiguous 0x address, a live EVM-network activity probe) is its own
     // fast check, not part of the multi-source investigation -- see
@@ -1692,20 +1775,37 @@ class Component extends DCLogic {
 
   loadSnapshot(caseId, snapshotId, label) {
     this.setState({ snapshot: label, snapshotBody: 'loading…' });
-    apiFetch(caseUrl(caseId) + '/snapshot/' + encodeURIComponent(snapshotId))
-      .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+    fetchJson(caseUrl(caseId) + '/snapshot/' + encodeURIComponent(snapshotId))
       .then(data => this.setState({ snapshotBody: JSON.stringify(data, null, 2) }))
-      .catch(err => this.setState({ snapshotBody: 'failed to load snapshot: ' + String(err) }));
+      .catch(err => this.setState({ snapshotBody: 'failed to load snapshot: ' + err.message }));
+  }
+
+  createNewCase() {
+    const title = (this.state.newCaseTitle || '').trim();
+    if (!title) return this.setState({ newCaseError: 'a case title is required' });
+    if (this.state.newCaseSaving) return;
+    this.setState({ newCaseSaving: true, newCaseError: null });
+    fetchJson(CREATE_CASE_URL, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    })
+      // Refetch the list rather than appending the created case client-side --
+      // /api/cases is the single source of truth for what exists on disk, same
+      // discipline every other view in this file already follows.
+      .then(() => fetchJson(CASES_URL))
+      .then(cases => this.setState({
+        cases, casesError: null, newCaseOpen: false, newCaseSaving: false, newCaseTitle: '',
+      }))
+      .catch(err => this.setState({ newCaseError: err.message, newCaseSaving: false }));
   }
 
   ask(q) {
     const cd = this.state.caseData || EMPTY_CASE;
     this.setState(s => ({ aiOpen:true, aiInput:'', thread:[...s.thread, { role:'ANALYST', text:q, points:[] }] }));
-    apiFetch(caseUrl(cd.case_id) + '/investigator', {
+    fetchJson(caseUrl(cd.case_id) + '/investigator', {
       method:'POST', headers:{ 'Content-Type':'application/json' },
       body: JSON.stringify({ question:q })
     })
-      .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
       .then(data => {
         const points = (data.evidence || []).map(e => ({
           mark:'✓', color:C.green,
@@ -1715,7 +1815,7 @@ class Component extends DCLogic {
         this.setState(s => ({ thread:[...s.thread, { role:'INVESTIGATOR', text:data.answer, points, cite }] }));
       })
       .catch(err => this.setState(s => ({ thread:[...s.thread,
-        { role:'INVESTIGATOR', text:'Could not reach the investigator backend: ' + String(err), points:[] }] })));
+        { role:'INVESTIGATOR', text:'Investigator error: ' + err.message, points:[] }] })));
   }
 
   detect(v) {
@@ -1851,8 +1951,36 @@ class Component extends DCLogic {
       onQuery: (e) => this.set({ query: e.target.value }),
       onQueryKey: (e) => { if (e.key === 'Enter') this.runSearch(); },
       runTrace: () => this.runSearch(),
-      openCases: () => this.set({ view:'cases', drawer:null, aiOpen:false }),
-      goHome: () => this.set({ view:'landing', drawer:null, aiOpen:false }),
+      openCases: () => { window.location.hash = '/cases'; this.navigate({ view:'cases' }); },
+      goHome: () => { window.location.hash = '/'; this.navigate({ view:'landing' }); },
+
+      // Header count is derived from the same `cases` list the table below
+      // renders from -- previously hardcoded markup text ("4 active · 2
+      // archived") with no relationship to real data at all, so it could
+      // never agree with an empty (or any) table.
+      casesSummaryLine: `${st.cases.filter(c => c.status !== 'ARCHIVED').length} active · `
+        + `${st.cases.filter(c => c.status === 'ARCHIVED').length} archived`,
+      // Only shown when the table has nothing to render -- an empty list
+      // because /api/cases failed reads very differently from a genuinely
+      // empty cases/ dir, and neither should look like a silent "no cases".
+      casesListError: st.cases.length === 0 ? st.casesError : null,
+
+      // This template engine's {{ }} bindings only resolve dotted paths and
+      // top-level equality -- no ternaries -- so every conditional style
+      // below is precomputed here rather than inline in the markup.
+      casesPageTitle: st.sidebarView === 'watchlist' ? 'Watchlist' : 'Cases',
+      allCasesColor: st.sidebarView === 'all' ? '#2fb4e8' : '#879196',
+      allCasesBg: st.sidebarView === 'all' ? '#10171a' : 'transparent',
+      allCasesBorder: st.sidebarView === 'all' ? '#2fb4e8' : 'transparent',
+      watchlistColor: st.sidebarView === 'watchlist' ? '#2fb4e8' : '#879196',
+      watchlistBg: st.sidebarView === 'watchlist' ? '#10171a' : 'transparent',
+      watchlistBorder: st.sidebarView === 'watchlist' ? '#2fb4e8' : 'transparent',
+      openAllCases: () => this.set({ sidebarView: 'all' }),
+      // No case-level "watched" flag exists anywhere in the store -- per
+      // cybertrace/monitor.py's own design note, every target already in a
+      // case IS the watchlist, so this is a real, distinct nav state (not a
+      // fabricated filter) that happens to show the same real case list.
+      openWatchlist: () => this.set({ sidebarView: 'watchlist' }),
 
       cases: st.cases.map(c => {
         const isOpen = c.id === cd.case_id;
@@ -1864,9 +1992,24 @@ class Component extends DCLogic {
           band: isOpen && cd.candidates[0] ? cd.candidates[0].band : 'LOW',
           bandColor: isOpen && cd.candidates[0] ? band(cd.candidates[0].band) : C.mute,
           changed: isOpen && st.loadError ? 'load error' : 'loaded from real capture', analyst:'—', crossCase:'',
-          open: () => { this.loadCase(c.id); this.set({ view:'case', tab:'Overview' }); }
+          open: () => {
+            window.location.hash = '/case/' + encodeURIComponent(c.id);
+            this.navigate({ view:'case', caseId: c.id });
+          }
         };
       }),
+
+      newCaseOpen: st.newCaseOpen,
+      newCaseTitle: st.newCaseTitle,
+      newCaseError: st.newCaseError,
+      newCaseButtonLabel: st.newCaseSaving ? 'Creating…' : 'Create case',
+      newCaseSaveBg: st.newCaseTitle.trim() && !st.newCaseSaving ? C.cyan : '#1c2427',
+      newCaseSaveColor: st.newCaseTitle.trim() && !st.newCaseSaving ? '#04161f' : '#495255',
+      openNewCase: () => this.set({ newCaseOpen:true, newCaseTitle:'', newCaseError:null }),
+      closeNewCase: () => this.set({ newCaseOpen:false }),
+      onNewCaseTitle: (e) => this.set({ newCaseTitle: e.target.value, newCaseError:null }),
+      onNewCaseKey: (e) => { if (e.key === 'Enter') this.createNewCase(); },
+      createNewCase: () => this.createNewCase(),
 
       // Real live-provider health (cybertrace/provider_health.py), not the
       // single hardcoded "Tor" placeholder this used to be -- grouped to a
@@ -1909,6 +2052,18 @@ class Component extends DCLogic {
       tabOverview: st.tab === 'Overview', tabWallets: st.tab === 'Wallets', tabGraph: st.tab === 'Graph',
       tabEvidence: st.tab === 'Evidence',
       tabTimeline: st.tab === 'Timeline', tabSources: st.tab === 'Sources', tabReport: st.tab === 'Report',
+
+      // TOOLS sidebar: three items styled identically to every other nav
+      // link but previously missing onClick entirely (the audit's grep for
+      // "style-hover with no onClick" caught these along with +New case) --
+      // wired to the closest real, already-built behavior for each name
+      // rather than a new feature: Investigate IS the AI Investigator drawer,
+      // Search IS the only search entry point this app has (the landing
+      // page), and Watchlist (see monitor.py: every traced target already in
+      // a case IS the watchlist) is this case's own Wallets tab.
+      goSearch: () => { window.location.hash = '/'; this.navigate({ view:'landing' }); },
+      goInvestigate: () => this.set({ aiOpen: !st.aiOpen, drawer: st.aiOpen ? st.drawer : null }),
+      goCaseWatchlist: () => this.set({ tab:'Wallets', snapshot:null }),
 
       stats: cd.stats,
 
@@ -2047,17 +2202,16 @@ class Component extends DCLogic {
         const body = isWallet
           ? { entity_id: st.verdict.entity_id, outcome: st.outcome, note: st.verdictNote.trim() }
           : { candidate_id: st.verdict.candidate_id, outcome: st.outcome, note: st.verdictNote.trim() };
-        apiFetch(caseUrl(caseId) + path, {
+        fetchJson(caseUrl(caseId) + path, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body)
         })
-          .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e.error || ('HTTP ' + r.status)))))
           .then(() => {
             this.setState({ verdict:null, outcome:null, verdictNote:'' });
             this.loadCase(caseId);
           })
-          .catch(err => this.setState({ loadError: 'verdict not saved: ' + String(err) }));
+          .catch(err => this.setState({ loadError: 'verdict not saved: ' + err.message }));
       }
     };
   }

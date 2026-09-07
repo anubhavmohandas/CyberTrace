@@ -83,6 +83,91 @@ def test_cases_and_case_endpoints(tmp_path):
         assert "error" in body
 
 
+def test_create_case_endpoint_persists_and_lists(tmp_path):
+    """Loop 55: the Workspace's "+ New case" button had no backend endpoint
+    to call at all -- this is the whole create-case round trip a click must
+    now complete: POST creates a real, empty EvidenceStore on disk (not a
+    frontend-only fake), and it shows up in a subsequent GET /api/cases."""
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+
+    with _running_server(cases_dir) as base:
+        status, created = _post(f"{base}/api/case", {"title": "Loop 55 Regression Case"})
+        assert status == 201
+        assert created == {"id": "loop-55-regression-case", "title": "Loop 55 Regression Case",
+                           "status": "OPEN"}
+        assert (cases_dir / "loop-55-regression-case.db").is_file()
+
+        status, cases = _get(f"{base}/api/cases")
+        assert status == 200
+        assert cases == [{"id": "loop-55-regression-case", "title": "Loop 55 Regression Case",
+                          "status": "OPEN"}]
+
+        status, case = _get(f"{base}/api/case/loop-55-regression-case")
+        assert status == 200
+        assert case["title"] == "Loop 55 Regression Case"
+        assert case["status"] == "OPEN"
+        assert case["candidates"] == []
+
+
+def test_create_case_endpoint_requires_title(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+
+    with _running_server(cases_dir) as base:
+        status, resp = _post(f"{base}/api/case", {"title": ""})
+        assert status == 400
+        assert "error" in resp
+
+        status, resp = _post(f"{base}/api/case", {"title": "   "})
+        assert status == 400
+        assert "error" in resp
+
+        status, resp = _post(f"{base}/api/case", {})
+        assert status == 400
+        assert "error" in resp
+
+    assert list(cases_dir.glob("*.db")) == []
+
+
+def test_create_case_endpoint_dedupes_identical_titles(tmp_path):
+    """Two cases with the same title must never collide on disk -- the second
+    create has to fall back to a suffixed id rather than silently overwriting
+    (or 500ing on) the first case's .db file."""
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+
+    with _running_server(cases_dir) as base:
+        status, first = _post(f"{base}/api/case", {"title": "Duplicate Title"})
+        assert status == 201
+        assert first["id"] == "duplicate-title"
+
+        status, second = _post(f"{base}/api/case", {"title": "Duplicate Title"})
+        assert status == 201
+        assert second["id"] == "duplicate-title-2"
+        assert second["id"] != first["id"]
+
+        status, cases = _get(f"{base}/api/cases")
+        assert status == 200
+        assert {c["id"] for c in cases} == {"duplicate-title", "duplicate-title-2"}
+
+
+def test_create_case_endpoint_slugifies_and_falls_back(tmp_path):
+    """A title with no ASCII alphanumerics (all punctuation/unicode) must
+    still produce a valid, non-empty case_id instead of a blank filename."""
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+
+    with _running_server(cases_dir) as base:
+        status, resp = _post(f"{base}/api/case", {"title": "  Tor.Taxi Mirror PAIR!! "})
+        assert status == 201
+        assert resp["id"] == "tor-taxi-mirror-pair"
+
+        status, resp = _post(f"{base}/api/case", {"title": "★★★"})
+        assert status == 201
+        assert resp["id"] == "case"
+
+
 def test_verdict_persists_across_reload(tmp_path):
     """The saveVerdict write path (section 6 of the workspace-integration pass):
     a POST'd verdict must survive a fresh GET of the case, the way reopening
