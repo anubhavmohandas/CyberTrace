@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from cybertrace import investigator
-from cybertrace.evidence import EvidenceStore
+from cybertrace.evidence import EvidenceStore, _ENRICHERS, ingest
 from cybertrace.modules import resolve_module_for_target
 from cybertrace.safety import is_blocked_query
 from tools.export_case_gui import build_payload
@@ -135,7 +135,25 @@ def run_search(target: str) -> dict:
             return await module.search(normalized, target_type=specific_type)
 
     result = asyncio.run(_go())
-    return result.to_dict()
+    payload = result.to_dict()
+    if module_type in _ENRICHERS:
+        payload["crypto_investigation"] = crypto_investigate_adhoc(payload, module_type)
+    return payload
+
+
+def crypto_investigate_adhoc(search_payload: dict, chain: str) -> Optional[dict]:
+    """Loop 56: the landing-page Trace search has no case yet to point the
+    case-scoped /crypto/investigate route at, so this collapses `cybertrace
+    search ... --save x.json && cybertrace correlate x.json --db :memory:`
+    into one request -- ingesting this one search's own result into a
+    scratch in-memory store, same as export_case_gui.build()'s batch path,
+    then handing it to the exact same canonical investigate_wallet() the
+    case-scoped route and CLI use. None if the wallet has no evidence to
+    investigate (every source failed, or ingest found nothing to attach)."""
+    from cybertrace.crypto_investigation import investigate_wallet
+    with EvidenceStore(":memory:") as store:
+        ingest(search_payload, store)
+        return investigate_wallet(store, search_payload.get("target", ""), chain=chain)
 
 
 def provider_health() -> dict:

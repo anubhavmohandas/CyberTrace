@@ -591,3 +591,151 @@ def test_crypto_investigate_endpoint_wallet_never_searched(tmp_path):
             f"{base}/api/case/cryptocase/crypto/investigate?address={_BTC_OTHER}")
         assert status == 404
         assert "never searched" in resp["error"]
+
+
+# --- Loop 56: /api/search runs the canonical crypto investigation too ------
+#
+# The landing-page Trace button hits /api/search, never a case-scoped route
+# (there is no case yet at that point) -- so before this loop,
+# investigate_wallet() was simply never reached from the browser at all.
+# crypto_investigate_adhoc() closes that gap by ingesting this one search's
+# own result into a scratch in-memory store, then calling the exact same
+# investigate_wallet() the case-scoped route and CLI use. These tests pin
+# that wiring at the API layer, same _FakeModule harness as the plain
+# /api/search tests above -- no live network call.
+
+_ADHOC_BTC = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+_ADHOC_COUNTERPARTY = "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+
+
+def _fake_bitcoin_result(target: str, raw_transactions: list) -> "ModuleResult":
+    from cybertrace.modules.base import ModuleResult
+    return ModuleResult(
+        target=target, target_type="bitcoin", module="bitcoin",
+        summary={"address": target, "raw_transactions": raw_transactions})
+
+
+def test_search_endpoint_attaches_crypto_investigation_for_wallet_with_vasp_hit(tmp_path, monkeypatch):
+    fake_result = _fake_bitcoin_result(_ADHOC_BTC, [
+        {"tx_hash": "h1", "direction": "OUT", "counterparty": _ADHOC_COUNTERPARTY,
+         "asset": "BTC", "value": 0.1, "timestamp": "2026-01-01T00:00:00+00:00"},
+    ])
+    monkeypatch.setattr(
+        case_api, "resolve_module_for_target",
+        lambda target, input_type="auto": (_FakeModule(fake_result), target, "bitcoin", "bitcoin"))
+
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+
+    with _running_server(cases_dir) as base:
+        status, body = _get(f"{base}/api/search?q={_ADHOC_BTC}")
+        assert status == 200
+        ci = body["crypto_investigation"]
+        assert ci is not None, "investigate_wallet() must run for a wallet target"
+        assert ci["address"] == _ADHOC_BTC
+        assert ci["transaction_status"] == "FOUND"
+        assert len(ci["transactions"]) == 1
+        for key in ("wallet_trace", "graph", "graph_summary", "typology_signals",
+                   "cross_chain_events", "timeline", "recommended_actions", "risk",
+                   "vasp_investigation"):
+            assert key in ci
+
+
+def test_search_endpoint_non_vasp_wallet_still_returns_full_investigation(tmp_path, monkeypatch):
+    """PS §13: a wallet with real transactions but no VASP reachability must
+    still surface transactions/graph/behavioral data -- never render as if
+    nothing happened just because there is no VASP hit."""
+    fake_result = _fake_bitcoin_result(_ADHOC_BTC, [
+        {"tx_hash": "h1", "direction": "IN", "counterparty": _ADHOC_COUNTERPARTY,
+         "asset": "BTC", "value": 0.1, "timestamp": "2026-01-01T00:00:00+00:00"},
+    ])
+    monkeypatch.setattr(
+        case_api, "resolve_module_for_target",
+        lambda target, input_type="auto": (_FakeModule(fake_result), target, "bitcoin", "bitcoin"))
+
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+
+    with _running_server(cases_dir) as base:
+        status, body = _get(f"{base}/api/search?q={_ADHOC_BTC}")
+        assert status == 200
+        ci = body["crypto_investigation"]
+        assert ci is not None
+        assert ci["vasp_investigation"] is None or ci["vasp_investigation"].get("primary_vasp") is None
+        assert ci["wallet_trace"]["exchange"] is None
+        # Still real, not fabricated: the one transaction/graph/timeline entry
+        # this wallet actually has must survive regardless of the VASP miss.
+        assert len(ci["transactions"]) == 1
+        assert ci["graph_summary"]["node_count"] > 0
+        assert isinstance(ci["typology_signals"], list)
+        assert isinstance(ci["recommended_actions"], list)
+
+
+def test_search_endpoint_non_crypto_target_has_no_investigation_key(tmp_path, monkeypatch):
+    """A username/domain/etc. search must never pay for or surface a crypto
+    investigation it has nothing to do with."""
+    from cybertrace.modules.base import ModuleResult
+    fake_result = ModuleResult(target="someuser", target_type="username", module="username")
+    monkeypatch.setattr(
+        case_api, "resolve_module_for_target",
+        lambda target, input_type="auto": (_FakeModule(fake_result), target, "username", "username"))
+
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+
+    with _running_server(cases_dir) as base:
+        status, body = _get(f"{base}/api/search?q=someuser")
+        assert status == 200
+        assert "crypto_investigation" not in body
+
+
+def test_search_endpoint_crypto_target_no_raw_transactions_is_not_found_not_fabricated(tmp_path, monkeypatch):
+    """PS §16: when every source failed (no raw_transactions at all), the
+    composed investigation must say transaction_status NOT_FOUND -- not
+    silently claim a clean wallet, and never fabricate a FOUND/PARTIAL status
+    or a VASP hit for data that was never actually retrieved."""
+    fake_result = _fake_bitcoin_result(_ADHOC_BTC, [])  # every source failed: no raw transactions
+    monkeypatch.setattr(
+        case_api, "resolve_module_for_target",
+        lambda target, input_type="auto": (_FakeModule(fake_result), target, "bitcoin", "bitcoin"))
+
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+
+    with _running_server(cases_dir) as base:
+        status, body = _get(f"{base}/api/search?q={_ADHOC_BTC}")
+        assert status == 200
+        ci = body["crypto_investigation"]
+        assert ci is not None, "the wallet was still searched -- an entity exists to report on"
+        assert ci["transaction_status"] == "NOT_FOUND"
+        assert ci["transactions"] == []
+        assert ci["wallet_trace"]["exchange"] is None
+
+
+def test_crypto_investigate_adhoc_reuses_canonical_investigate_wallet(tmp_path):
+    """Unit-level pin, independent of the HTTP layer: crypto_investigate_adhoc
+    must call the exact same investigate_wallet() the case-scoped route and
+    CLI use -- monkeypatching it here must change the ad-hoc result too, or a
+    second implementation has crept in."""
+    import cybertrace.crypto_investigation as ci_module
+
+    calls = []
+    real = ci_module.investigate_wallet
+
+    def spy(store, address, **kwargs):
+        calls.append(address)
+        return real(store, address, **kwargs)
+
+    ci_module.investigate_wallet = spy
+    try:
+        payload = _fake_bitcoin_result(_ADHOC_BTC, [
+            {"tx_hash": "h1", "direction": "OUT", "counterparty": _ADHOC_COUNTERPARTY,
+             "asset": "BTC", "value": 0.1, "timestamp": "2026-01-01T00:00:00+00:00"},
+        ]).to_dict()
+        result = case_api.crypto_investigate_adhoc(payload, "bitcoin")
+    finally:
+        ci_module.investigate_wallet = real
+
+    assert calls == [_ADHOC_BTC]
+    assert result is not None
+    assert result["address"] == _ADHOC_BTC

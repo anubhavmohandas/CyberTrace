@@ -1216,6 +1216,231 @@ window.__resources = {
             </div>
           </div>
         </sc-if>
+
+        <sc-if value="{{ isCryptoTarget }}" hint-placeholder-val="{{ false }}">
+          <div style="margin-top:36px">
+            <div style="display:flex;align-items:baseline;gap:12px;padding-bottom:12px;border-bottom:1px solid #171c1f">
+              <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#67716f">CRYPTO INVESTIGATION</div>
+              <div style="font-size:12px;color:#5a6367">blockchain activity → transactions → fund flow → VASP exposure → graph → behavior → risk → LEA</div>
+            </div>
+
+            <sc-if value="{{ hasCryptoInvestigation }}" hint-placeholder-val="{{ false }}">
+              <div style="border:1px solid #1c2427;border-top:none;background:#0d1012;padding:20px 22px;display:flex;flex-direction:column;gap:16px">
+
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px">
+                  <div>
+                    <div style="display:flex;align-items:baseline;gap:8px">
+                      <span style="font:600 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:1px;color:#879196">{{ investigation.chain }}</span>
+                      <div style="font:500 15px/1 'IBM Plex Mono',monospace;color:#edf2f4">{{ investigation.address }}</div>
+                    </div>
+                    <div style="color:#879196;font-size:12.5px;margin-top:8px">{{ investigation.proximity }} · {{ investigation.hops }} hop(s) · fund flow {{ investigation.direction }} · transactions <span style="color:{{ investigation.txStatusColor }}">{{ investigation.txStatus }}</span></div>
+                  </div>
+                  <div style="font:600 12px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:{{ investigation.riskColor }};border:1px solid {{ investigation.riskColor }};padding:6px 10px;flex:none">{{ investigation.riskLevel }}</div>
+                </div>
+
+                <sc-if value="{{ investigation.hasNoAttribution }}" hint-placeholder-val="{{ false }}">
+                  <div style="font-size:12px;color:#5a6367;border-top:1px solid #171c1f;padding-top:14px">No VASP exposure found within the traced hops — reachability check ran; transactions, behavior, and graph evidence below still apply.</div>
+                </sc-if>
+
+                <sc-if value="{{ investigation.hasCandidateOnly }}" hint-placeholder-val="{{ false }}">
+                  <div style="border-top:1px solid #171c1f;padding-top:14px">
+                    <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px">
+                      <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#c2b280">NO DIRECT VASP HIT — FINGERPRINT-BASED CANDIDATE ONLY</div>
+                      <span style="font:600 10px/1 'IBM Plex Mono',monospace;letter-spacing:1px;color:{{ investigation.candidateStrengthColor }};border:1px solid {{ investigation.candidateStrengthColor }};padding:2px 7px">{{ investigation.candidateStrength }}</span>
+                    </div>
+                    <div style="font-size:12px;color:#879196">{{ investigation.candidateLine }}</div>
+                    <sc-if value="{{ investigation.hasCandidateSignals }}" hint-placeholder-val="{{ false }}">
+                      <div style="display:flex;flex-direction:column;gap:6px;margin-top:8px">
+                        <sc-for list="{{ investigation.candidateSignals }}" as="s" hint-placeholder-count="1">
+                          <div style="font-size:12px;color:#879196;line-height:1.5">+ {{ s.detail }} <span style="color:#5a6367">[{{ s.source }}]</span></div>
+                        </sc-for>
+                      </div>
+                    </sc-if>
+                    <sc-if value="{{ investigation.hasCandidateBehavioralNote }}" hint-placeholder-val="{{ false }}">
+                      <div style="font-size:11.5px;color:#5a6367;font-style:italic;margin-top:6px">context: {{ investigation.candidateBehavioralNote }} (supporting color only, never sufficient alone)</div>
+                    </sc-if>
+                    <sc-if value="{{ investigation.hasCandidateAlsoAttributed }}" hint-placeholder-val="{{ false }}">
+                      <div style="margin-top:10px">
+                        <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#d97a6c;margin-bottom:8px">⚠ ALSO A CANDIDATE FOR (conflicting evidence, not merged)</div>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap">
+                          <sc-for list="{{ investigation.candidateAlsoAttributed }}" as="v" hint-placeholder-count="1">
+                            <span style="font-size:11.5px;color:#d97a6c;border:1px solid #4a2420;padding:4px 9px">{{ v }}</span>
+                          </sc-for>
+                        </div>
+                      </div>
+                    </sc-if>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ investigation.hasExchange }}" hint-placeholder-val="{{ false }}">
+                  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;border-top:1px solid #171c1f;padding-top:16px;font:400 11.5px/1 'IBM Plex Mono',monospace">
+                    <sc-for list="{{ investigation.pathSteps }}" as="p" hint-placeholder-count="2">
+                      <span style="display:flex;align-items:center;gap:8px">
+                        <span style="color:#c5ccd0;border:1px solid #262d31;padding:5px 9px">{{ p.address }}</span>
+                        <sc-if value="{{ p.hasArrow }}" hint-placeholder-val="{{ false }}"><span style="color:#495255">→</span></sc-if>
+                      </span>
+                    </sc-for>
+                    <span style="color:#495255">→</span>
+                    <span style="color:#2fb4e8;border:1px solid #163a4a;padding:5px 9px">{{ investigation.exchange }}</span>
+                    <sc-if value="{{ investigation.hasWalletRole }}" hint-placeholder-val="{{ false }}">
+                      <span style="color:#495255">→</span>
+                      <span style="color:#c2b280;border:1px solid #3a341f;padding:5px 9px">{{ investigation.walletRole }}</span>
+                    </sc-if>
+                  </div>
+
+                  <div style="border-top:1px solid #171c1f;padding-top:16px">
+                    <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#2fb4e8;margin-bottom:10px">VASP ATTRIBUTION</div>
+                    <div style="font-size:12.5px;color:#c5ccd0">{{ investigation.attributionLine }}</div>
+                    <div style="font:400 10.5px/1.5 'IBM Plex Mono',monospace;color:#5a6367;margin-top:6px;word-break:break-all">{{ investigation.attributionSource }}</div>
+                    <sc-if value="{{ investigation.hasDepositCandidate }}" hint-placeholder-val="{{ false }}">
+                      <div style="font-size:11px;color:#c2b280;margin-top:8px" title="1-hop, one-way flow toward the VASP -- reachability only, not proof of a customer relationship">possible deposit endpoint</div>
+                    </sc-if>
+                    <div style="font-size:11px;color:{{ investigation.controlColor }};margin-top:8px">{{ investigation.controlLine }}</div>
+                  </div>
+
+                  <sc-if value="{{ investigation.hasVaspContacts }}" hint-placeholder-val="{{ false }}">
+                    <div style="border-top:1px solid #171c1f;padding-top:14px">
+                      <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#2fb4e8;margin-bottom:8px">OTHER VASP CONTACTS (this suspect's own, separate from above)</div>
+                      <div style="display:flex;gap:8px;flex-wrap:wrap">
+                        <sc-for list="{{ investigation.vaspContacts }}" as="v" hint-placeholder-count="1">
+                          <span style="font-size:11.5px;color:#2fb4e8;border:1px solid #163a4a;padding:4px 9px">{{ v }}</span>
+                        </sc-for>
+                      </div>
+                    </div>
+                  </sc-if>
+
+                  <sc-if value="{{ investigation.hasAlsoAttributed }}" hint-placeholder-val="{{ false }}">
+                    <div style="border-top:1px solid #171c1f;padding-top:14px">
+                      <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#d97a6c;margin-bottom:8px">⚠ ALSO ATTRIBUTED (conflicting evidence on this SAME address, not merged)</div>
+                      <div style="display:flex;gap:8px;flex-wrap:wrap">
+                        <sc-for list="{{ investigation.alsoAttributed }}" as="v" hint-placeholder-count="1">
+                          <span style="font-size:11.5px;color:#d97a6c;border:1px solid #4a2420;padding:4px 9px">{{ v }}</span>
+                        </sc-for>
+                      </div>
+                    </div>
+                  </sc-if>
+                </sc-if>
+
+                <div style="border-top:1px solid #171c1f;padding-top:14px">
+                  <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:10px">RISK EVIDENCE — {{ investigation.riskCategories }}</div>
+                  <div style="display:flex;flex-direction:column;gap:6px">
+                    <sc-for list="{{ investigation.riskReasons }}" as="r" hint-placeholder-count="1">
+                      <div style="font-size:12px;color:#879196;line-height:1.5">— {{ r }}</div>
+                    </sc-for>
+                  </div>
+                </div>
+
+                <sc-if value="{{ investigation.hasServiceTags }}" hint-placeholder-val="{{ false }}">
+                  <div style="border-top:1px solid #171c1f;padding-top:14px">
+                    <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#c2b280;margin-bottom:8px">SERVICE TAGS (non-VASP: mixer/DeFi/CoinJoin)</div>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap">
+                      <sc-for list="{{ investigation.serviceTags }}" as="t" hint-placeholder-count="1">
+                        <span style="font-size:11.5px;color:#c2b280;border:1px solid #3a341f;padding:4px 9px">{{ t.label }}</span>
+                      </sc-for>
+                    </div>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ investigation.hasFlags }}" hint-placeholder-val="{{ false }}">
+                  <div style="border-top:1px solid #171c1f;padding-top:14px">
+                    <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:8px">EVIDENCE ON RECORD (source, tier, and claim, cited per finding)</div>
+                    <div style="display:flex;flex-direction:column;gap:6px">
+                      <sc-for list="{{ investigation.flags }}" as="f" hint-placeholder-count="2">
+                        <div style="font-size:12px;color:#879196;line-height:1.5">— {{ f }}</div>
+                      </sc-for>
+                    </div>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ investigation.hasTypologySignals }}" hint-placeholder-val="{{ false }}">
+                  <div style="border-top:1px solid #171c1f;padding-top:14px">
+                    <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:8px">BEHAVIORAL SIGNALS (anomalous, never a finding of criminality)</div>
+                    <div style="display:flex;flex-direction:column;gap:6px">
+                      <sc-for list="{{ investigation.typologySignals }}" as="s" hint-placeholder-count="1">
+                        <div style="font-size:12px;color:#879196;line-height:1.5"><span style="color:{{ s.severityColor }};font-weight:600">{{ s.signal }}</span> ({{ s.severity }}, confidence {{ s.confidence }}) — {{ s.explanation }}</div>
+                      </sc-for>
+                    </div>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ investigation.hasCrossChainEvents }}" hint-placeholder-val="{{ false }}">
+                  <div style="border-top:1px solid #171c1f;padding-top:14px">
+                    <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#2fb4e8;margin-bottom:8px">CROSS-CHAIN EVENTS (confirmed = real transaction, candidate = corpus grouping only)</div>
+                    <div style="display:flex;flex-direction:column;gap:6px">
+                      <sc-for list="{{ investigation.crossChainEvents }}" as="e" hint-placeholder-count="1">
+                        <div style="font-size:12px;color:#879196;line-height:1.5"><span style="color:{{ e.color }};font-weight:600">{{ e.label }}</span> → {{ e.destLine }} <span style="color:#5a6367">[{{ e.sourceApi }}]</span></div>
+                      </sc-for>
+                    </div>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ investigation.hasTransactions }}" hint-placeholder-val="{{ false }}">
+                  <div style="border-top:1px solid #171c1f;padding-top:14px">
+                    <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:8px">TRANSACTIONS</div>
+                    <div style="display:flex;flex-direction:column;gap:1px;max-height:340px;overflow:auto">
+                      <sc-for list="{{ investigation.transactions }}" as="t" hint-placeholder-count="3">
+                        <div style="display:flex;align-items:center;gap:12px;font:400 11.5px/1 'IBM Plex Mono',monospace;padding:7px 0;border-bottom:1px solid #171c1f">
+                          <span style="color:{{ t.directionColor }};font-weight:600;width:32px">{{ t.direction }}</span>
+                          <span style="color:#c5ccd0;width:170px">{{ t.hash }}</span>
+                          <span style="color:#879196;flex:1">{{ t.counterparty }}</span>
+                          <span style="color:#edf2f4">{{ t.amount }}</span>
+                          <span style="color:#5a6367;width:150px">{{ t.timestamp }}</span>
+                          <span style="color:{{ t.statusColor }};width:70px">{{ t.status }}</span>
+                        </div>
+                      </sc-for>
+                    </div>
+                    <sc-if value="{{ investigation.transactionsMoreCount }}" hint-placeholder-val="{{ false }}">
+                      <div style="font-size:11px;color:#5a6367;margin-top:8px">+ {{ investigation.transactionsMoreCount }} more not shown</div>
+                    </sc-if>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ investigation.hasGraphSummary }}" hint-placeholder-val="{{ false }}">
+                  <div style="border-top:1px solid #171c1f;padding-top:14px">
+                    <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:8px">INVESTIGATION GRAPH — {{ investigation.graphSummary }}</div>
+                    <div style="display:flex;gap:16px">
+                      <div style="flex:1;max-height:220px;overflow:auto">
+                        <div style="font-size:10.5px;color:#5a6367;letter-spacing:1px;margin-bottom:6px">NODES</div>
+                        <sc-for list="{{ investigation.graphNodes }}" as="n" hint-placeholder-count="3">
+                          <div style="font-size:11.5px;color:#879196;font-family:'IBM Plex Mono',monospace;padding:3px 0"><span style="color:#5a6367">{{ n.type }}</span> {{ n.label }}</div>
+                        </sc-for>
+                        <sc-if value="{{ investigation.graphNodesMoreCount }}" hint-placeholder-val="{{ false }}">
+                          <div style="font-size:11px;color:#5a6367;margin-top:4px">+ {{ investigation.graphNodesMoreCount }} more</div>
+                        </sc-if>
+                      </div>
+                      <div style="flex:1;max-height:220px;overflow:auto">
+                        <div style="font-size:10.5px;color:#5a6367;letter-spacing:1px;margin-bottom:6px">EDGES</div>
+                        <sc-for list="{{ investigation.graphEdges }}" as="e" hint-placeholder-count="3">
+                          <div style="font-size:11.5px;color:#879196;font-family:'IBM Plex Mono',monospace;padding:3px 0">{{ e.from }} <span style="color:#2fb4e8">{{ e.rel }}</span> {{ e.to }}</div>
+                        </sc-for>
+                        <sc-if value="{{ investigation.graphEdgesMoreCount }}" hint-placeholder-val="{{ false }}">
+                          <div style="font-size:11px;color:#5a6367;margin-top:4px">+ {{ investigation.graphEdgesMoreCount }} more</div>
+                        </sc-if>
+                      </div>
+                    </div>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ investigation.hasLeaActions }}" hint-placeholder-val="{{ false }}">
+                  <div style="border-top:1px solid #171c1f;padding-top:14px">
+                    <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#4a9d7f;margin-bottom:8px">LEA RECOMMENDATIONS (investigative next steps, not legal conclusions)</div>
+                    <div style="display:flex;flex-direction:column;gap:6px">
+                      <sc-for list="{{ investigation.leaActions }}" as="a" hint-placeholder-count="1">
+                        <div style="font-size:12px;color:#879196;line-height:1.5"><span style="color:#4a9d7f;font-weight:600">{{ a.action }}</span> [{{ a.confidence }}] — {{ a.reason }}</div>
+                      </sc-for>
+                    </div>
+                  </div>
+                </sc-if>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ hasCryptoInvestigationUnavailable }}" hint-placeholder-val="{{ false }}">
+              <div style="border:1px solid #1c2427;border-top:none;background:#0d1012;padding:20px 22px;color:#5a6367;font-size:12.5px">
+                Investigation unavailable — no blockchain data could be retrieved for this wallet (see source results above for the specific provider failure). This is not the same as "no VASP found".
+              </div>
+            </sc-if>
+          </div>
+        </sc-if>
       </sc-if>
     </div>
   </div>
@@ -1548,6 +1773,98 @@ function bareWalletRow(w) {
     chain: (w.chain || '').replace('_ADDRESS', ''),
     ...cryptoPanelVals(w),
   };
+}
+
+// Loop 56: the landing-page Trace search has no case to point the
+// case-scoped /crypto/investigate route at, so tools/case_api.py's
+// crypto_investigate_adhoc() runs the exact same canonical
+// investigate_wallet() against a scratch in-memory store built from this
+// one search's own result (see run_search()). WALLET_CHAIN_TYPES mirrors
+// evidence.py's _ENRICHERS keys -- the same set that decides server-side
+// whether a search result gets a crypto_investigation attached at all.
+const WALLET_CHAIN_TYPES = ['bitcoin', 'ethereum', 'bnb', 'polygon', 'tron', 'solana'];
+
+const TX_STATUS_COLOR = { FOUND: C.green, PARTIAL: C.sand, NOT_FOUND: '#67716f', NOT_CHECKED: '#67716f' };
+
+// Real persisted `transactions` table columns (evidence.py's own schema
+// comment) -- a NULL field stays "—"/"unknown", never a fabricated 0 or
+// guessed sender, which is exactly what a multi-input UTXO transaction's
+// PARTIAL status already tells the reader not to trust past this point.
+function txRowVals(t) {
+  return {
+    hash: short(t.tx_hash || '', 22),
+    direction: t.direction || '—',
+    directionColor: t.direction === 'IN' ? C.green : t.direction === 'OUT' ? '#d97a6c' : '#67716f',
+    counterparty: t.counterparty ? short(t.counterparty, 24) : 'unknown counterparty',
+    amount: t.value != null ? `${t.value} ${t.asset || ''}`.trim() : 'unknown (PARTIAL)',
+    timestamp: t.timestamp ? t.timestamp.slice(0, 16).replace('T', ' ') + ' UTC' : '—',
+    block: t.block || '—',
+    fee: t.fee != null ? String(t.fee) : '—',
+    status: t.status || 'NOT_CHECKED',
+    statusColor: TX_STATUS_COLOR[t.status] || '#67716f',
+    provider: t.provider || t.source || '—',
+  };
+}
+
+// One card for the wallet the search just investigated. wt (wallet_trace)
+// carries the VASP/reachability/risk fields walletRow() already knows how
+// to render for a case's own wallet cards -- ci (the investigate_wallet
+// envelope wrapping it) adds transactions/graph/typology/cross-chain/LEA on
+// top. Merged, not re-derived: every VASP/risk claim below traces back to
+// the identical wallet_trace_report()/score_wallet_risk() call a case-level
+// card or `cybertrace crypto investigate` would make for the same wallet.
+function investigationCardVals(ci) {
+  const wt = ci.wallet_trace || {};
+  const w = Object.assign({}, wt, ci, { value: wt.address, confidence: wt.exchange_confidence });
+  const row = walletRow(w, {}, () => {});
+  const g = ci.graph || {};
+  const nodes = g.nodes || [], edges = g.edges || [];
+  return Object.assign(row, {
+    // exchange is a reachability hit; vasp_candidates is the Loop 45
+    // fingerprint fallback for when there is none -- both absent means this
+    // wallet genuinely has no VASP signal, not "not checked" (this card only
+    // ever renders once the investigation has actually run). A candidate
+    // alone is a weaker, separate signal (attribution.vasp_candidates, never
+    // a reachability hit) -- surfaced as its own line, never folded into
+    // attributionLine/hasExchange above.
+    hasNoAttribution: !wt.exchange && !wt.vasp_candidates,
+    hasCandidateOnly: !wt.exchange && !!wt.vasp_candidates,
+    candidateLine: wt.vasp_candidates
+      ? `Fingerprint candidate: ${wt.vasp_candidates.primary_candidate} `
+        + `(${wt.vasp_candidates.status}, ${wt.vasp_candidates.strength} strength) `
+        + `— counterparty-overlap based, not a reachability hit, never sufficient alone`
+      : '',
+    // Loop 45's own supporting_signals/also_attributed/behavioral_note --
+    // same fields candidateWalletRow already renders for a case's own
+    // unattributed_wallet_candidates list, reused here rather than
+    // re-derived, so a fingerprint candidate is never reduced to a bare
+    // headline with no evidence behind it.
+    candidateStrength: (wt.vasp_candidates && wt.vasp_candidates.strength) || '',
+    candidateStrengthColor: wt.vasp_candidates
+      ? (CANDIDATE_STRENGTH_COLOR[wt.vasp_candidates.strength] || '#67716f') : '#67716f',
+    candidateSignals: wt.vasp_candidates
+      ? (wt.vasp_candidates.supporting_signals || []).map(s => ({
+          detail: s.detail || s.rule_id, source: s.attribution_source || '',
+        }))
+      : [],
+    hasCandidateSignals: !!(wt.vasp_candidates && (wt.vasp_candidates.supporting_signals || []).length),
+    candidateBehavioralNote: (wt.vasp_candidates && wt.vasp_candidates.behavioral_note) || '',
+    hasCandidateBehavioralNote: !!(wt.vasp_candidates && wt.vasp_candidates.behavioral_note),
+    candidateAlsoAttributed: wt.vasp_candidates
+      ? (wt.vasp_candidates.also_attributed || []).map(c => `${c.brand} (${c.strength})`)
+      : [],
+    hasCandidateAlsoAttributed: !!(wt.vasp_candidates && (wt.vasp_candidates.also_attributed || []).length),
+    txStatusColor: TX_STATUS_COLOR[row.txStatus] || '#67716f',
+    transactions: (ci.transactions || []).slice(0, 100).map(txRowVals),
+    hasTransactions: !!(ci.transactions || []).length,
+    transactionsMoreCount: Math.max(0, (ci.transactions || []).length - 100),
+    graphNodes: nodes.slice(0, 40).map(n => ({ type: n.type, label: short(String(n.value), 28) })),
+    graphNodesMoreCount: Math.max(0, nodes.length - 40),
+    graphEdges: edges.slice(0, 40).map(e => ({
+      rel: (e.rel || '').replace(/_/g, ' '), from: short(e.from, 20), to: short(e.to, 20),
+    })),
+    graphEdgesMoreCount: Math.max(0, edges.length - 40),
+  });
 }
 
 function walletTabVals(cd, openVerdict) {
@@ -1940,6 +2257,20 @@ class Component extends DCLogic {
         note: !info.checked ? (info.error || 'could not check') : info.active ? 'activity found' : 'no activity found',
       })),
       detectCaveat: (st.detectResult && st.detectResult.caveat) || '',
+
+      // Loop 56: the composed crypto investigation, additional to the basic
+      // provider/search results above -- never a replacement for them. Gated
+      // on target_type (not merely "did crypto_investigation come back
+      // non-null") so a wallet search whose investigation genuinely found
+      // nothing usable (every provider failed; see run_search()) still shows
+      // its own distinct "investigation unavailable" state instead of the
+      // section quietly not appearing at all.
+      isCryptoTarget: WALLET_CHAIN_TYPES.includes((st.searchResult && st.searchResult.target_type) || ''),
+      hasCryptoInvestigation: !!(st.searchResult && st.searchResult.crypto_investigation),
+      hasCryptoInvestigationUnavailable: WALLET_CHAIN_TYPES.includes((st.searchResult && st.searchResult.target_type) || '')
+        && !!st.searchResult && !st.searchResult.crypto_investigation,
+      investigation: (st.searchResult && st.searchResult.crypto_investigation)
+        ? investigationCardVals(st.searchResult.crypto_investigation) : null,
 
       caseHeaderId: cd.case_id || '—',
       caseTitle: cd.title || 'Untitled case',
