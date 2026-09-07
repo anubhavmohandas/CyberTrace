@@ -63,6 +63,11 @@ ALLOWED_ORIGIN = os.environ.get("CT_ALLOWED_ORIGIN", "*")
 # itself already produces as a case_id (a `--db cases/<name>.db` stem).
 _CASE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
+# Distinguishes "no such case" from a plain `None` ("case exists, but the
+# requested wallet/etc. within it wasn't found") across every case-scoped
+# route below, so the two 404s never collapse into the same generic message.
+_NO_SUCH_CASE = object()
+
 
 def _case_db_path(cases_dir: Path, case_id: str) -> Optional[Path]:
     """The on-disk *.db path for `case_id`, or None if it isn't a bare
@@ -112,10 +117,12 @@ def case_payload(cases_dir: Path, case_id: str) -> dict | None:
         return build_payload(store, case_id, title)
 
 
-def run_search(target: str) -> dict:
-    """Run the same single-target search `cybertrace search` does and return
-    its ModuleResult as a dict. Raises ValueError on a refused/unsupported
-    target so the caller can turn it into a 400.
+def _search_target(target: str) -> tuple[dict, str]:
+    """Resolve TARGET to a module and run its search -- the one place both
+    run_search (scratch, no case) and add_target_to_case (persisted into a
+    real case) do a live module search, so a target is never searched two
+    different ways. Raises ValueError on a refused/unsupported target so the
+    caller can turn it into a 400.
 
     occam: runs inline on the request thread rather than as a background
     job — fine for bitcoin/domain (~5s), but username/email modules shell
@@ -135,9 +142,47 @@ def run_search(target: str) -> dict:
             return await module.search(normalized, target_type=specific_type)
 
     result = asyncio.run(_go())
-    payload = result.to_dict()
+    return result.to_dict(), module_type
+
+
+def run_search(target: str) -> dict:
+    """Run the same single-target search `cybertrace search` does and return
+    its ModuleResult as a dict, enriched with a scratch (non-persisted)
+    crypto investigation for a wallet target -- see crypto_investigate_adhoc.
+    Raises ValueError on a refused/unsupported target so the caller can turn
+    it into a 400."""
+    payload, module_type = _search_target(target)
     if module_type in _ENRICHERS:
         payload["crypto_investigation"] = crypto_investigate_adhoc(payload, module_type)
+    return payload
+
+
+def add_target_to_case(cases_dir: Path, case_id: str, target: str):
+    """Loop 57: the case-scoped counterpart of run_search -- runs the exact
+    same module search, then ingest()s the result into THIS case's own
+    persistent store (not run_search's scratch :memory: one), so the
+    target/evidence/wallet becomes a real, durable part of the case instead
+    of a disposable side effect. This is the one thing the GUI was missing
+    to make "Case -> Add target -> Investigate" possible at all -- previously
+    the only way to get a target into a case was the CLI
+    (`cybertrace search --save x.json && cybertrace correlate x.json --db
+    case.db`), entirely outside the browser.
+
+    Returns the sentinel _NO_SUCH_CASE for "no such case" (checked first, so
+    a request against a case that doesn't exist never runs a live search at
+    all); raises ValueError for a refused/unsupported target or a
+    closed/archived case (EvidenceStore._require_open, via ingest) -- both
+    4xx-worthy, left for the caller to translate."""
+    db_path = _case_db_path(cases_dir, case_id)
+    if db_path is None or not db_path.is_file():
+        return _NO_SUCH_CASE
+    payload, module_type = _search_target(target)
+    with EvidenceStore(str(db_path)) as store:
+        ingest(payload, store)
+        if module_type in _ENRICHERS:
+            from cybertrace.crypto_investigation import investigate_wallet
+            payload["crypto_investigation"] = investigate_wallet(
+                store, payload.get("target", ""), chain=module_type)
     return payload
 
 
@@ -196,9 +241,6 @@ def snapshot_body(cases_dir: Path, case_id: str, snapshot_id: str) -> dict | Non
         return store.snapshot_payload(snapshot_id)
 
 
-_NO_SUCH_CASE = object()
-
-
 def crypto_investigate(cases_dir: Path, case_id: str, address: str,
                        chain: Optional[str] = None, max_hops: int = 4,
                        max_transactions: int = 500):
@@ -217,6 +259,34 @@ def crypto_investigate(cases_dir: Path, case_id: str, address: str,
                                   max_transactions=max_transactions)
 
 
+def update_case_status(cases_dir: Path, case_id: str, status: str):
+    """Loop 57: case lifecycle (close/archive/reopen) over HTTP -- the CLI's
+    `cybertrace case --db case.db --status ...` already does exactly this
+    through the same EvidenceStore.update_case, which is also the only place
+    that validates against CASE_STATUSES (OPEN/CLOSED/ARCHIVED); a bad value
+    raises ValueError for the caller to turn into a 400. Never gated by
+    _require_open -- update_case is the status transition itself, so a
+    closed case can always be reopened (see that method's own docstring)."""
+    db_path = _case_db_path(cases_dir, case_id)
+    if db_path is None or not db_path.is_file():
+        return _NO_SUCH_CASE
+    with EvidenceStore(str(db_path)) as store:
+        store.update_case(status=status.upper())
+        return store.case_info()
+
+
+def delete_case(cases_dir: Path, case_id: str) -> bool:
+    """Loop 57: real deletion, not a frontend-only removal -- a case is just
+    a *.db file (see module docstring), so this is the same operation
+    `rm cases/<id>.db` would be. Returns False for "no such case" so the
+    caller can 404 rather than pretend a delete of nothing succeeded."""
+    db_path = _case_db_path(cases_dir, case_id)
+    if db_path is None or not db_path.is_file():
+        return False
+    db_path.unlink()
+    return True
+
+
 def make_handler(cases_dir: Path):
     class Handler(SimpleHTTPRequestHandler):
         def _authorized(self) -> bool:
@@ -227,7 +297,7 @@ def make_handler(cases_dir: Path):
         def do_OPTIONS(self):
             self.send_response(204)
             self._cors_headers()
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, X-CT-Api-Key")
             self.end_headers()
 
@@ -311,7 +381,60 @@ def make_handler(cases_dir: Path):
             if path.startswith("/api/case/") and path.endswith("/investigator"):
                 case_id = path[len("/api/case/"):-len("/investigator")]
                 return self._investigator_answer(case_id)
+            if path.startswith("/api/case/") and path.endswith("/target"):
+                case_id = path[len("/api/case/"):-len("/target")]
+                return self._add_target(case_id)
+            if path.startswith("/api/case/") and path.endswith("/status"):
+                case_id = path[len("/api/case/"):-len("/status")]
+                return self._set_status(case_id)
             return self._json({"error": "not found"}, status=404)
+
+        def do_DELETE(self):
+            path = unquote(urlsplit(self.path).path)
+            if path.startswith("/api/") and not self._authorized():
+                return self._json({"error": "unauthorized"}, status=401)
+            if path.startswith("/api/case/"):
+                case_id = path[len("/api/case/"):]
+                if not delete_case(cases_dir, case_id):
+                    return self._json({"error": "no such case"}, status=404)
+                return self._json({"deleted": case_id}, status=200)
+            return self._json({"error": "not found"}, status=404)
+
+        def _add_target(self, case_id: str) -> None:
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except json.JSONDecodeError:
+                return self._json({"error": "invalid JSON body"}, status=400)
+            target = (body.get("target") or "").strip()
+            if not target:
+                return self._json({"error": "target is required"}, status=400)
+            try:
+                result = add_target_to_case(cases_dir, case_id, target)
+            except ValueError as e:
+                return self._json({"error": str(e)}, status=400)
+            except Exception as e:
+                return self._json({"error": f"search failed: {e}"}, status=502)
+            if result is _NO_SUCH_CASE:
+                return self._json({"error": "no such case"}, status=404)
+            return self._json(result, status=201)
+
+        def _set_status(self, case_id: str) -> None:
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except json.JSONDecodeError:
+                return self._json({"error": "invalid JSON body"}, status=400)
+            status = (body.get("status") or "").strip()
+            if not status:
+                return self._json({"error": "status is required"}, status=400)
+            try:
+                result = update_case_status(cases_dir, case_id, status)
+            except ValueError as e:
+                return self._json({"error": str(e)}, status=400)
+            if result is _NO_SUCH_CASE:
+                return self._json({"error": "no such case"}, status=404)
+            return self._json(result, status=200)
 
         def _create_case(self) -> None:
             length = int(self.headers.get("Content-Length", 0))

@@ -204,6 +204,13 @@ def build_payload(store: EvidenceStore, case_id: str, title: str) -> dict:
     return {
         "case_id": case_id, "title": title,
         "status": info.get("status", "OPEN"), "updated_at": info.get("updated_at", ""),
+        # Loop 57: "zero targets ever searched into this case" is a distinct
+        # state from "targets searched, nothing found" -- len(candidates)==0
+        # alone can't tell those apart (a crypto-only case has 0 candidates
+        # either way, since wallets live in wallet_exchange_paths/
+        # other_traced_wallets, not `candidates`). The GUI's empty-case
+        # ("no investigation run yet") vs. no-findings state reads this.
+        "target_count": len(targets),
         "stats": stats, "candidates": candidates, "drawers": drawers,
         "evidence": evidence_rows, "timeline": timeline_rows,
         "captures": captures, "suppressed": suppressed,

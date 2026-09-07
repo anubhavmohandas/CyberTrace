@@ -44,6 +44,15 @@ def _post(url: str, body: dict) -> tuple[int, object]:
         return e.code, json.loads(e.read())
 
 
+def _delete(url: str) -> tuple[int, object]:
+    req = Request(url, method="DELETE")
+    try:
+        with urlopen(req) as r:
+            return r.status, json.loads(r.read())
+    except Exception as e:  # urllib raises HTTPError (subclass of Exception) on 4xx
+        return e.code, json.loads(e.read())
+
+
 @contextmanager
 def _running_server(cases_dir: Path):
     handler = functools.partial(case_api.make_handler(cases_dir), directory=str(case_api.WEB_DIR))
@@ -739,3 +748,189 @@ def test_crypto_investigate_adhoc_reuses_canonical_investigate_wallet(tmp_path):
     assert calls == [_ADHOC_BTC]
     assert result is not None
     assert result["address"] == _ADHOC_BTC
+
+
+# --- Loop 57: /api/case/<id>/target -- the case workspace's missing "Add
+# target" round trip. Before this, the only way to get a target into a case
+# was the CLI (`cybertrace search --save x.json && cybertrace correlate
+# x.json --db case.db`) -- there was no browser path from "empty case" to
+# "case with an investigation in it" at all. ---------------------------------
+
+_TARGET_BTC = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+_TARGET_COUNTERPARTY = "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+
+
+def test_add_target_endpoint_persists_into_the_real_case_store(tmp_path, monkeypatch):
+    """The defining behavior: unlike run_search's scratch :memory: store
+    (crypto_investigate_adhoc) or add_target's own module search, ingesting
+    here must land in the case's actual .db -- durable, and visible to a
+    later plain GET /api/case/<id> with no special handling."""
+    fake_result = _fake_bitcoin_result(_TARGET_BTC, [
+        {"tx_hash": "h1", "direction": "OUT", "counterparty": _TARGET_COUNTERPARTY,
+         "asset": "BTC", "value": 0.1, "timestamp": "2026-01-01T00:00:00+00:00"},
+    ])
+    monkeypatch.setattr(
+        case_api, "resolve_module_for_target",
+        lambda target, input_type="auto": (_FakeModule(fake_result), target, "bitcoin", "bitcoin"))
+
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    with EvidenceStore(str(cases_dir / "empty.db")) as store:
+        store.update_case(name="fresh case")
+
+    with _running_server(cases_dir) as base:
+        status, before = _get(f"{base}/api/case/empty")
+        assert before["target_count"] == 0, "a brand-new case must start with zero targets"
+
+        status, resp = _post(f"{base}/api/case/empty/target", {"target": _TARGET_BTC})
+        assert status == 201
+        assert resp["crypto_investigation"] is not None
+        assert resp["crypto_investigation"]["address"] == _TARGET_BTC
+
+        status, after = _get(f"{base}/api/case/empty")
+        assert status == 200
+        assert after["target_count"] == 1, "the searched wallet must now be a real, persisted target"
+        assert after["case_has_crypto"] is True
+
+
+def test_add_target_endpoint_no_such_case(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    with _running_server(cases_dir) as base:
+        status, resp = _post(f"{base}/api/case/does-not-exist/target", {"target": _TARGET_BTC})
+        assert status == 404
+        assert "error" in resp
+
+
+def test_add_target_endpoint_requires_target(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    with EvidenceStore(str(cases_dir / "empty.db")) as store:
+        store.update_case(name="fresh case")
+    with _running_server(cases_dir) as base:
+        status, resp = _post(f"{base}/api/case/empty/target", {})
+        assert status == 400
+        assert "error" in resp
+
+
+def test_add_target_endpoint_refuses_on_closed_case(tmp_path, monkeypatch):
+    """PS §7/§29: a closed/archived case must not silently accrue new
+    evidence -- EvidenceStore._require_open (via ingest) is what actually
+    enforces this; this pins that the HTTP layer surfaces it as a clear 400,
+    not a 500 or a silent no-op."""
+    fake_result = _fake_bitcoin_result(_TARGET_BTC, [])
+    monkeypatch.setattr(
+        case_api, "resolve_module_for_target",
+        lambda target, input_type="auto": (_FakeModule(fake_result), target, "bitcoin", "bitcoin"))
+
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    with EvidenceStore(str(cases_dir / "shut.db")) as store:
+        store.update_case(name="closed case", status="CLOSED")
+
+    with _running_server(cases_dir) as base:
+        status, resp = _post(f"{base}/api/case/shut/target", {"target": _TARGET_BTC})
+        assert status == 400
+        assert "closed" in resp["error"].lower()
+
+
+def test_add_target_endpoint_rejects_traversal_case_id(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    with _running_server(cases_dir) as base:
+        status, resp = _post(f"{base}/api/case/..%2foutside%2fsecret/target",
+                             {"target": _TARGET_BTC})
+        assert status == 404
+        assert "error" in resp
+
+
+# --- Loop 57: case lifecycle -- /api/case/<id>/status (archive/close/reopen)
+# and DELETE /api/case/<id> (real deletion, not a frontend-only removal). ----
+
+def test_set_status_endpoint_updates_and_persists(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    with EvidenceStore(str(cases_dir / "life.db")) as store:
+        store.update_case(name="lifecycle case")
+
+    with _running_server(cases_dir) as base:
+        status, resp = _post(f"{base}/api/case/life/status", {"status": "archived"})
+        assert status == 200
+        assert resp["status"] == "ARCHIVED"
+
+        status, case = _get(f"{base}/api/case/life")
+        assert case["status"] == "ARCHIVED"
+
+        status, cases = _get(f"{base}/api/cases")
+        assert next(c for c in cases if c["id"] == "life")["status"] == "ARCHIVED"
+
+
+def test_set_status_endpoint_rejects_unknown_status(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    with EvidenceStore(str(cases_dir / "life.db")) as store:
+        store.update_case(name="lifecycle case")
+
+    with _running_server(cases_dir) as base:
+        status, resp = _post(f"{base}/api/case/life/status", {"status": "deleted"})
+        assert status == 400
+        assert "error" in resp
+
+
+def test_set_status_endpoint_no_such_case(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    with _running_server(cases_dir) as base:
+        status, resp = _post(f"{base}/api/case/does-not-exist/status", {"status": "closed"})
+        assert status == 404
+        assert "error" in resp
+
+
+def test_delete_case_endpoint_removes_the_db_and_is_idempotent_404(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    db_path = cases_dir / "gone.db"
+    with EvidenceStore(str(db_path)) as store:
+        store.update_case(name="to be deleted")
+
+    with _running_server(cases_dir) as base:
+        status, cases = _get(f"{base}/api/cases")
+        assert any(c["id"] == "gone" for c in cases)
+
+        status, resp = _delete(f"{base}/api/case/gone")
+        assert status == 200
+        assert resp["deleted"] == "gone"
+        assert not db_path.exists(), "delete must remove the real .db file, not just hide it in the UI"
+
+        status, cases = _get(f"{base}/api/cases")
+        assert not any(c["id"] == "gone" for c in cases), "count/list must update after delete"
+
+        status, resp = _get(f"{base}/api/case/gone")
+        assert status == 404, "a direct URL to the deleted case must not resurrect it"
+
+        # Deleting again (double-click, stale tab) must 404, not 500.
+        status, resp = _delete(f"{base}/api/case/gone")
+        assert status == 404
+
+
+def test_delete_case_endpoint_no_such_case(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    with _running_server(cases_dir) as base:
+        status, resp = _delete(f"{base}/api/case/never-existed")
+        assert status == 404
+        assert "error" in resp
+
+
+def test_delete_case_endpoint_rejects_traversal_case_id(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with EvidenceStore(str(outside / "secret.db")) as store:
+        store.update_case(name="must never be deletable over the API")
+
+    with _running_server(cases_dir) as base:
+        status, resp = _delete(f"{base}/api/case/..%2foutside%2fsecret")
+        assert status == 404
+        assert (outside / "secret.db").exists(), "traversal guard must block DELETE too, not only GET"

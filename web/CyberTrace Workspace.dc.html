@@ -198,7 +198,9 @@ window.__resources = {
             </div>
           </div>
           <div style="display:flex;gap:8px;align-items:center">
-            <div onClick="{{ recheck }}" style="cursor:pointer;border:1px solid #262d31;color:#a7b1b5;padding:7px 14px;font-size:12.5px" style-hover="border-color:#2fb4e8;color:#2fb4e8">Re-check</div>
+            <div onClick="{{ toggleArchive }}" style="cursor:pointer;border:1px solid #262d31;color:#a7b1b5;padding:7px 14px;font-size:12.5px" style-hover="border-color:#2fb4e8;color:#2fb4e8">{{ archiveLabel }}</div>
+            <div onClick="{{ openDeleteConfirm }}" style="cursor:pointer;border:1px solid #262d31;color:#a7b1b5;padding:7px 14px;font-size:12.5px" style-hover="border-color:#d97a6c;color:#d97a6c">Delete case</div>
+            <div onClick="{{ recheck }}" title="Asks the Investigator what changed in this case's already-loaded evidence — not a live re-scan of providers" style="cursor:pointer;border:1px solid #262d31;color:#a7b1b5;padding:7px 14px;font-size:12.5px" style-hover="border-color:#2fb4e8;color:#2fb4e8">Re-check</div>
             <div onClick="{{ toggleAi }}" style="cursor:pointer;border:1px solid #2fb4e8;color:#2fb4e8;padding:7px 14px;font-size:12.5px" style-hover="background:#0f2029">AI Investigator</div>
           </div>
         </div>
@@ -223,6 +225,22 @@ window.__resources = {
 
         <sc-if value="{{ tabOverview }}" hint-placeholder-val="{{ true }}">
           <div style="display:flex;flex-direction:column;gap:32px;max-width:1080px">
+
+            <div style="border:1px solid #1c2427;background:#0d1012;padding:18px 20px">
+              <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#2fb4e8">ADD TARGET</div>
+              <div style="color:#879196;font-size:12px;margin-top:6px">wallet address, domain, IP, username, email — investigated with the same engine as the landing-page Trace, and persisted into this case</div>
+              <div style="display:flex;border:1px solid #232a2e;background:#08090b;margin-top:12px">
+                <input value="{{ addTargetValue }}" onChange="{{ onAddTargetValue }}" onKeyDown="{{ onAddTargetKey }}" placeholder="e.g. bc1q… or example.com" style="flex:1;background:transparent;border:none;outline:none;padding:12px 13px;color:#d5dbde;font:400 13px/1 'IBM Plex Mono',monospace" />
+                <div onClick="{{ addTarget }}" style="cursor:pointer;background:#2fb4e8;color:#04161f;font:600 12.5px/1 'IBM Plex Sans',sans-serif;letter-spacing:.4px;display:grid;place-items:center;padding:0 22px" style-hover="background:#79d6f7">{{ addTargetLabel }}</div>
+              </div>
+              <sc-if value="{{ addTargetError }}" hint-placeholder-val="{{ false }}">
+                <div style="margin-top:12px;border:1px solid #33221f;background:#1a0f0d;color:#d97a6c;padding:10px 12px;font-size:12px">{{ addTargetError }}</div>
+              </sc-if>
+              <sc-if value="{{ caseIsEmpty }}" hint-placeholder-val="{{ false }}">
+                <div style="margin-top:12px;color:#5a6367;font-size:12px">No investigation has been run yet in this case — add a target above to begin.</div>
+              </sc-if>
+            </div>
+
             <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px">
               <sc-for list="{{ stats }}" as="s" hint-placeholder-count="3">
                 <div style="border:1px solid #1c2427;background:#0d1012;padding:18px 20px">
@@ -1147,6 +1165,24 @@ window.__resources = {
       </div>
     </sc-if>
 
+    <sc-if value="{{ deleteConfirmOpen }}" hint-placeholder-val="{{ false }}">
+      <div style="position:fixed;inset:0;background:rgba(4,6,7,.72);z-index:60;display:flex;align-items:center;justify-content:center">
+        <div style="width:440px;background:#0b0e10;border:1px solid #1c2427;animation:ctIn .18s ease">
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 22px;border-bottom:1px solid #171c1f">
+            <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#d97a6c">DELETE CASE</div>
+            <div onClick="{{ closeDeleteConfirm }}" style="cursor:pointer;color:#67716f;font-size:13px" style-hover="color:#d5dbde">×</div>
+          </div>
+          <div style="padding:22px">
+            <div style="color:#c5ccd0;font-size:13px;line-height:1.6">Permanently delete <b style="color:#edf2f4">{{ caseTitle }}</b> ({{ caseHeaderId }})? This removes the case's evidence store from disk. This cannot be undone.</div>
+            <div style="display:flex;gap:9px;margin-top:20px">
+              <div onClick="{{ confirmDelete }}" style="cursor:pointer;flex:1;text-align:center;background:#3a1e1a;color:#d97a6c;padding:11px 0;font-size:12.5px;font-weight:600" style-hover="background:#4a2420">{{ deleteButtonLabel }}</div>
+              <div onClick="{{ closeDeleteConfirm }}" style="cursor:pointer;border:1px solid #262d31;color:#a7b1b5;padding:11px 20px;font-size:12.5px" style-hover="color:#d5dbde">Cancel</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+
   </div>
 </sc-if>
 
@@ -1158,8 +1194,46 @@ window.__resources = {
     </div>
 
     <div style="max-width:900px;margin:0 auto;padding:40px">
-      <div style="font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#2fb4e8">{{ searchType }}</div>
-      <div style="font-size:22px;font-weight:500;color:#edf2f4;margin-top:8px;word-break:break-all">{{ searchTarget }}</div>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px">
+        <div>
+          <div style="font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#2fb4e8">{{ searchType }}</div>
+          <div style="font-size:22px;font-weight:500;color:#edf2f4;margin-top:8px;word-break:break-all">{{ searchTarget }}</div>
+        </div>
+        <sc-if value="{{ hasAddToCase }}" hint-placeholder-val="{{ false }}">
+          <div onClick="{{ toggleAddToCase }}" style="cursor:pointer;border:1px solid #2fb4e8;color:#2fb4e8;padding:8px 16px;font-size:12.5px;flex:none" style-hover="background:#0f2029">Add to case</div>
+        </sc-if>
+      </div>
+
+      <sc-if value="{{ hasAddToCaseDone }}" hint-placeholder-val="{{ false }}">
+        <div style="margin-top:16px;border:1px solid #1c3a2a;background:#0d1512;color:#63c48b;padding:12px 16px;font-size:12.5px;display:flex;justify-content:space-between;align-items:center;gap:16px">
+          <span>Added to the case — every tab (Wallets/Graph/Evidence/Timeline/Report) now reflects this target.</span>
+          <div onClick="{{ goToAddedCase }}" style="cursor:pointer;border:1px solid #1c3a2a;color:#63c48b;padding:6px 12px;flex:none" style-hover="border-color:#63c48b">Open case →</div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ addToCaseOpen }}" hint-placeholder-val="{{ false }}">
+        <div style="margin-top:16px;padding:16px;border:1px solid #1c2427;background:#0d1012">
+          <sc-if value="{{ hasAddToCaseError }}" hint-placeholder-val="{{ false }}">
+            <div style="margin-bottom:12px;border:1px solid #33221f;background:#1a0f0d;color:#d97a6c;padding:10px 12px;font-size:12px">{{ addToCaseError }}</div>
+          </sc-if>
+          <sc-if value="{{ hasAddToCaseCases }}" hint-placeholder-val="{{ false }}">
+            <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:8px">ADD TO AN EXISTING CASE</div>
+            <div style="display:flex;flex-direction:column;gap:1px;margin-bottom:16px">
+              <sc-for list="{{ addToCaseCases }}" as="c" hint-placeholder-count="2">
+                <div onClick="{{ c.pick }}" style="cursor:pointer;display:flex;justify-content:space-between;padding:9px 12px;border:1px solid #1c2427" style-hover="border-color:#2fb4e8">
+                  <span style="color:#c5ccd0;font-size:12.5px">{{ c.title }}</span>
+                  <span style="color:#2fb4e8;font:500 11px/1 'IBM Plex Mono',monospace">{{ c.id }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+          <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:8px">OR CREATE A NEW CASE</div>
+          <div style="display:flex;border:1px solid #232a2e;background:#08090b">
+            <input value="{{ addToCaseNewTitle }}" onChange="{{ onAddToCaseNewTitle }}" placeholder="case title" style="flex:1;background:transparent;border:none;outline:none;padding:11px 12px;color:#d5dbde;font:400 13px/1 'IBM Plex Sans',sans-serif" />
+            <div onClick="{{ createCaseFromSearch }}" style="cursor:pointer;background:#2fb4e8;color:#04161f;font:600 12px/1 'IBM Plex Sans',sans-serif;display:grid;place-items:center;padding:0 18px" style-hover="background:#79d6f7">{{ addToCaseButtonLabel }}</div>
+          </div>
+        </div>
+      </sc-if>
 
       <sc-if value="{{ hasDetectNetworks }}" hint-placeholder-val="{{ false }}">
         <div style="margin-top:18px;padding:14px 16px;border:1px solid #1c2427;background:#0d1012">
@@ -1508,7 +1582,7 @@ function parseHash() {
   if (m) return { view: 'case', caseId: decodeURIComponent(m[1]) };
   return { view: null };
 }
-const EMPTY_CASE = { case_id:'', title:'', stats:[], candidates:[], drawers:{}, evidence:[], timeline:[], captures:[], suppressed:[], markets:[], market_relationships:[], notes:[], wallet_exchange_paths:[], unattributed_wallet_candidates:[], other_traced_wallets:[], risk_alerts:[], data_source_status:{}, case_has_crypto:false };
+const EMPTY_CASE = { case_id:'', title:'', target_count:0, stats:[], candidates:[], drawers:{}, evidence:[], timeline:[], captures:[], suppressed:[], markets:[], market_relationships:[], notes:[], wallet_exchange_paths:[], unattributed_wallet_candidates:[], other_traced_wallets:[], risk_alerts:[], data_source_status:{}, case_has_crypto:false };
 
 const ETYPE_COLOR = { PGP_KEY:C.violet, EMAIL:C.green, BTC_ADDRESS:C.sand, ONION_ADDRESS:C.cyan, IP:'#4c565a' };
 
@@ -1560,9 +1634,28 @@ function parseReport(md) {
 function buildGraph(cd) {
   const nodes = [], edges = [];
   const marketPos = {};
+  // cd.markets is really "every target in this case" -- targets.kind only
+  // distinguishes ONION/CLEARNET by URL shape, not address type (see
+  // EvidenceStore.upsert_target) -- so this used to label every crypto
+  // wallet target ONION_ADDRESS unconditionally. correlate.py's own wallet
+  // rows (wallet_exchange_paths/unattributed_wallet_candidates/
+  // other_traced_wallets) already carry the real etype in their `chain`
+  // field (chain: r["etype"], e.g. BTC_ADDRESS/TRX_ADDRESS -- yes, the same
+  // field name as crypto_investigation.investigate_wallet's very different
+  // `chain: "bitcoin"` module-type vocabulary; two call sites, two
+  // vocabularies under one field name), so this cross-references that
+  // instead of guessing. Matched case-insensitively: upsert_target
+  // lowercases whatever it stores as a target's url (correct for
+  // domain/onion dedup, incidental for a case-sensitive base58 address),
+  // while a wallet's own `.value` here keeps its original casing.
+  const walletChain = {};
+  [...(cd.wallet_exchange_paths || []), ...(cd.unattributed_wallet_candidates || []),
+   ...(cd.other_traced_wallets || [])].forEach(w => { walletChain[w.value.toLowerCase()] = w.chain; });
   cd.markets.forEach((m, i) => {
     marketPos[m] = { x: 160, y: 140 + i * 220 };
-    nodes.push({ id:'m'+i, label:short(m, 20), etype:'ONION_ADDRESS', x:160, y:140 + i * 220, r:16, color:C.cyan });
+    const etype = walletChain[m.toLowerCase()] || 'ONION_ADDRESS';
+    nodes.push({ id:'m'+i, label:short(m, 20), etype, x:160, y:140 + i * 220, r:16,
+                 color: ETYPE_COLOR[etype] || C.cyan });
   });
   cd.candidates.forEach((c, i) => {
     const x = 620, y = 100 + i * (500 / Math.max(1, cd.candidates.length));
@@ -2001,7 +2094,18 @@ class Component extends DCLogic {
     newCaseOpen: false, newCaseTitle: '', newCaseError: null, newCaseSaving: false,
     searchResult: null, searching: false, searchError: null, searchOpen: {},
     detectResult: null,
-    providerHealth: [], capabilities: {}, providerHealthError: null
+    providerHealth: [], capabilities: {}, providerHealthError: null,
+    // Loop 57: case target ingestion (Overview tab's "Add target" box).
+    addTargetValue: '', addingTarget: false, addTargetError: null,
+    // Loop 57: case lifecycle -- archive/reopen is a single status POST with
+    // no confirmation (reversible); delete is destructive, so it gets its
+    // own confirm modal, same pattern as newCaseOpen's create modal.
+    deleteConfirmOpen: false, deletingCase: false,
+    // Loop 57: "Add to case" from a standalone (case-less) search result --
+    // either an existing case (picked from the same `cases` list already
+    // loaded for the sidebar) or a brand-new one, named inline.
+    addToCaseOpen: false, addToCaseNewTitle: '', addToCaseBusy: false,
+    addToCaseError: null, addToCaseDone: null
   };
 
   componentDidMount() {
@@ -2106,14 +2210,105 @@ class Component extends DCLogic {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title }),
     })
-      // Refetch the list rather than appending the created case client-side --
-      // /api/cases is the single source of truth for what exists on disk, same
-      // discipline every other view in this file already follows.
-      .then(() => fetchJson(CASES_URL))
-      .then(cases => this.setState({
-        cases, casesError: null, newCaseOpen: false, newCaseSaving: false, newCaseTitle: '',
-      }))
+      .then(data => {
+        this.setState({ newCaseOpen: false, newCaseSaving: false, newCaseTitle: '' });
+        // PS §3: "Case created -> now what?" -- open the new (empty) case
+        // straight away, with its own clear "Add target" action right there
+        // (see the Overview tab), instead of leaving the analyst on the
+        // cases list to go find it and guess the next step themselves.
+        window.location.hash = '/case/' + encodeURIComponent(data.id);
+        this.navigate({ view: 'case', caseId: data.id });
+        // /api/cases is the single source of truth for what exists on disk
+        // (same discipline every other view in this file follows) -- loadCase
+        // above reads the new case straight from its own route, this just
+        // keeps the sidebar/list in sync with it too.
+        fetchJson(CASES_URL).then(cases => this.setState({ cases, casesError: null })).catch(() => {});
+      })
       .catch(err => this.setState({ newCaseError: err.message, newCaseSaving: false }));
+  }
+
+  // Loop 57: PS §4 -- the case workspace's own "Add target" action. Runs the
+  // same live module search /api/search does, but ingests the result into
+  // THIS case's persistent store (tools/case_api.add_target_to_case) instead
+  // of a disposable scratch one, then reloads the case so every tab
+  // (Wallets/Graph/Evidence/Timeline/Report) picks up the new target through
+  // the exact same build_payload() path a page refresh would.
+  addTarget() {
+    const target = (this.state.addTargetValue || '').trim();
+    if (!target || this.state.addingTarget) return;
+    const caseId = (this.state.caseData || EMPTY_CASE).case_id;
+    this.setState({ addingTarget: true, addTargetError: null });
+    fetchJson(caseUrl(caseId) + '/target', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target }),
+    })
+      .then(() => {
+        this.setState({ addingTarget: false, addTargetValue: '' });
+        this.loadCase(caseId);
+      })
+      .catch(err => this.setState({ addingTarget: false, addTargetError: err.message }));
+  }
+
+  // Loop 57: PS §7 -- archive/reopen is a reversible status flip (no confirm
+  // needed); delete is destructive and gated by its own modal (see
+  // deleteConfirmOpen). Both hit tools/case_api.py's real backend operations
+  // (update_case_status / delete_case), never a frontend-only removal.
+  setCaseStatus(status) {
+    const caseId = (this.state.caseData || EMPTY_CASE).case_id;
+    fetchJson(caseUrl(caseId) + '/status', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    })
+      .then(() => {
+        this.loadCase(caseId);
+        fetchJson(CASES_URL).then(cases => this.setState({ cases })).catch(() => {});
+      })
+      .catch(err => this.setState({ loadError: 'status not saved: ' + err.message }));
+  }
+
+  deleteCase() {
+    const caseId = (this.state.caseData || EMPTY_CASE).case_id;
+    this.setState({ deletingCase: true });
+    fetchJson(caseUrl(caseId), { method: 'DELETE' })
+      .then(() => {
+        this.setState({ deletingCase: false, deleteConfirmOpen: false, caseData: null });
+        window.location.hash = '/cases';
+        this.navigate({ view: 'cases' });
+        fetchJson(CASES_URL).then(cases => this.setState({ cases })).catch(() => {});
+      })
+      .catch(err => this.setState({
+        deletingCase: false, deleteConfirmOpen: false, casesError: 'delete failed: ' + err.message,
+      }));
+  }
+
+  // Loop 57: PS §5 -- the standalone (case-less) Trace path's own "Add to
+  // case" / "Create case from investigation" action. Re-runs the same
+  // module search this result already came from, this time into a real
+  // case's store, rather than inventing a second "forward this JSON blob"
+  // endpoint -- one target is always searched exactly one way (see
+  // tools/case_api._search_target).
+  addSearchResultToCase(existingCaseId) {
+    const target = (this.state.searchResult && this.state.searchResult.target) || this.state.query;
+    if (!target || this.state.addToCaseBusy) return;
+    this.setState({ addToCaseBusy: true, addToCaseError: null });
+    const intoCase = (caseId) => fetchJson(caseUrl(caseId) + '/target', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target }),
+    }).then(() => caseId);
+
+    const ready = existingCaseId
+      ? intoCase(existingCaseId)
+      : fetchJson(CREATE_CASE_URL, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: (this.state.addToCaseNewTitle || target).trim() || target }),
+        }).then(c => intoCase(c.id));
+
+    ready
+      .then(caseId => {
+        this.setState({ addToCaseBusy: false, addToCaseOpen: false, addToCaseDone: caseId });
+        fetchJson(CASES_URL).then(cases => this.setState({ cases })).catch(() => {});
+      })
+      .catch(err => this.setState({ addToCaseBusy: false, addToCaseError: err.message }));
   }
 
   ask(q) {
@@ -2135,12 +2330,25 @@ class Component extends DCLogic {
         { role:'INVESTIGATOR', text:'Investigator error: ' + err.message, points:[] }] })));
   }
 
+  // Same pattern vocabulary and relative priority as the canonical backend
+  // detector (cybertrace/detector.py PATTERNS + DETECTION_ORDER) -- this used
+  // to only recognize BTC among all six supported chains, so a real TRON
+  // address fell through every check and landed on the USERNAME catch-all
+  // while the actual investigation (routed server-side through the real
+  // detector) correctly called it TRON: two different answers for the same
+  // string. Duplicated rather than fetched from /api/detect on every
+  // keystroke on purpose -- this only has to agree on the vocabulary, not
+  // share a network round trip for instant as-you-type feedback.
   detect(v) {
     const s = (v || '').trim();
     if (!s) return 'awaiting input';
     if (/\.onion$/i.test(s)) return 'ONION_ADDRESS';
-    if (/^[13bc]/.test(s) && s.length > 25) return 'BTC_ADDRESS';
-    if (/@/.test(s)) return 'EMAIL';
+    if (/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(s)) return 'EMAIL';
+    if (/^bc1[a-z0-9]{39,59}$/i.test(s)) return 'BTC_ADDRESS';
+    if (/^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$/.test(s)) return 'BTC_ADDRESS';
+    if (/^0x[a-fA-F0-9]{40}$/.test(s)) return 'EVM_ADDRESS (ETH/BNB/Polygon — ambiguous)';
+    if (/^T[a-km-zA-HJ-NP-Z1-9]{33}$/.test(s)) return 'TRON_ADDRESS';
+    if (/^[1-9A-HJ-NP-Za-km-z]{43,44}$/.test(s)) return 'SOL_ADDRESS';
     if (/^\d+\.\d+\.\d+\.\d+$/.test(s)) return 'IP';
     if (/^[0-9a-f\s]{16,}$/i.test(s)) return 'PGP_KEY';
     if (/\./.test(s)) return 'DOMAIN';
@@ -2272,12 +2480,63 @@ class Component extends DCLogic {
       investigation: (st.searchResult && st.searchResult.crypto_investigation)
         ? investigationCardVals(st.searchResult.crypto_investigation) : null,
 
+      // PS §5: the standalone (case-less) search result was previously a
+      // dead end for anything but reading -- no way to fold it into an
+      // actual case without leaving the browser. hasAddToCase gates the
+      // whole control on a completed search (nothing to add while it's
+      // still running or failed outright).
+      hasAddToCase: !!st.searchResult && !st.searching,
+      addToCaseOpen: st.addToCaseOpen,
+      toggleAddToCase: () => this.set({ addToCaseOpen: !st.addToCaseOpen, addToCaseError: null, addToCaseDone: null }),
+      addToCaseCases: (st.cases || []).map(c => ({
+        id: c.id, title: c.title, pick: () => this.addSearchResultToCase(c.id),
+      })),
+      hasAddToCaseCases: !!(st.cases && st.cases.length),
+      addToCaseNewTitle: st.addToCaseNewTitle,
+      onAddToCaseNewTitle: (e) => this.set({ addToCaseNewTitle: e.target.value }),
+      createCaseFromSearch: () => this.addSearchResultToCase(null),
+      addToCaseBusy: st.addToCaseBusy,
+      addToCaseButtonLabel: st.addToCaseBusy ? 'Adding…' : 'Create & add',
+      addToCaseError: st.addToCaseError,
+      hasAddToCaseError: !!st.addToCaseError,
+      hasAddToCaseDone: !!st.addToCaseDone,
+      goToAddedCase: () => {
+        window.location.hash = '/case/' + encodeURIComponent(st.addToCaseDone);
+        this.navigate({ view: 'case', caseId: st.addToCaseDone });
+      },
+
       caseHeaderId: cd.case_id || '—',
       caseTitle: cd.title || 'Untitled case',
       caseStatus: cd.status || 'OPEN',
       caseStatusColor: cd.status === 'CLOSED' ? C.mute : cd.status === 'ARCHIVED' ? '#5a6367' : C.green,
-      caseConfidence: cd.candidates[0] ? cd.candidates[0].band : 'LOW',
+      // PS §27/§6: this used to default straight to 'LOW' whenever there was
+      // no OSINT candidate -- which is every brand-new case (misread as "a
+      // low-confidence assessment was made") AND every crypto-only case
+      // (wallets live in wallet_exchange_paths/other_traced_wallets, never in
+      // `candidates`, so this read LOW even for an ESTABLISHED VASP hit).
+      // "No assessment run" and "assessed, no findings" now stay distinct
+      // from an actual OSINT confidence band, and a crypto case reports N/A
+      // on this OSINT-only axis instead of a fabricated band.
+      caseConfidence: cd.target_count === 0 ? 'NOT STARTED'
+        : cd.candidates[0] ? cd.candidates[0].band
+        : (cd.wallet_exchange_paths.length || cd.unattributed_wallet_candidates.length
+           || cd.other_traced_wallets.length) ? 'N/A (crypto case)'
+        : 'NO FINDINGS',
       caseUpdated: cd.updated_at ? cd.updated_at.slice(0, 16).replace('T', ' ') + ' UTC' : '—',
+
+      // PS §7 -- case lifecycle. Archive/reopen is a reversible status flip
+      // (no confirm dialog); Delete is destructive and gated by its own
+      // modal below, same pattern newCaseOpen's create modal already uses.
+      archiveLabel: cd.status === 'ARCHIVED' || cd.status === 'CLOSED' ? 'Reopen' : 'Archive',
+      toggleArchive: () => this.setCaseStatus(
+        cd.status === 'ARCHIVED' || cd.status === 'CLOSED' ? 'OPEN' : 'ARCHIVED'),
+      openDeleteConfirm: () => this.set({ deleteConfirmOpen: true }),
+      closeDeleteConfirm: () => this.set({ deleteConfirmOpen: false }),
+      deleteConfirmOpen: st.deleteConfirmOpen,
+      deletingCase: st.deletingCase,
+      deleteButtonLabel: st.deletingCase ? 'Deleting…' : 'Delete case',
+      confirmDelete: () => this.deleteCase(),
+
       reportDate: new Date().toISOString().slice(0, 10),
       onQuery: (e) => this.set({ query: e.target.value }),
       onQueryKey: (e) => { if (e.key === 'Enter') this.runSearch(); },
@@ -2397,6 +2656,20 @@ class Component extends DCLogic {
       goCaseWatchlist: () => this.set({ tab:'Wallets', snapshot:null }),
 
       stats: cd.stats,
+
+      // PS §3/§4/§6: the Overview tab's "Add target" box -- the case
+      // workspace's own entry point into a real investigation, so a
+      // freshly-created case never dead-ends at "now what?". caseIsEmpty
+      // drives the distinct "no investigation run yet" copy (vs. a
+      // populated case that still welcomes more targets).
+      caseIsEmpty: cd.target_count === 0,
+      addTargetValue: st.addTargetValue,
+      onAddTargetValue: (e) => this.set({ addTargetValue: e.target.value, addTargetError: null }),
+      onAddTargetKey: (e) => { if (e.key === 'Enter') this.addTarget(); },
+      addTarget: () => this.addTarget(),
+      addingTarget: st.addingTarget,
+      addTargetLabel: st.addingTarget ? 'Investigating…' : 'Add target',
+      addTargetError: st.addTargetError,
 
       candidates,
       suppressed: cd.suppressed,
