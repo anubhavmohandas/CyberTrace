@@ -165,6 +165,34 @@ def test_invalid_wallet_shape_is_reported_not_crashed(tmp_path, monkeypatch):
     assert data["failed"] == 1
 
 
+def test_checksum_invalid_btc_address_never_reaches_the_module(tmp_path, monkeypatch):
+    """Loop 58: right length/prefix/alphabet, wrong Base58Check checksum --
+    detect_input_type's regex alone would call this 'bitcoin' and dispatch it
+    to a live provider; _trace_one_wallet must catch it first, the same gate
+    resolve_module_for_target applies for `search`/`/api/search`."""
+    calls = _mock_modules(monkeypatch)
+    bad_checksum = BTC_B[:-1] + ("a" if BTC_B[-1] != "a" else "b")
+    csv_path = _write_csv(tmp_path / "w.csv", [(bad_checksum, "")])
+    result = _invoke_batch(csv_path, str(tmp_path / "case.db"))
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["wallets"][0]["status"] == "invalid_address"
+    assert data["wallets"][0]["result"] is None
+    assert "checksum" in data["wallets"][0]["error"]
+    assert calls == []  # never dispatched to BitcoinModule.search at all
+
+
+def test_dataset_shape_only_btc_string_never_reaches_the_module(tmp_path, monkeypatch):
+    """The exact Kaggle-corpus string that motivated this loop."""
+    calls = _mock_modules(monkeypatch)
+    csv_path = _write_csv(tmp_path / "w.csv", [("19e6aqs6ru2ei5r3cuzcfmcklq78uksmry", "")])
+    result = _invoke_batch(csv_path, str(tmp_path / "case.db"))
+    data = json.loads(result.output)
+    assert data["wallets"][0]["status"] == "invalid_address"
+    assert "Not a valid Bitcoin address" in data["wallets"][0]["error"]
+    assert calls == []
+
+
 # --- 6. duplicate handling -------------------------------------------------------
 
 def test_duplicate_wallet_is_searched_once_and_flagged_not_dropped(tmp_path, monkeypatch):

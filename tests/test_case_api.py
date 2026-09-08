@@ -471,6 +471,67 @@ def test_search_endpoint_no_module_for_type(tmp_path, monkeypatch):
         assert "error" in body
 
 
+def test_search_endpoint_rejects_checksum_invalid_btc_without_any_mock(tmp_path):
+    """Loop 58, end to end through the real (unmocked) resolve_module_for_target:
+    a Base58-shaped, wrong-checksum BTC address must never reach BitcoinModule
+    (no live network call from a test) and must never fall through to a
+    generic 'no module' message -- the browser needs to see it is specifically
+    an invalid address, not an unsupported chain or a username."""
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    with _running_server(cases_dir) as base:
+        status, body = _get(
+            f"{base}/api/search?q=1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb")
+        assert status == 400
+        assert "Not a valid Bitcoin address" in body["error"]
+        assert "checksum" in body["error"]
+
+
+def test_search_endpoint_rejects_dataset_shape_only_string_without_any_mock(tmp_path):
+    """The exact Kaggle-corpus string that motivated this loop -- must not
+    silently become a username/social-search target."""
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    with _running_server(cases_dir) as base:
+        status, body = _get(f"{base}/api/search?q=19e6aqs6ru2ei5r3cuzcfmcklq78uksmry")
+        assert status == 400
+        assert "Not a valid Bitcoin address" in body["error"]
+
+
+def test_detect_endpoint_flags_checksum_invalid_btc_address(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    with _running_server(cases_dir) as base:
+        status, body = _get(
+            f"{base}/api/detect?address=1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb")
+        assert status == 200
+        assert body["valid_address"] is False
+        assert "fails checksum" in body["caveat"]
+
+
+def test_detect_endpoint_flags_shape_only_dataset_string(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    with _running_server(cases_dir) as base:
+        status, body = _get(
+            f"{base}/api/detect?address=19e6aqs6ru2ei5r3cuzcfmcklq78uksmry")
+        assert status == 200
+        assert body["module_type"] == "invalid_address"
+        assert body["valid_address"] is False
+        assert "Not a valid Bitcoin address" in body["caveat"]
+
+
+def test_detect_endpoint_real_btc_address_is_valid(tmp_path):
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    with _running_server(cases_dir) as base:
+        status, body = _get(
+            f"{base}/api/detect?address=1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa")
+        assert status == 200
+        assert body["valid_address"] is True
+        assert body["caveat"] == ""
+
+
 def test_case_db_path_rejects_traversal_and_absolute_segments():
     """Unit-level pin on the guard itself (Loop 38 defect hunt): case_id
     reaches cases_dir / f"{case_id}.db" with nothing else validating it --

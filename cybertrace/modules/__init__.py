@@ -2,7 +2,7 @@
 
 from typing import Dict, Optional, Tuple, Type
 
-from ..detector import detect_input_type, normalize_input
+from ..detector import checksum_valid, detect_input_type, normalize_input
 from .base import BaseModule
 from .bitcoin_module import BitcoinModule
 from .tron_module import TronModule
@@ -145,6 +145,17 @@ def resolve_module_for_target(
         _, detected_category = detect_input_type(target)
         if detected_category in getattr(module, 'supported_types', ()):
             specific_type = detected_category
+
+    # Right format, wrong checksum (BTC/TRON Base58Check) -- caught here, the
+    # one place both `cybertrace search` and /api/search route through,
+    # rather than letting a fake address reach a live provider call.
+    # checksum_valid accepts module_type as well as specific_type (see
+    # detector._CHECKSUM_CHAINS), so this is correct whether specific_type
+    # was just coarsened above or this is an explicit --type override. The
+    # caller reports this via detector.chain_caveat(specific_type, target),
+    # same as the unsupported-chain/EVM-ambiguity refusals above it.
+    if module is not None and not checksum_valid(module_type, normalized):
+        module = None
 
     return module, normalized, specific_type, module_type
 

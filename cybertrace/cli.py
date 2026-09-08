@@ -7,7 +7,7 @@ from typing import Optional
 import click
 
 from .config import config
-from .detector import chain_caveat, detect_input_type
+from .detector import chain_caveat, checksum_valid, detect_input_type
 from .modules import get_module, list_modules, resolve_module_for_target, TYPE_TO_MODULE
 from .output import print_result, save_result
 from .safety import is_blocked_query
@@ -159,7 +159,7 @@ def search(target: str, input_type: str, output_format: str, save_path: Optional
         # `username` and be swept across 3000+ social sites, then report
         # nothing found -- which reads as a cleared wallet instead of a wallet
         # nobody looked at.
-        caveat = chain_caveat(specific_type)
+        caveat = chain_caveat(specific_type, target)
         if caveat:
             click.echo(f"[!] {caveat}", err=True)
             click.echo("[!] Supported chains: Bitcoin, Ethereum, TRON. Re-run with "
@@ -835,10 +835,16 @@ async def _trace_one_wallet(address: str, chain: Optional[str], store, max_hops:
     if resolved_chain is None:
         specific, detected = detect_input_type(address)
         if detected not in ('bitcoin', 'ethereum', 'tron', 'solana'):
-            caveat = chain_caveat(specific)
+            caveat = chain_caveat(specific, address)
             return {'wallet': address, 'chain': None, 'status': 'invalid_address',
                     'result': None,
                     'error': caveat or f"could not detect a supported chain for {address!r}"}
+        # Right format, wrong checksum (Base58Check) -- resolve_module_for_
+        # target's own gate is never reached here, this loop dispatches
+        # straight to `module.search()` below, so it needs the same check.
+        if not checksum_valid(specific, address):
+            return {'wallet': address, 'chain': None, 'status': 'invalid_address',
+                    'result': None, 'error': chain_caveat(specific, address)}
         resolved_chain = detected
     elif resolved_chain not in _WALLET_CHAINS:
         return {'wallet': address, 'chain': chain, 'status': 'unsupported_chain',
@@ -1239,12 +1245,13 @@ def detect_cmd(address: str, as_json: bool):
     import asyncio
     import json as _json
 
-    from .detector import btc_address_family, chain_caveat, detect_input_type
+    from .detector import btc_address_family, chain_caveat, checksum_valid, detect_input_type
     from .modules.bitcoin_module import BitcoinModule
 
     specific, module_type = detect_input_type(address)
     out = {'address': address, 'format': specific, 'module_type': module_type,
-           'caveat': chain_caveat(specific), 'btc_family': None, 'networks': None}
+           'caveat': chain_caveat(specific, address), 'btc_family': None, 'networks': None,
+           'valid_address': module_type != 'invalid_address' and checksum_valid(specific, address)}
 
     if specific in ('btc_legacy', 'btc_bech32'):
         out['btc_family'] = btc_address_family(address)

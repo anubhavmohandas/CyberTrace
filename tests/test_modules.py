@@ -3435,3 +3435,49 @@ class TestSourceProgress:
                                                           error='down'))
         assert '✗' in B._progress_label('a', ValueError('x'))
         assert 'skipped' in B._progress_label('a', None)
+
+
+class TestResolveModuleForTargetChecksumGate:
+    """Loop 58: resolve_module_for_target is the one chokepoint `cybertrace
+    search`, /api/search, and /api/case/.../target all route through -- a
+    checksum-invalid BTC/TRON address must be refused here, before any of
+    them dispatch a live provider call with a fake address."""
+
+    def test_real_btc_address_still_resolves_to_bitcoin_module(self):
+        from cybertrace.modules import resolve_module_for_target
+
+        module, normalized, specific, module_type = resolve_module_for_target(
+            "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa")
+        assert isinstance(module, BitcoinModule)
+        assert module_type == "bitcoin"
+
+    def test_checksum_invalid_btc_address_resolves_to_no_module(self):
+        """resolve_module_for_target coarsens specific_type to module_type for
+        multi-shape modules (see its own supported_types remap comment), so
+        module_type -- stable across auto-detect and an explicit --type
+        override alike -- is what the checksum gate keys off, not specific."""
+        from cybertrace.modules import resolve_module_for_target
+
+        module, normalized, specific, module_type = resolve_module_for_target(
+            "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb")  # right shape, wrong checksum
+        assert module is None
+        assert module_type == "bitcoin"
+
+    def test_checksum_invalid_tron_address_resolves_to_no_module(self):
+        from cybertrace.modules import resolve_module_for_target
+
+        module, normalized, specific, module_type = resolve_module_for_target(
+            "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6s")  # right shape, wrong checksum
+        assert module is None
+        assert specific == "tron"
+
+    def test_dataset_row_shape_only_match_resolves_to_no_module(self):
+        """The exact Kaggle-corpus string that motivated this loop: right
+        length/prefix, contains 'l' (never valid Base58) -- must never
+        resolve to a module (bitcoin or otherwise)."""
+        from cybertrace.modules import resolve_module_for_target
+
+        module, normalized, specific, module_type = resolve_module_for_target(
+            "19e6aqs6ru2ei5r3cuzcfmcklq78uksmry")
+        assert module is None
+        assert module_type == "invalid_address"

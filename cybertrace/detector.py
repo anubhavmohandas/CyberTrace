@@ -52,6 +52,22 @@ PATTERNS = {
     # than being force-matched here, the same tradeoff norm_sol documents.
     'solana': re.compile(r'^[1-9A-HJ-NP-Za-km-z]{43,44}$'),
 
+    # Same length/prefix as btc_legacy/tron above but WITHOUT the Base58
+    # alphabet restriction -- matches a string that is clearly attempting
+    # one of those two address shapes yet contains a character Base58 never
+    # uses (0, O, I, l). Checked only because the strict patterns above did
+    # NOT match (a real address always matches those first), so this can
+    # never fire on a genuine address -- it exists purely so a failed
+    # address paste is reported as a failed address, not swept into the
+    # USERNAME catch-all and its 3000+-site social search (see
+    # UNSUPPORTED_CHAINS' identical "refused by name" reasoning). The
+    # concrete case this closes: a Kaggle/benchmark row that *labels* a
+    # string 'bitcoin_mainnet' proves nothing about the string itself --
+    # '19e6aqs6ru2ei5r3cuzcfmcklq78uksmry' contains a lowercase 'l' and is
+    # not, and never was, a valid Bitcoin address.
+    'btc_legacy_shape': re.compile(r'^[13][a-zA-Z0-9]{25,34}$'),
+    'tron_shape': re.compile(r'^T[a-zA-Z0-9]{33}$'),
+
 
     # Domains & URLs
     # Onion — bare host, or the full URL users actually paste (scheme/subdomain/
@@ -107,6 +123,10 @@ DETECTION_ORDER = [
     ('dash', 'unsupported_chain'),
     ('zcash', 'unsupported_chain'),
     ('ripple', 'unsupported_chain'),
+    # Checked after every real chain pattern (including the ones above) so a
+    # genuine address is never reclassified -- see PATTERNS' own comment.
+    ('btc_legacy_shape', 'invalid_address'),
+    ('tron_shape', 'invalid_address'),
     ('onion', 'darkweb'),
     ('gstin', 'indian'),
     ('pan_indian', 'indian'),
@@ -130,8 +150,42 @@ UNSUPPORTED_CHAINS = {
     'ripple': 'XRP Ledger',
 }
 
+# specific_type -> the human name and the real, byte-level entity check
+# (normalize.py's NORMALIZERS -- Base58Check for BTC, same scheme for TRON)
+# that PATTERNS' regex alone cannot perform: correct charset and length is
+# necessary but not sufficient, the checksum bytes must actually verify.
+# EVM/Solana are deliberately absent -- see normalize.py's own occam notes
+# on EIP-55 and ed25519: no stronger check than the regex exists here today.
+_CHECKSUM_CHAINS = {
+    'btc_legacy': ('Bitcoin', 'BTC_ADDRESS'),
+    'btc_bech32': ('Bitcoin', 'BTC_ADDRESS'),
+    # 'bitcoin' (module_type) alongside the two specific_type keys above --
+    # resolve_module_for_target coarsens specific_type to module_type for
+    # multi-shape-module support (see its own supported_types remap comment)
+    # and this same function/dict is what it checks against, so both
+    # granularities have to resolve to the same real check.
+    'bitcoin': ('Bitcoin', 'BTC_ADDRESS'),
+    'tron': ('TRON', 'TRX_ADDRESS'),
+}
 
-def chain_caveat(specific_type: str) -> str:
+_SHAPE_ONLY_CHAINS = {
+    'btc_legacy_shape': 'Bitcoin',
+    'tron_shape': 'TRON',
+}
+
+
+def checksum_valid(specific_type: str, value: str) -> bool:
+    """True unless `specific_type` is a chain with a real checksum (BTC/TRON)
+    and `value` fails it. Always True for every other specific_type -- see
+    _CHECKSUM_CHAINS."""
+    chain = _CHECKSUM_CHAINS.get(specific_type)
+    if chain is None:
+        return True
+    from .normalize import normalize
+    return normalize(chain[1], value) is not None
+
+
+def chain_caveat(specific_type: str, value: str = "") -> str:
     """The limitation that must travel with a detection, or '' if there is none.
 
     Two different failures, one entry point, because every consumer -- module
@@ -153,7 +207,34 @@ def chain_caveat(specific_type: str) -> str:
     0x4f47bc496083c727c5fbe3ce9cdf2b0f6496270c under BOTH Arbitrum and BNB
     Chain, and 50 of its 1,007 digital-currency addresses are on chains in
     UNSUPPORTED_CHAINS.
+
+    Two more failures, added for the same reason: a dataset or user paste can
+    *look* like an address and not be one at all.
+
+    invalid shape       right length/prefix for BTC/TRON but a character
+                        Base58 never uses -- always a typo or a non-address
+                        string, never sent to a provider or the username
+                        sweep (see PATTERNS' 'btc_legacy_shape'/'tron_shape').
+    invalid checksum    right alphabet and length, wrong checksum bytes --
+                        passes every regex a naive detector would use, but
+                        normalize.norm_btc/norm_tron (real Base58Check) reject
+                        it. `value` is required to catch this; omitted, this
+                        check is skipped (the caller has already normalized
+                        elsewhere, or is only asking about format).
     """
+    if specific_type in _SHAPE_ONLY_CHAINS:
+        chain = _SHAPE_ONLY_CHAINS[specific_type]
+        return (f"Not a valid {chain} address: right length and prefix, but it "
+                f"contains a character {chain}'s Base58 alphabet never uses "
+                f"(0, O, I, l). A dataset label calling this a wallet does not "
+                f"make it one. Not sent to any provider, VASP engine, or "
+                f"treated as a username.")
+    if value and specific_type in _CHECKSUM_CHAINS and not checksum_valid(specific_type, value):
+        chain = _CHECKSUM_CHAINS[specific_type][0]
+        return (f"Not a valid {chain} address: correct format, but it fails "
+                f"checksum verification (Base58Check) -- this string was never "
+                f"a real {chain} address, regardless of any dataset label. "
+                f"Not sent to any provider or VASP engine.")
     if specific_type in UNSUPPORTED_CHAINS:
         return (f"{UNSUPPORTED_CHAINS[specific_type]} is not a supported chain: "
                 f"CyberTrace has no collector for it, so no transaction, "
@@ -270,6 +351,29 @@ if __name__ == '__main__':
     # Real TRON mainnet address (the USDT-TRC20 contract) — a genuine base58
     # string, not one shaped to merely satisfy the regex.
     assert detect_input_type('TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t') == ('tron', 'tron')
+
+    # The concrete Loop 58 regression: right length/prefix, contains 'l'
+    # (never valid Base58) -- must be refused BY NAME, never handed to the
+    # username/social sweep, no matter what a dataset labels it.
+    _bad = '19e6aqs6ru2ei5r3cuzcfmcklq78uksmry'
+    assert detect_input_type(_bad) == ('btc_legacy_shape', 'invalid_address'), _bad
+    assert 'Not a valid Bitcoin address' in chain_caveat('btc_legacy_shape', _bad)
+    assert detect_input_type('T' + '1' * 32 + 'l') == ('tron_shape', 'invalid_address')
+
+    # Real Base58 alphabet + right length/prefix, wrong checksum bytes -- the
+    # regex alone cannot catch this; checksum_valid (norm_btc/norm_tron's
+    # real Base58Check) must.
+    _real_btc = '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa'
+    _bad_checksum_btc = '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb'
+    assert detect_input_type(_real_btc) == ('btc_legacy', 'bitcoin')
+    assert checksum_valid('btc_legacy', _real_btc) is True
+    assert checksum_valid('btc_legacy', _bad_checksum_btc) is False
+    assert 'fails checksum' in chain_caveat('btc_legacy', _bad_checksum_btc)
+    assert chain_caveat('btc_legacy', _real_btc) == ''
+
+    _bad_checksum_tron = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6s'
+    assert checksum_valid('tron', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t') is True
+    assert checksum_valid('tron', _bad_checksum_tron) is False
 
     # Quick test
     tests = [

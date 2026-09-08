@@ -839,6 +839,13 @@ window.__resources = {
               <span style="display:flex;align-items:center;gap:8px"><span style="width:12px;height:12px;border:1px dashed #3c4548;display:block"></span>INFERRED — derived by the engine</span>
             </div>
 
+            <sc-if value="{{ showCryptoEvidenceHint }}" hint-placeholder-val="{{ false }}">
+              <div onClick="{{ goWallets }}" style="cursor:pointer;border:1px solid #1c2427;background:#0d1215;padding:13px 16px;display:flex;justify-content:space-between;align-items:center" style-hover="border-color:#2fb4e8">
+                <span style="color:#c5ccd0;font-size:13px">This is a crypto case — wallet evidence (transactions, VASP attribution, exchange tags) is recorded per wallet, not listed here.</span>
+                <span style="font:400 11px/1 'IBM Plex Mono',monospace;color:#2fb4e8">SEE WALLETS →</span>
+              </div>
+            </sc-if>
+
             <div style="display:flex;flex-direction:column;gap:10px">
               <sc-for list="{{ evidenceList }}" as="e" hint-placeholder-count="5">
                 <div style="border:{{ e.border }};border-left:{{ e.leftBorder }};background:{{ e.bg }};padding:16px 18px">
@@ -1626,6 +1633,21 @@ function candidatesToCsv(candidates) {
   const rows = [['candidate_id', 'etype', 'value', 'band', 'score', 'markets']]
     .concat(candidates.map(c => [c.candidate_id, c.etype, c.name, c.band, c.score,
       (c.markets || []).join('; ')]));
+  return rows.map(r => r.map(esc).join(',')).join('\r\n');
+}
+
+// Loop 59: a crypto-only case has 0 candidates by construction (wallets live
+// in wallet_exchange_paths/other_traced_wallets, never `candidates` -- see
+// export_case_gui.build_payload's own stats comment) -- so candidatesToCsv
+// above silently produced a header-only, effectively empty file for exactly
+// the case type this export exists to serve. Same wallet_exchange_paths rows
+// the Wallets tab renders, not a second computation.
+function walletsToCsv(wallets) {
+  const esc = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+  const rows = [['address', 'chain', 'exchange', 'hops', 'proximity', 'direction',
+    'attribution', 'attribution_source', 'confidence']]
+    .concat(wallets.map(w => [w.value, w.chain, w.exchange || '', w.hops, w.proximity || '',
+      w.direction || '', w.attribution || '', w.attribution_source || '', w.confidence]));
   return rows.map(r => r.map(esc).join(',')).join('\r\n');
 }
 
@@ -2745,6 +2767,14 @@ class Component extends DCLogic {
         select: () => this.set({ evFilter:f })
       })),
       evidenceList: evList,
+      // Loop 59: a crypto-only case genuinely has 0 rows here by design (see
+      // walletsToCsv's comment on why -- wallet evidence lives in the
+      // Wallets tab's own "EVIDENCE ON RECORD" sections instead). Without
+      // this, an empty Evidence tab on a case that plainly has real findings
+      // reads exactly like the "looks like nothing found" false negative the
+      // case-status work elsewhere in this file already guards against.
+      showCryptoEvidenceHint: !evList.length && cd.case_has_crypto,
+      goWallets: () => this.set({ tab: 'Wallets' }),
 
       timeline: cd.timeline.map(t => ({
         date:t.date, title:t.title, detail:t.detail, meta:t.meta,
@@ -2800,8 +2830,14 @@ class Component extends DCLogic {
       exportPdf: () => window.print(),
       exportJson: () => downloadBlob(JSON.stringify(cd, null, 2), 'application/json',
         `${cd.case_id || 'case'}.json`),
-      exportCsv: () => downloadBlob(candidatesToCsv(cd.candidates), 'text/csv',
-        `${cd.case_id || 'case'}-candidates.csv`),
+      // A crypto-only case has 0 candidates by construction (see
+      // walletsToCsv's own comment) -- export whichever list this case
+      // actually has data in, never a header-only file for a case that
+      // plainly has real findings elsewhere.
+      exportCsv: () => cd.candidates.length
+        ? downloadBlob(candidatesToCsv(cd.candidates), 'text/csv', `${cd.case_id || 'case'}-candidates.csv`)
+        : downloadBlob(walletsToCsv(cd.wallet_exchange_paths || []), 'text/csv',
+          `${cd.case_id || 'case'}-wallets.csv`),
 
       drawerOpen: !!drawer && !st.aiOpen,
       drawer: drawer || { etype:'', value:'', first:'', last:'', evidence:[], relationships:[], sources:[] },

@@ -135,7 +135,9 @@ def _search_target(target: str) -> tuple[dict, str]:
         raise ValueError("target refused: names prohibited content")
     module, normalized, specific_type, module_type = resolve_module_for_target(target)
     if module is None:
-        raise ValueError(f"no module available for type: {module_type}")
+        from cybertrace.detector import chain_caveat
+        raise ValueError(chain_caveat(specific_type, target) or
+                         f"no module available for type: {module_type}")
 
     async def _go():
         async with module:
@@ -217,12 +219,14 @@ def provider_health() -> dict:
 def detect_address(address: str) -> dict:
     """Format detection plus, for an ambiguous EVM address, a live probe of
     which networks it actually has activity on -- mirrors `cybertrace detect`."""
-    from cybertrace.detector import btc_address_family, chain_caveat, detect_input_type
+    from cybertrace.detector import (btc_address_family, chain_caveat, checksum_valid,
+                                     detect_input_type)
     from cybertrace.modules.bitcoin_module import BitcoinModule
 
     specific, module_type = detect_input_type(address)
     out = {'address': address, 'format': specific, 'module_type': module_type,
-           'caveat': chain_caveat(specific), 'btc_family': None, 'networks': None}
+           'caveat': chain_caveat(specific, address), 'btc_family': None, 'networks': None,
+           'valid_address': module_type != 'invalid_address' and checksum_valid(specific, address)}
     if specific in ('btc_legacy', 'btc_bech32'):
         out['btc_family'] = btc_address_family(address)
     elif specific == 'ethereum':

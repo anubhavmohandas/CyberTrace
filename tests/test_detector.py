@@ -212,3 +212,75 @@ def test_an_evm_address_carries_the_single_chain_caveat():
 def test_a_supported_chain_carries_no_caveat():
     assert chain_caveat("btc_legacy") == ""
     assert chain_caveat("tron") == ""
+
+
+# Loop 58: a string can be the right length and prefix for a Base58Check
+# chain and still not be a real address -- either it uses a character
+# outside Base58 (0/O/I/l), or it uses the right alphabet with the wrong
+# checksum bytes. Neither must be swept into the username/social path just
+# because they fail the strict pattern, and a dataset/benchmark row *labeling*
+# one of these a wallet does not make it one -- this is the exact string from
+# the Kaggle corpus that motivated the fix.
+_KAGGLE_INVALID_BTC = "19e6aqs6ru2ei5r3cuzcfmcklq78uksmry"
+
+
+def test_shape_only_match_is_named_invalid_not_swept_to_username():
+    from cybertrace.detector import checksum_valid
+
+    specific, module = detect_input_type(_KAGGLE_INVALID_BTC)
+    assert (specific, module) == ("btc_legacy_shape", "invalid_address")
+    caveat = chain_caveat(specific, _KAGGLE_INVALID_BTC)
+    assert "Not a valid Bitcoin address" in caveat
+    assert "0, O, I, l" in caveat
+    # checksum_valid is format-agnostic: a shape-only match was never a real
+    # base58 string to begin with, so there's nothing to decode.
+    assert checksum_valid(specific, _KAGGLE_INVALID_BTC) is True
+
+    specific_t, module_t = detect_input_type("T" + "1" * 32 + "l")
+    assert (specific_t, module_t) == ("tron_shape", "invalid_address")
+    assert "Not a valid TRON address" in chain_caveat(specific_t, "T" + "1" * 32 + "l")
+
+
+def test_real_addresses_never_match_the_shape_only_patterns():
+    """The shape patterns are checked strictly after the real ones in
+    DETECTION_ORDER -- a genuine address must always win first."""
+    assert detect_input_type("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa") == ("btc_legacy", "bitcoin")
+    assert detect_input_type("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t") == ("tron", "tron")
+
+
+def test_checksum_valid_catches_a_wrong_checksum_with_a_real_alphabet():
+    """Same format detect_input_type accepts, wrong checksum bytes -- the
+    regex alone cannot see this; only real Base58Check (normalize.norm_btc/
+    norm_tron) can. This is the gap format-only detection cannot close."""
+    from cybertrace.detector import checksum_valid
+
+    real_btc = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+    bad_checksum_btc = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb"
+    assert detect_input_type(bad_checksum_btc) == ("btc_legacy", "bitcoin")  # regex still matches
+    assert checksum_valid("btc_legacy", real_btc) is True
+    assert checksum_valid("btc_legacy", bad_checksum_btc) is False
+    assert chain_caveat("btc_legacy", real_btc) == ""
+    caveat = chain_caveat("btc_legacy", bad_checksum_btc)
+    assert "fails checksum" in caveat
+
+    real_tron = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+    bad_checksum_tron = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6s"
+    assert checksum_valid("tron", real_tron) is True
+    assert checksum_valid("tron", bad_checksum_tron) is False
+    assert "fails checksum" in chain_caveat("tron", bad_checksum_tron)
+
+
+def test_checksum_valid_is_always_true_without_a_real_checksum_scheme():
+    """EVM/Solana have no stronger check than the regex today (documented,
+    deliberate -- see normalize.py) -- checksum_valid must not invent one."""
+    from cybertrace.detector import checksum_valid
+
+    assert checksum_valid("ethereum", "0x0000000000000000000000000000000000000000") is True
+    assert checksum_valid("solana", "not-even-base58-shaped") is True
+    assert checksum_valid("username", "hackerman123") is True
+
+
+def test_chain_caveat_without_a_value_skips_the_checksum_check():
+    """`value` is optional -- a caller only asking about format (no address on
+    hand) gets no checksum verdict, not a crash or a false negative."""
+    assert chain_caveat("btc_legacy") == ""
