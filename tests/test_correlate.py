@@ -26,6 +26,7 @@ from cybertrace.correlate import (
     market_windows, render_dossier_html, render_html, render_markdown, run_correlation,
     save_candidates, username_aliases, wallet_exchange_paths, wallet_path_flags,
     wallet_trace_report,
+    _bare_wallet_rows,
 )
 from cybertrace.evidence import EvidenceStore, enrich_bitcoin, enrich_email, ingest, label_exchange
 from cybertrace.modules.base import ModuleResult, SourceResult
@@ -2365,6 +2366,28 @@ def test_wallet_exchange_paths_no_path_and_max_hops_cutoff(tmp_path):
 
         far = {w["entity_id"]: w["hops"] for w in wallet_exchange_paths(store, max_hops=4)}
         assert far[store.find_entity("BTC_ADDRESS", chain[0])] == 3
+
+
+def test_bare_wallet_rows_via_provenance(tmp_path):
+    """other_traced_wallets carries neither a VASP path nor an attribution
+    signal, so `via` is the only place a reader learns why it's in the case
+    at all: a TRANSACTED_WITH peer of an already-covered wallet says so,
+    and an isolated wallet with no such peer and no cross-chain link record
+    says it was searched on its own."""
+    third = "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+    with EvidenceStore(str(tmp_path / "e.db")) as store:
+        addr_a = store.upsert_entity("BTC_ADDRESS", BTC_VALID)
+        target_a = store.upsert_target("btc:" + BTC_VALID)
+        sid_a = store.insert_snapshot(target_a, {}, "bitcoin")
+        enrich_bitcoin(store, sid_a, addr_a,
+                       {"address": BTC_VALID, "counterparty_addresses": [BTC_OTHER]}, "bitcoin")
+        addr_b = store.find_entity("BTC_ADDRESS", BTC_OTHER)
+        addr_c = store.upsert_entity("BTC_ADDRESS", third)
+
+        rows = {r["entity_id"]: r for r in _bare_wallet_rows(store, {addr_a})}
+        assert "counterparty of a traced wallet" in rows[addr_b]["via"]
+        assert "directly investigated" in rows[addr_c]["via"]
+        assert addr_a not in rows  # already covered, excluded like the two named lists
 
 
 def test_wallet_exchange_paths_never_score_a_candidate(tmp_path):

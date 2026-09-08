@@ -1297,15 +1297,30 @@ def _bare_wallet_rows(store: EvidenceStore, covered_entity_ids: set) -> List[dic
     filters on VASP reachability). Minimal shape: no risk/vasp_investigation/
     exchange fields (this wallet has none), which _attach_crypto_investigation
     and lea_actions.recommended_actions_for_wallet already tolerate via
-    plain .get() reads."""
+    plain .get() reads.
+
+    `via` names why this wallet is in the case at all, since (unlike the two
+    lists above) it carries neither a VASP-reachability path nor an
+    attribution signal to explain itself: a TRANSACTED_WITH/PART_OF_CLUSTER/
+    SENT_FUNDS_TO edge to an already-covered wallet (the same adjacency
+    wallet_exchange_paths' own BFS reads) beats a cross-chain link record,
+    which beats "no relationship found" -- i.e. it was searched on its own."""
+    adjacency = _adjacency(store)
     rows = []
     for r in store._all(
             f"SELECT entity_id, etype, raw_value, normalized_value FROM entities "
             f"WHERE etype IN ({WALLET_ETYPES_SQL})"):
         if r["entity_id"] in covered_entity_ids:
             continue
+        value = r["raw_value"] or r["normalized_value"]
+        if covered_entity_ids & adjacency.get(r["entity_id"], {}).keys():
+            via = "transaction counterparty of a traced wallet in this case"
+        elif store.cross_chain_tx_links_for(value):
+            via = "cross-chain link candidate (bridge/swap evidence, not a reachability hit)"
+        else:
+            via = "directly investigated — no relationship to another traced wallet found"
         rows.append({"entity_id": r["entity_id"], "chain": r["etype"],
-                    "value": r["raw_value"] or r["normalized_value"]})
+                    "value": value, "via": via})
     return rows
 
 

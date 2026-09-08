@@ -62,7 +62,7 @@ window.__resources = {
 
       <div style="margin-top:46px;width:100%;max-width:740px;display:flex;border:1px solid #232a2e;background:#0d1012">
         <input value="{{ query }}" onChange="{{ onQuery }}" onKeyDown="{{ onQueryKey }}" placeholder="onion, wallet, IP, username, email or PGP fingerprint" style="flex:1;background:transparent;border:none;outline:none;padding:19px 20px;color:#d5dbde;font:400 14px/1 'IBM Plex Mono',monospace" />
-        <div onClick="{{ runTrace }}" style="cursor:pointer;background:#2fb4e8;color:#04161f;font:600 13px/1 'IBM Plex Sans',sans-serif;letter-spacing:.4px;display:grid;place-items:center;padding:0 32px" style-hover="background:#79d6f7">Trace</div>
+        <div onClick="{{ runTrace }}" style="cursor:{{ traceCursor }};opacity:{{ traceOpacity }};background:#2fb4e8;color:#04161f;font:600 13px/1 'IBM Plex Sans',sans-serif;letter-spacing:.4px;display:grid;place-items:center;padding:0 32px" style-hover="background:#79d6f7">Trace</div>
       </div>
       <div style="margin-top:11px;width:100%;max-width:740px;font:400 11.5px/1 'IBM Plex Mono',monospace;color:#5a6367;display:flex;gap:8px">
         <span>detected type</span><span style="color:#2fb4e8">{{ detectedType }}</span>
@@ -231,13 +231,23 @@ window.__resources = {
               <div style="color:#879196;font-size:12px;margin-top:6px">wallet address, domain, IP, username, email — investigated with the same engine as the landing-page Trace, and persisted into this case</div>
               <div style="display:flex;border:1px solid #232a2e;background:#08090b;margin-top:12px">
                 <input value="{{ addTargetValue }}" onChange="{{ onAddTargetValue }}" onKeyDown="{{ onAddTargetKey }}" placeholder="e.g. bc1q… or example.com" style="flex:1;background:transparent;border:none;outline:none;padding:12px 13px;color:#d5dbde;font:400 13px/1 'IBM Plex Mono',monospace" />
-                <div onClick="{{ addTarget }}" style="cursor:pointer;background:#2fb4e8;color:#04161f;font:600 12.5px/1 'IBM Plex Sans',sans-serif;letter-spacing:.4px;display:grid;place-items:center;padding:0 22px" style-hover="background:#79d6f7">{{ addTargetLabel }}</div>
+                <div onClick="{{ addTarget }}" style="cursor:{{ addTargetCursor }};opacity:{{ addTargetOpacity }};background:#2fb4e8;color:#04161f;font:600 12.5px/1 'IBM Plex Sans',sans-serif;letter-spacing:.4px;display:grid;place-items:center;padding:0 22px" style-hover="background:#79d6f7">{{ addTargetLabel }}</div>
               </div>
               <sc-if value="{{ addTargetError }}" hint-placeholder-val="{{ false }}">
                 <div style="margin-top:12px;border:1px solid #33221f;background:#1a0f0d;color:#d97a6c;padding:10px 12px;font-size:12px">{{ addTargetError }}</div>
               </sc-if>
               <sc-if value="{{ caseIsEmpty }}" hint-placeholder-val="{{ false }}">
                 <div style="margin-top:12px;color:#5a6367;font-size:12px">No investigation has been run yet in this case — add a target above to begin.</div>
+              </sc-if>
+              <sc-if value="{{ hasLastTargetSources }}" hint-placeholder-val="{{ false }}">
+                <div style="margin-top:14px;border-top:1px solid #171c1f;padding-top:12px">
+                  <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:8px">THIS INVESTIGATION — {{ lastTargetLabel }}</div>
+                  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;font:400 11px/1 'IBM Plex Mono',monospace">
+                    <sc-for list="{{ lastTargetSources }}" as="s" hint-placeholder-count="3">
+                      <span style="color:{{ s.statusColor }}">{{ s.name }}={{ s.statusLabel }}</span>
+                    </sc-for>
+                  </div>
+                </div>
               </sc-if>
             </div>
 
@@ -628,6 +638,9 @@ window.__resources = {
                       <span style="font:600 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:1px;color:#879196">{{ w.chain }}</span>
                       <div style="font:500 15px/1 'IBM Plex Mono',monospace;color:#edf2f4">{{ w.address }}</div>
                     </div>
+                    <sc-if value="{{ w.hasVia }}" hint-placeholder-val="{{ false }}">
+                      <div style="font-size:11.5px;color:#5a6367">why related: <span style="color:#879196">{{ w.via }}</span></div>
+                    </sc-if>
                     <sc-if value="{{ w.hasTypologySignals }}" hint-placeholder-val="{{ false }}">
                       <div style="border-top:1px solid #171c1f;padding-top:14px">
                         <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:8px">BEHAVIORAL SIGNALS</div>
@@ -1456,7 +1469,12 @@ window.__resources = {
                         <div style="display:flex;align-items:center;gap:12px;font:400 11.5px/1 'IBM Plex Mono',monospace;padding:7px 0;border-bottom:1px solid #171c1f">
                           <span style="color:{{ t.directionColor }};font-weight:600;width:32px">{{ t.direction }}</span>
                           <span style="color:#c5ccd0;width:170px">{{ t.hash }}</span>
-                          <span style="color:#879196;flex:1">{{ t.counterparty }}</span>
+                          <span style="color:#879196;flex:1;display:flex;align-items:center;gap:8px;min-width:0">
+                            <span style="overflow:hidden;text-overflow:ellipsis">{{ t.counterparty }}</span>
+                            <sc-if value="{{ t.hasCounterparty }}" hint-placeholder-val="{{ false }}">
+                              <span onClick="{{ t.investigate }}" title="Investigate this wallet as a new target" style="cursor:pointer;flex:none;color:#2fb4e8;font-size:10.5px;letter-spacing:.5px;border:1px solid #163a4a;padding:2px 6px" style-hover="background:#0f2029">INVESTIGATE</span>
+                            </sc-if>
+                          </span>
                           <span style="color:#edf2f4">{{ t.amount }}</span>
                           <span style="color:#5a6367;width:150px">{{ t.timestamp }}</span>
                           <span style="color:{{ t.statusColor }};width:70px">{{ t.status }}</span>
@@ -1864,6 +1882,8 @@ function bareWalletRow(w) {
     key: w.entity_id,
     address: short(w.value, 26),
     chain: (w.chain || '').replace('_ADDRESS', ''),
+    via: w.via || '',
+    hasVia: !!w.via,
     ...cryptoPanelVals(w),
   };
 }
@@ -1883,12 +1903,14 @@ const TX_STATUS_COLOR = { FOUND: C.green, PARTIAL: C.sand, NOT_FOUND: '#67716f',
 // comment) -- a NULL field stays "—"/"unknown", never a fabricated 0 or
 // guessed sender, which is exactly what a multi-input UTXO transaction's
 // PARTIAL status already tells the reader not to trust past this point.
-function txRowVals(t) {
+function txRowVals(t, onInvestigate) {
   return {
     hash: short(t.tx_hash || '', 22),
     direction: t.direction || '—',
     directionColor: t.direction === 'IN' ? C.green : t.direction === 'OUT' ? '#d97a6c' : '#67716f',
     counterparty: t.counterparty ? short(t.counterparty, 24) : 'unknown counterparty',
+    hasCounterparty: !!(t.counterparty && onInvestigate),
+    investigate: (t.counterparty && onInvestigate) ? () => onInvestigate(t.counterparty) : null,
     amount: t.value != null ? `${t.value} ${t.asset || ''}`.trim() : 'unknown (PARTIAL)',
     timestamp: t.timestamp ? t.timestamp.slice(0, 16).replace('T', ' ') + ' UTC' : '—',
     block: t.block || '—',
@@ -1906,7 +1928,7 @@ function txRowVals(t) {
 // top. Merged, not re-derived: every VASP/risk claim below traces back to
 // the identical wallet_trace_report()/score_wallet_risk() call a case-level
 // card or `cybertrace crypto investigate` would make for the same wallet.
-function investigationCardVals(ci) {
+function investigationCardVals(ci, onInvestigateCounterparty) {
   const wt = ci.wallet_trace || {};
   const w = Object.assign({}, wt, ci, { value: wt.address, confidence: wt.exchange_confidence });
   const row = walletRow(w, {}, () => {});
@@ -1948,7 +1970,7 @@ function investigationCardVals(ci) {
       : [],
     hasCandidateAlsoAttributed: !!(wt.vasp_candidates && (wt.vasp_candidates.also_attributed || []).length),
     txStatusColor: TX_STATUS_COLOR[row.txStatus] || '#67716f',
-    transactions: (ci.transactions || []).slice(0, 100).map(txRowVals),
+    transactions: (ci.transactions || []).slice(0, 100).map(t => txRowVals(t, onInvestigateCounterparty)),
     hasTransactions: !!(ci.transactions || []).length,
     transactionsMoreCount: Math.max(0, (ci.transactions || []).length - 100),
     graphNodes: nodes.slice(0, 40).map(n => ({ type: n.type, label: short(String(n.value), 28) })),
@@ -2096,7 +2118,7 @@ class Component extends DCLogic {
     detectResult: null,
     providerHealth: [], capabilities: {}, providerHealthError: null,
     // Loop 57: case target ingestion (Overview tab's "Add target" box).
-    addTargetValue: '', addingTarget: false, addTargetError: null,
+    addTargetValue: '', addingTarget: false, addTargetError: null, lastTargetResult: null,
     // Loop 57: case lifecycle -- archive/reopen is a single status POST with
     // no confirmation (reversible); delete is destructive, so it gets its
     // own confirm modal, same pattern as newCaseOpen's create modal.
@@ -2173,11 +2195,11 @@ class Component extends DCLogic {
       .catch(err => this.setState({ loadError: err.message }));
   }
 
-  runSearch() {
-    const q = (this.state.query || '').trim();
+  runSearch(overrideQuery) {
+    const q = (overrideQuery != null ? overrideQuery : (this.state.query || '')).trim();
     if (!q) return;
     this.setState({ view: 'search', searching: true, searchError: null, searchResult: null,
-                    searchOpen: {}, detectResult: null });
+                    searchOpen: {}, detectResult: null, query: q });
     fetchJson(searchUrl(q))
       .then(body => this.setState({ searchResult: body, searching: false }))
       .catch(err => this.setState({ searchError: err.message, searching: false }));
@@ -2190,6 +2212,15 @@ class Component extends DCLogic {
       .then(r => r.ok ? r.json() : null)
       .then(detectResult => { if (detectResult) this.setState({ detectResult }); })
       .catch(() => {});
+  }
+
+  // A transaction counterparty is a real address worth its own investigation --
+  // pivots the page onto it exactly like typing it into the Trace box and
+  // hitting search (same runSearch(), same view), so it inherits every guard
+  // and code path that already has (empty-query no-op, error handling, etc.)
+  // instead of a second bespoke fetch.
+  investigateCounterparty(address) {
+    this.runSearch(address);
   }
 
   set(p) { this.setState(p); }
@@ -2237,13 +2268,18 @@ class Component extends DCLogic {
     const target = (this.state.addTargetValue || '').trim();
     if (!target || this.state.addingTarget) return;
     const caseId = (this.state.caseData || EMPTY_CASE).case_id;
-    this.setState({ addingTarget: true, addTargetError: null });
+    this.setState({ addingTarget: true, addTargetError: null, lastTargetResult: null });
     fetchJson(caseUrl(caseId) + '/target', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ target }),
     })
-      .then(() => {
-        this.setState({ addingTarget: false, addTargetValue: '' });
+      .then(result => {
+        // The same per-source success/failure breakdown the standalone
+        // search view's searchSources already renders (see run_search()) --
+        // add_target_to_case()'s response carries it too, just discarded
+        // until now. Kept only for the target just added, not a persisted
+        // per-case history -- see docs note on per-investigation sources.
+        this.setState({ addingTarget: false, addTargetValue: '', lastTargetResult: result });
         this.loadCase(caseId);
       })
       .catch(err => this.setState({ addingTarget: false, addTargetError: err.message }));
@@ -2432,6 +2468,11 @@ class Component extends DCLogic {
       isLanding: st.view === 'landing', isCases: st.view === 'cases', isCase: st.view === 'case',
       isSearch: st.view === 'search',
       query: st.query, detectedType: this.detect(st.query),
+      // Nothing in the box -> nothing to trace: runSearch() already no-ops
+      // on an empty/whitespace query, this just makes the button look like
+      // it will instead of staying fully lit either way.
+      traceCursor: (st.query || '').trim() ? 'pointer' : 'default',
+      traceOpacity: (st.query || '').trim() ? 1 : 0.45,
 
       searching: st.searching,
       searchError: st.searchError,
@@ -2478,7 +2519,7 @@ class Component extends DCLogic {
       hasCryptoInvestigationUnavailable: WALLET_CHAIN_TYPES.includes((st.searchResult && st.searchResult.target_type) || '')
         && !!st.searchResult && !st.searchResult.crypto_investigation,
       investigation: (st.searchResult && st.searchResult.crypto_investigation)
-        ? investigationCardVals(st.searchResult.crypto_investigation) : null,
+        ? investigationCardVals(st.searchResult.crypto_investigation, addr => this.investigateCounterparty(addr)) : null,
 
       // PS §5: the standalone (case-less) search result was previously a
       // dead end for anything but reading -- no way to fold it into an
@@ -2670,6 +2711,23 @@ class Component extends DCLogic {
       addingTarget: st.addingTarget,
       addTargetLabel: st.addingTarget ? 'Investigating…' : 'Add target',
       addTargetError: st.addTargetError,
+      // Nothing typed -> nothing to trace: addTarget() already no-ops on an
+      // empty/whitespace value, this just makes the button look like it will
+      // (previously it stayed fully lit and clickable either way).
+      addTargetCursor: (st.addTargetValue || '').trim() ? 'pointer' : 'default',
+      addTargetOpacity: (st.addTargetValue || '').trim() ? 1 : 0.45,
+
+      // Per-investigation source breakdown (PS review §2) for the target just
+      // added -- same OK/FAILED mapping the standalone search view's
+      // searchSources already uses, so "this investigation" reads the same
+      // way in both places. Scoped to the last add, not a full case history.
+      hasLastTargetSources: !!(st.lastTargetResult && Object.keys(st.lastTargetResult.sources || {}).length),
+      lastTargetLabel: (st.lastTargetResult && st.lastTargetResult.target) || '',
+      lastTargetSources: Object.entries((st.lastTargetResult && st.lastTargetResult.sources) || {}).map(([name, s]) => ({
+        name,
+        statusLabel: s && s.success ? 'SUCCESS' : 'DOWN',
+        statusColor: s && s.success ? C.green : C.red,
+      })),
 
       candidates,
       suppressed: cd.suppressed,
