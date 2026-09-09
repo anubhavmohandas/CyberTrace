@@ -39,6 +39,15 @@ window.__resources = {
      printed page. */
   @media print {
     #ct-app-sidebar, #ct-app-header, #ct-report-sidebar { display:none !important; }
+    /* #ct-report-grid is a 300px-sidebar + 1fr-report CSS grid. Hiding the
+       sidebar item above does NOT free its column track -- grid
+       auto-placement instead shifts the report card into that now-empty
+       300px track (the vacated 1fr track goes unused), so the printed
+       report rendered in a 300px column with the rest of every page blank,
+       inflating a 4-target case to 739 mostly-empty PDF pages. Collapsing
+       to normal block flow here lets the one visible child use the full
+       printable width. */
+    #ct-report-grid { display:block !important; }
   }
 </style>
 </helmet>
@@ -50,10 +59,70 @@ window.__resources = {
     <div style="display:flex;align-items:center;justify-content:space-between;padding:18px 40px;border-bottom:1px solid #171c1f">
       <img src="assets/ct-lockup-a.png" alt="CyberTrace" style="height:26px;display:block" />
       <div style="display:flex;gap:26px;align-items:center;font-size:13px;color:#7c878c">
-        <span>Method</span><span>Sources</span>
+        <span onClick="{{ openMethod }}" style="cursor:pointer" style-hover="color:#d5dbde">Method</span><span onClick="{{ openSources }}" style="cursor:pointer" style-hover="color:#d5dbde">Sources</span>
         <div onClick="{{ openCases }}" style="cursor:pointer;border:1px solid #262d31;padding:7px 16px;color:#d5dbde;font-size:12.5px" style-hover="border-color:#2fb4e8;color:#2fb4e8">Open workspace</div>
       </div>
     </div>
+
+    <sc-if value="{{ landingPanelOpen }}" hint-placeholder-val="{{ false }}">
+      <div style="position:fixed;inset:0;background:rgba(4,6,7,.72);z-index:60;display:flex;align-items:center;justify-content:center;padding:40px">
+        <div style="width:100%;max-width:720px;max-height:100%;overflow-y:auto;background:#0b0e10;border:1px solid #1c2427;animation:ctIn .18s ease">
+          <div style="position:sticky;top:0;background:#0b0e10;display:flex;justify-content:space-between;align-items:center;padding:16px 22px;border-bottom:1px solid #171c1f">
+            <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#2fb4e8">{{ landingPanelTitle }}</div>
+            <div onClick="{{ closeLandingPanel }}" style="cursor:pointer;color:#67716f;font-size:13px" style-hover="color:#d5dbde">×</div>
+          </div>
+
+          <sc-if value="{{ landingPanelMethod }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:22px;display:flex;flex-direction:column;gap:16px">
+              <sc-for list="{{ methodSteps }}" as="m" hint-placeholder-count="10">
+                <div>
+                  <div style="font:500 12px/1 'IBM Plex Mono',monospace;letter-spacing:.6px;color:#c5ccd0">{{ m.title }}</div>
+                  <div style="color:#879196;font-size:12.5px;line-height:1.55;margin-top:5px">{{ m.text }}</div>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ landingPanelSources }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:22px;display:flex;flex-direction:column;gap:18px">
+              <div style="color:#879196;font-size:12px;line-height:1.6">A provider being listed means it is configured, not that it produced evidence — see each row's own status. <span style="color:#5a6367">{{ providerHealthSummary }}</span></div>
+              <div style="display:flex;flex-wrap:wrap;gap:8px">
+                <sc-for list="{{ capabilityBadges }}" as="cap" hint-placeholder-count="4">
+                  <div style="border:1px solid #1c2427;padding:4px 10px;font:500 10.5px/1 'IBM Plex Mono',monospace;color:{{ cap.color }}">{{ cap.name }} · {{ cap.status }}</div>
+                </sc-for>
+              </div>
+              <div style="display:flex;flex-direction:column">
+                <sc-for list="{{ providerHealthRows }}" as="p" hint-placeholder-count="4">
+                  <div style="border:1px solid #1c2427;border-top:none;background:#0d1012;padding:12px 16px;display:flex;justify-content:space-between;align-items:flex-start;gap:16px">
+                    <div>
+                      <div style="font:500 12.5px/1 'IBM Plex Mono',monospace;color:#d5dbde">{{ p.id }}</div>
+                      <div style="color:#67716f;font-size:11.5px;margin-top:4px">{{ p.capability }}</div>
+                      <sc-if value="{{ p.reason }}" hint-placeholder-val="{{ false }}">
+                        <div style="color:#8b6a5f;font-size:11px;margin-top:4px">{{ p.reason }}</div>
+                      </sc-if>
+                    </div>
+                    <div style="text-align:right;flex:none">
+                      <div style="font:600 11px/1 'IBM Plex Mono',monospace;letter-spacing:1px;color:{{ p.statusColor }}">{{ p.statusLabel }}</div>
+                      <div style="color:#5a6367;font-size:11px;margin-top:4px">{{ p.latency }}</div>
+                    </div>
+                  </div>
+                </sc-for>
+              </div>
+              <div>
+                <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#67716f;padding-bottom:10px;border-bottom:1px solid #171c1f">OFFLINE / STATIC DATASETS</div>
+                <sc-for list="{{ offlineDatasets }}" as="d" hint-placeholder-count="3">
+                  <div style="border:1px solid #1c2427;border-top:none;background:#0d1012;padding:12px 16px">
+                    <div style="font:500 12.5px/1 'IBM Plex Mono',monospace;color:#d5dbde">{{ d.name }}</div>
+                    <div style="color:#67716f;font-size:11.5px;margin-top:4px">{{ d.text }}</div>
+                  </div>
+                </sc-for>
+                <div style="border:1px solid #1c2427;border-top:none;padding:10px 16px;color:#5a6367;font-size:11px">Freshness for these is checked per case (see a case's own Sources tab) — this list only says what they are and when CyberTrace turns to them, not whether today's copy is current.</div>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+    </sc-if>
 
     <div style="flex:1;display:flex;flex-direction:column;justify-content:center;align-items:center;padding:70px 40px">
       <img src="assets/ct-mark-a.png" alt="" style="width:104px;display:block;opacity:.95" />
@@ -995,7 +1064,7 @@ window.__resources = {
         </sc-if>
 
         <sc-if value="{{ tabReport }}" hint-placeholder-val="{{ false }}">
-          <div style="display:grid;grid-template-columns:300px 1fr;gap:26px;align-items:start">
+          <div id="ct-report-grid" style="display:grid;grid-template-columns:300px 1fr;gap:26px;align-items:start">
             <div id="ct-report-sidebar" style="position:sticky;top:210px;display:flex;flex-direction:column;gap:18px">
               <div>
                 <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:1.8px;color:#67716f;margin-bottom:12px">SECTIONS</div>
@@ -1691,10 +1760,22 @@ function buildGraph(cd) {
   const walletChain = {};
   [...(cd.wallet_exchange_paths || []), ...(cd.unattributed_wallet_candidates || []),
    ...(cd.other_traced_wallets || [])].forEach(w => { walletChain[w.value.toLowerCase()] = w.chain; });
+  // Fixed 220px/node step (this used to be) only ever fit two markets
+  // inside the SVG's own static viewBox="0 0 920 500" below -- a case with
+  // a 3rd+ target (the exact multi-chain shape this app exists for) had
+  // that node positioned past the viewBox's own coordinate range, so it
+  // never rendered at all: no scrollbar, no truncation notice, nothing.
+  // Same fix candidates already use two blocks down -- spread across the
+  // fixed vertical band instead of stepping past it. Node count only, never
+  // used for market<->market edges (see test_graph_no_hardcoded_market_count,
+  // which guards that separate, real defect class).
+  const { length: marketCount } = cd.markets;
+  const marketStep = 360 / Math.max(1, marketCount);
   cd.markets.forEach((m, i) => {
-    marketPos[m] = { x: 160, y: 140 + i * 220 };
+    const y = 140 + i * marketStep;
+    marketPos[m] = { x: 160, y };
     const etype = walletChain[m.toLowerCase()] || 'ONION_ADDRESS';
-    nodes.push({ id:'m'+i, label:short(m, 20), etype, x:160, y:140 + i * 220, r:16,
+    nodes.push({ id:'m'+i, label:short(m, 20), etype, x:160, y, r:16,
                  color: ETYPE_COLOR[etype] || C.cyan });
   });
   cd.candidates.forEach((c, i) => {
@@ -2131,6 +2212,10 @@ function walletTabVals(cd, openVerdict) {
 class Component extends DCLogic {
   state = {
     view: 'landing', tab: 'Overview', query: '', drawer: null, aiOpen: false, aiInput: '',
+    // Loop 60: landing page's Method/Sources links -- were dead text with no
+    // onClick at all (audit's grep for "style-hover with no onClick" flagged
+    // Open workspace's siblings). null | 'method' | 'sources'.
+    landingPanel: null,
     thread: [{ role:'INVESTIGATOR', text:'Ask why any relationship in this case exists, or what the engine rejected. Every answer cites the evidence it used.', points:[] }],
     evFilter: 'All', scoreOpen: {}, verdict: null, verdictNote: '', outcome: null,
     snapshot: null, snapshotBody: '',
@@ -2606,6 +2691,35 @@ class Component extends DCLogic {
       runTrace: () => this.runSearch(),
       openCases: () => { window.location.hash = '/cases'; this.navigate({ view:'cases' }); },
       goHome: () => { window.location.hash = '/'; this.navigate({ view:'landing' }); },
+      openMethod: () => this.set({ landingPanel: 'method' }),
+      // Reuses the exact live provider check every case's own Sources tab
+      // already fires (loadProviderHealth, cached server-side) -- this is a
+      // global health sweep, not case-scoped data, so the landing page
+      // asking for it before any case exists is the same request, not a
+      // second one.
+      openSources: () => { this.loadProviderHealth(); this.set({ landingPanel: 'sources' }); },
+      closeLandingPanel: () => this.set({ landingPanel: null }),
+      landingPanelOpen: !!st.landingPanel,
+      landingPanelMethod: st.landingPanel === 'method',
+      landingPanelSources: st.landingPanel === 'sources',
+      landingPanelTitle: st.landingPanel === 'method' ? 'METHOD' : 'SOURCES',
+      methodSteps: [
+        { title: 'Target validation', text: 'A wallet address is checksum-validated for its chain (Base58Check for BTC/TRON, EIP-55/hex-length for EVM chains, base58 length/alphabet for Solana) before anything is queried. A string that fails validation is rejected outright — it never falls through to a username/social lookup.' },
+        { title: 'Chain detection', text: 'Chain family is decided by pattern and checksum, not by guessing. An EVM-shaped address (0x…) is ambiguous between Ethereum/BNB Chain/Polygon by shape alone, so that case gets a live probe rather than a default.' },
+        { title: 'Provider selection', text: 'Each chain has several configured providers (see Sources). A provider being configured is not the same as it answering — CyberTrace checks live, and when more than one provider covers a chain their results are merged, not chained: one provider being down does not silently fall back to a second without saying so.' },
+        { title: 'Transaction acquisition', text: 'Transactions come from the chain’s live provider(s) for that address. A provider that fails is recorded as failed for that capture — never backfilled with placeholder or estimated activity.' },
+        { title: 'Graph construction', text: 'A fund-flow graph is built from the transactions actually acquired: every node and edge traces back to an observed transaction or a recorded relationship, not an inferred or assumed one.' },
+        { title: 'VASP attribution', text: 'A wallet’s proximity to a known exchange/VASP address is walked in hops (0 = the address itself is attributed, 1 = one transaction away, and so on) and scored against a 4-tier evidence hierarchy: regulatory attestation, VASP self-disclosure, analyst assertion, third-party tag. The result is reported as a candidate with its tier and hop count, never a bare exchange name.' },
+        { title: 'Confidence & provenance', text: 'Every attribution claim carries a confidence tier and a resolvable evidence trail — an observation id, a snapshot hash, a capture timestamp. Nothing is asserted without a source an investigator can walk back to.' },
+        { title: 'Behavioral analysis', text: 'Typology signals (burst activity, peel-chain-like structuring, dormant-to-active, fan-in/fan-out) are pattern checks over the acquired transaction history. They are surfaced as signals for a human to weigh, never rendered as a verdict.' },
+        { title: 'Cross-chain semantics', text: 'A wallet’s cross-chain links (for example a bridge or wrapped-asset event) are recorded as their own observed events with their own confidence — never merged into same-chain hop counts, which would overstate proximity.' },
+        { title: 'Evidence limitations', text: 'Stated on every VASP result, not just this page: exposure (a transaction relationship) is not control or ownership; reachability through a regulator-designated wallet is not ownership evidence; a regulatory designation is a government determination, not a VASP-attribution claim.' },
+      ],
+      offlineDatasets: [
+        { name: 'ofac', text: 'OFAC SDN sanctions list — screened for a regulatory (not VASP-attribution) match on an investigated address.' },
+        { name: 'exchange_tags', text: 'GraphSense TagPacks — third-party VASP/exchange address labels, one of the four attribution tiers above.' },
+        { name: 'ellipticpp', text: 'Elliptic++ fraud/wallet-graph labels — used as corroborating context, not a standalone attribution source.' },
+      ],
 
       // Header count is derived from the same `cases` list the table below
       // renders from -- previously hardcoded markup text ("4 active · 2
