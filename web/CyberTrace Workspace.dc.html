@@ -116,7 +116,7 @@ window.__resources = {
                     <div style="color:#67716f;font-size:11.5px;margin-top:4px">{{ d.text }}</div>
                   </div>
                 </sc-for>
-                <div style="border:1px solid #1c2427;border-top:none;padding:10px 16px;color:#5a6367;font-size:11px">Freshness for these is checked per case (see a case's own Sources tab) — this list only says what they are and when CyberTrace turns to them, not whether today's copy is current.</div>
+                <div style="border:1px solid #1c2427;border-top:none;padding:10px 16px;color:#5a6367;font-size:11px">Freshness for these is checked per workspace (see a workspace's own Sources tab) — this list only says what they are and when CyberTrace turns to them, not whether today's copy is current.</div>
               </div>
             </div>
           </sc-if>
@@ -161,8 +161,8 @@ window.__resources = {
     <div style="width:210px;flex:none;border-right:1px solid #171c1f;background:#0b0e10;padding:18px 0;display:flex;flex-direction:column;gap:24px">
       <div onClick="{{ goHome }}" style="cursor:pointer;padding:0 18px"><img src="assets/ct-lockup-a.png" alt="CyberTrace" style="height:18px;display:block" /></div>
       <div style="display:flex;flex-direction:column;gap:1px">
-        <div style="padding:0 18px 8px;font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#495255">CASES</div>
-        <div onClick="{{ openAllCases }}" style="cursor:pointer;padding:7px 18px;color:{{ allCasesColor }};background:{{ allCasesBg }};font-size:13px;border-left:2px solid {{ allCasesBorder }}" style-hover="color:#d5dbde">All cases</div>
+        <div style="padding:0 18px 8px;font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#495255">WORKSPACES</div>
+        <div onClick="{{ openAllCases }}" style="cursor:pointer;padding:7px 18px;color:{{ allCasesColor }};background:{{ allCasesBg }};font-size:13px;border-left:2px solid {{ allCasesBorder }}" style-hover="color:#d5dbde">All workspaces</div>
         <div onClick="{{ openWatchlist }}" style="cursor:pointer;padding:7px 18px;color:{{ watchlistColor }};background:{{ watchlistBg }};font-size:13px;border-left:2px solid {{ watchlistBorder }}" style-hover="color:#d5dbde">Watchlist</div>
       </div>
     </div>
@@ -172,7 +172,7 @@ window.__resources = {
           <div style="font-size:21px;font-weight:500;color:#edf2f4;letter-spacing:-.3px">{{ casesPageTitle }}</div>
           <div style="color:#7c878c;font-size:12.5px;margin-top:3px">{{ casesSummaryLine }}</div>
         </div>
-        <div onClick="{{ openNewCase }}" style="cursor:pointer;border:1px solid #2fb4e8;color:#2fb4e8;padding:8px 18px;font-size:12.5px" style-hover="background:#0f2029">+ New case</div>
+        <div onClick="{{ openNewCase }}" style="cursor:pointer;border:1px solid #2fb4e8;color:#2fb4e8;padding:8px 18px;font-size:12.5px" style-hover="background:#0f2029">+ New workspace</div>
       </div>
       <sc-if value="{{ casesListError }}" hint-placeholder-val="{{ false }}">
         <div style="margin-bottom:16px;border:1px solid #33221f;background:#1a0f0d;color:#d97a6c;padding:12px 14px;font-size:12.5px">{{ casesListError }}</div>
@@ -206,7 +206,7 @@ window.__resources = {
     <div style="position:fixed;inset:0;background:rgba(4,6,7,.72);z-index:60;display:flex;align-items:center;justify-content:center">
       <div style="width:440px;background:#0b0e10;border:1px solid #1c2427;animation:ctIn .18s ease">
         <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 22px;border-bottom:1px solid #171c1f">
-          <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#2fb4e8">NEW CASE</div>
+          <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#2fb4e8">NEW WORKSPACE</div>
           <div onClick="{{ closeNewCase }}" style="cursor:pointer;color:#67716f;font-size:13px" style-hover="color:#d5dbde">×</div>
         </div>
         <div style="padding:22px">
@@ -232,8 +232,8 @@ window.__resources = {
     <div id="ct-app-sidebar" style="width:210px;flex:none;border-right:1px solid #171c1f;background:#0b0e10;padding:18px 0;display:flex;flex-direction:column;gap:22px;position:sticky;top:0;height:100vh;overflow:auto">
       <div onClick="{{ goHome }}" style="cursor:pointer;padding:0 18px"><img src="assets/ct-lockup-a.png" alt="CyberTrace" style="height:18px;display:block" /></div>
       <div style="display:flex;flex-direction:column;gap:1px">
-        <div style="padding:0 18px 8px;font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#495255">CASES</div>
-        <div onClick="{{ openCases }}" style="cursor:pointer;padding:7px 18px;color:#879196;font-size:13px;border-left:2px solid transparent" style-hover="color:#d5dbde">All cases</div>
+        <div style="padding:0 18px 8px;font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#495255">WORKSPACES</div>
+        <div onClick="{{ openCases }}" style="cursor:pointer;padding:7px 18px;color:#879196;font-size:13px;border-left:2px solid transparent" style-hover="color:#d5dbde">All workspaces</div>
         <div style="padding:7px 18px;color:#2fb4e8;font:500 12px/1.4 'IBM Plex Mono',monospace;background:#10171a;border-left:2px solid #2fb4e8">{{ caseHeaderId }}</div>
       </div>
       <div style="display:flex;flex-direction:column;gap:1px">
@@ -268,8 +268,8 @@ window.__resources = {
           </div>
           <div style="display:flex;gap:8px;align-items:center">
             <div onClick="{{ toggleArchive }}" style="cursor:pointer;border:1px solid #262d31;color:#a7b1b5;padding:7px 14px;font-size:12.5px" style-hover="border-color:#2fb4e8;color:#2fb4e8">{{ archiveLabel }}</div>
-            <div onClick="{{ openDeleteConfirm }}" style="cursor:pointer;border:1px solid #262d31;color:#a7b1b5;padding:7px 14px;font-size:12.5px" style-hover="border-color:#d97a6c;color:#d97a6c">Delete case</div>
-            <div onClick="{{ recheck }}" title="Asks the Investigator what changed in this case's already-loaded evidence — not a live re-scan of providers" style="cursor:pointer;border:1px solid #262d31;color:#a7b1b5;padding:7px 14px;font-size:12.5px" style-hover="border-color:#2fb4e8;color:#2fb4e8">Re-check</div>
+            <div onClick="{{ openDeleteConfirm }}" style="cursor:pointer;border:1px solid #262d31;color:#a7b1b5;padding:7px 14px;font-size:12.5px" style-hover="border-color:#d97a6c;color:#d97a6c">Delete workspace</div>
+            <div onClick="{{ recheck }}" title="Asks the Investigator what changed in this workspace's already-loaded evidence — not a live re-scan of providers" style="cursor:pointer;border:1px solid #262d31;color:#a7b1b5;padding:7px 14px;font-size:12.5px" style-hover="border-color:#2fb4e8;color:#2fb4e8">Re-check</div>
             <div onClick="{{ toggleAi }}" style="cursor:pointer;border:1px solid #2fb4e8;color:#2fb4e8;padding:7px 14px;font-size:12.5px" style-hover="background:#0f2029">AI Investigator</div>
           </div>
         </div>
@@ -297,7 +297,7 @@ window.__resources = {
 
             <div style="border:1px solid #1c2427;background:#0d1012;padding:18px 20px">
               <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#2fb4e8">ADD TARGET</div>
-              <div style="color:#879196;font-size:12px;margin-top:6px">wallet address, domain, IP, username, email — investigated with the same engine as the landing-page Trace, and persisted into this case</div>
+              <div style="color:#879196;font-size:12px;margin-top:6px">wallet address, domain, IP, username, email — investigated with the same engine as the landing-page Trace, and persisted into this workspace</div>
               <div style="display:flex;border:1px solid #232a2e;background:#08090b;margin-top:12px">
                 <input value="{{ addTargetValue }}" onChange="{{ onAddTargetValue }}" onKeyDown="{{ onAddTargetKey }}" placeholder="e.g. bc1q… or example.com" style="flex:1;background:transparent;border:none;outline:none;padding:12px 13px;color:#d5dbde;font:400 13px/1 'IBM Plex Mono',monospace" />
                 <div onClick="{{ addTarget }}" style="cursor:{{ addTargetCursor }};opacity:{{ addTargetOpacity }};background:#2fb4e8;color:#04161f;font:600 12.5px/1 'IBM Plex Sans',sans-serif;letter-spacing:.4px;display:grid;place-items:center;padding:0 22px" style-hover="background:#79d6f7">{{ addTargetLabel }}</div>
@@ -306,7 +306,7 @@ window.__resources = {
                 <div style="margin-top:12px;border:1px solid #33221f;background:#1a0f0d;color:#d97a6c;padding:10px 12px;font-size:12px">{{ addTargetError }}</div>
               </sc-if>
               <sc-if value="{{ caseIsEmpty }}" hint-placeholder-val="{{ false }}">
-                <div style="margin-top:12px;color:#5a6367;font-size:12px">No investigation has been run yet in this case — add a target above to begin.</div>
+                <div style="margin-top:12px;color:#5a6367;font-size:12px">No investigation has been run yet in this workspace — add a target above to begin.</div>
               </sc-if>
               <sc-if value="{{ hasLastTargetSources }}" hint-placeholder-val="{{ false }}">
                 <div style="margin-top:14px;border-top:1px solid #171c1f;padding-top:12px">
@@ -348,7 +348,7 @@ window.__resources = {
                       <sc-if value="{{ c.scoreOpen }}" hint-placeholder-val="{{ false }}">
                         <div style="border:1px solid #262d31;background:#0a0d0f;padding:8px 10px;max-width:250px;text-align:right">
                           <div style="font:500 13px/1 'IBM Plex Mono',monospace;color:#e3eaec">{{ c.score }}</div>
-                          <div style="font-size:10.5px;color:#67716f;margin-top:6px;line-height:1.5">rank score, not a probability — it orders candidates within this case only</div>
+                          <div style="font-size:10.5px;color:#67716f;margin-top:6px;line-height:1.5">rank score, not a probability — it orders candidates within this workspace only</div>
                         </div>
                       </sc-if>
                     </div>
@@ -776,7 +776,7 @@ window.__resources = {
               <div>
                 <div style="display:flex;align-items:baseline;gap:12px;padding-bottom:12px;border-bottom:1px solid #171c1f">
                   <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#67716f">VASP RELATIONSHIPS</div>
-                  <div style="font-size:12px;color:#5a6367">case-level: every traced wallet's own VASP investigation, grouped by VASP — shared exposure is never a same-actor claim</div>
+                  <div style="font-size:12px;color:#5a6367">workspace-level: every traced wallet's own VASP investigation, grouped by VASP — shared exposure is never a same-actor claim</div>
                 </div>
                 <sc-for list="{{ vaspRelationships }}" as="rel" hint-placeholder-count="1">
                   <div style="border:1px solid #1c2427;border-top:none;background:#0d1012;padding:16px 22px;display:flex;flex-direction:column;gap:10px">
@@ -830,7 +830,7 @@ window.__resources = {
               <div>
                 <div style="display:flex;align-items:baseline;gap:12px;padding-bottom:12px;border-bottom:1px solid #171c1f">
                   <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:2px;color:#67716f">WATCH HISTORY</div>
-                  <div style="font-size:12px;color:#5a6367">every persisted re-check of this case, newest first</div>
+                  <div style="font-size:12px;color:#5a6367">every persisted re-check of this workspace, newest first</div>
                 </div>
                 <sc-for list="{{ watchHistory }}" as="run" hint-placeholder-count="1">
                   <div style="border:1px solid #1c2427;border-top:none;background:#0d1012;padding:14px 22px;display:flex;flex-direction:column;gap:6px">
@@ -910,7 +910,7 @@ window.__resources = {
 
             <sc-if value="{{ showCryptoEvidenceHint }}" hint-placeholder-val="{{ false }}">
               <div onClick="{{ goWallets }}" style="cursor:pointer;border:1px solid #1c2427;background:#0d1215;padding:13px 16px;display:flex;justify-content:space-between;align-items:center" style-hover="border-color:#2fb4e8">
-                <span style="color:#c5ccd0;font-size:13px">This is a crypto case — wallet evidence (transactions, VASP attribution, exchange tags) is recorded per wallet, not listed here.</span>
+                <span style="color:#c5ccd0;font-size:13px">This is a crypto workspace — wallet evidence (transactions, VASP attribution, exchange tags) is recorded per wallet, not listed here.</span>
                 <span style="font:400 11px/1 'IBM Plex Mono',monospace;color:#2fb4e8">SEE WALLETS →</span>
               </div>
             </sc-if>
@@ -958,7 +958,7 @@ window.__resources = {
         <sc-if value="{{ tabTimeline }}" hint-placeholder-val="{{ false }}">
           <div style="display:flex;flex-direction:column;gap:22px;max-width:840px">
             <div onClick="{{ askWhatChanged }}" style="cursor:pointer;border:1px solid #1c2427;background:#0d1215;padding:13px 16px;display:flex;justify-content:space-between;align-items:center" style-hover="border-color:#2fb4e8">
-              <span style="color:#c5ccd0;font-size:13px">What changed in this case?</span>
+              <span style="color:#c5ccd0;font-size:13px">What changed in this workspace?</span>
               <span style="font:400 11px/1 'IBM Plex Mono',monospace;color:#2fb4e8">ASK THE INVESTIGATOR →</span>
             </div>
             <div style="display:flex;flex-direction:column">
@@ -1104,7 +1104,7 @@ window.__resources = {
                   <div style="margin-top:12px;font-size:13.5px;line-height:1.65;color:#2c3336;white-space:pre-wrap;text-wrap:pretty">{{ r.text }}</div>
                 </div>
               </sc-for>
-              <div style="margin-top:36px;border-top:1px solid #c9c4ba;padding-top:14px;font:400 10px/1.6 'IBM Plex Mono',monospace;color:#8a8175">Scores rank candidates within this case. They are not probabilities. Every claim in this report resolves to a hashed capture listed in Sources.</div>
+              <div style="margin-top:36px;border-top:1px solid #c9c4ba;padding-top:14px;font:400 10px/1.6 'IBM Plex Mono',monospace;color:#8a8175">Scores rank candidates within this workspace. They are not probabilities. Every claim in this report resolves to a hashed capture listed in Sources.</div>
             </div>
           </div>
         </sc-if>
@@ -1258,11 +1258,11 @@ window.__resources = {
       <div style="position:fixed;inset:0;background:rgba(4,6,7,.72);z-index:60;display:flex;align-items:center;justify-content:center">
         <div style="width:440px;background:#0b0e10;border:1px solid #1c2427;animation:ctIn .18s ease">
           <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 22px;border-bottom:1px solid #171c1f">
-            <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#d97a6c">DELETE CASE</div>
+            <div style="font:500 10.5px/1 'IBM Plex Mono',monospace;letter-spacing:1.6px;color:#d97a6c">DELETE WORKSPACE</div>
             <div onClick="{{ closeDeleteConfirm }}" style="cursor:pointer;color:#67716f;font-size:13px" style-hover="color:#d5dbde">×</div>
           </div>
           <div style="padding:22px">
-            <div style="color:#c5ccd0;font-size:13px;line-height:1.6">Permanently delete <b style="color:#edf2f4">{{ caseTitle }}</b> ({{ caseHeaderId }})? This removes the case's evidence store from disk. This cannot be undone.</div>
+            <div style="color:#c5ccd0;font-size:13px;line-height:1.6">Permanently delete <b style="color:#edf2f4">{{ caseTitle }}</b> ({{ caseHeaderId }})? This removes the workspace's evidence store from disk. This cannot be undone.</div>
             <div style="display:flex;gap:9px;margin-top:20px">
               <div onClick="{{ confirmDelete }}" style="cursor:pointer;flex:1;text-align:center;background:#3a1e1a;color:#d97a6c;padding:11px 0;font-size:12.5px;font-weight:600" style-hover="background:#4a2420">{{ deleteButtonLabel }}</div>
               <div onClick="{{ closeDeleteConfirm }}" style="cursor:pointer;border:1px solid #262d31;color:#a7b1b5;padding:11px 20px;font-size:12.5px" style-hover="color:#d5dbde">Cancel</div>
@@ -1289,14 +1289,14 @@ window.__resources = {
           <div style="font-size:22px;font-weight:500;color:#edf2f4;margin-top:8px;word-break:break-all">{{ searchTarget }}</div>
         </div>
         <sc-if value="{{ hasAddToCase }}" hint-placeholder-val="{{ false }}">
-          <div onClick="{{ toggleAddToCase }}" style="cursor:pointer;border:1px solid #2fb4e8;color:#2fb4e8;padding:8px 16px;font-size:12.5px;flex:none" style-hover="background:#0f2029">Add to case</div>
+          <div onClick="{{ toggleAddToCase }}" style="cursor:pointer;border:1px solid #2fb4e8;color:#2fb4e8;padding:8px 16px;font-size:12.5px;flex:none" style-hover="background:#0f2029">Add to Workspace</div>
         </sc-if>
       </div>
 
       <sc-if value="{{ hasAddToCaseDone }}" hint-placeholder-val="{{ false }}">
         <div style="margin-top:16px;border:1px solid #1c3a2a;background:#0d1512;color:#63c48b;padding:12px 16px;font-size:12.5px;display:flex;justify-content:space-between;align-items:center;gap:16px">
-          <span>Added to the case — every tab (Wallets/Graph/Evidence/Timeline/Report) now reflects this target.</span>
-          <div onClick="{{ goToAddedCase }}" style="cursor:pointer;border:1px solid #1c3a2a;color:#63c48b;padding:6px 12px;flex:none" style-hover="border-color:#63c48b">Open case →</div>
+          <span>Added to the workspace — every tab (Wallets/Graph/Evidence/Timeline/Report) now reflects this target.</span>
+          <div onClick="{{ goToAddedCase }}" style="cursor:pointer;border:1px solid #1c3a2a;color:#63c48b;padding:6px 12px;flex:none" style-hover="border-color:#63c48b">Open workspace →</div>
         </div>
       </sc-if>
 
@@ -1306,7 +1306,7 @@ window.__resources = {
             <div style="margin-bottom:12px;border:1px solid #33221f;background:#1a0f0d;color:#d97a6c;padding:10px 12px;font-size:12px">{{ addToCaseError }}</div>
           </sc-if>
           <sc-if value="{{ hasAddToCaseCases }}" hint-placeholder-val="{{ false }}">
-            <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:8px">ADD TO AN EXISTING CASE</div>
+            <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:8px">ADD TO AN EXISTING WORKSPACE</div>
             <div style="display:flex;flex-direction:column;gap:1px;margin-bottom:16px">
               <sc-for list="{{ addToCaseCases }}" as="c" hint-placeholder-count="2">
                 <div onClick="{{ c.pick }}" style="cursor:pointer;display:flex;justify-content:space-between;padding:9px 12px;border:1px solid #1c2427" style-hover="border-color:#2fb4e8">
@@ -1316,9 +1316,9 @@ window.__resources = {
               </sc-for>
             </div>
           </sc-if>
-          <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:8px">OR CREATE A NEW CASE</div>
+          <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:1.4px;color:#67716f;margin-bottom:8px">OR CREATE A NEW WORKSPACE</div>
           <div style="display:flex;border:1px solid #232a2e;background:#08090b">
-            <input value="{{ addToCaseNewTitle }}" onChange="{{ onAddToCaseNewTitle }}" placeholder="case title" style="flex:1;background:transparent;border:none;outline:none;padding:11px 12px;color:#d5dbde;font:400 13px/1 'IBM Plex Sans',sans-serif" />
+            <input value="{{ addToCaseNewTitle }}" onChange="{{ onAddToCaseNewTitle }}" placeholder="workspace title" style="flex:1;background:transparent;border:none;outline:none;padding:11px 12px;color:#d5dbde;font:400 13px/1 'IBM Plex Sans',sans-serif" />
             <div onClick="{{ createCaseFromSearch }}" style="cursor:pointer;background:#2fb4e8;color:#04161f;font:600 12px/1 'IBM Plex Sans',sans-serif;display:grid;place-items:center;padding:0 18px" style-hover="background:#79d6f7">{{ addToCaseButtonLabel }}</div>
           </div>
         </div>
@@ -2248,7 +2248,7 @@ class Component extends DCLogic {
     this.setState({ view: route.view || this.props.startView || 'landing' });
     fetchJson(CASES_URL)
       .then(cases => {
-        this.setState({ cases, casesError: cases.length ? null : 'no cases in cases/ yet' });
+        this.setState({ cases, casesError: cases.length ? null : 'no workspaces yet' });
         const wantId = route.caseId || (cases[0] && cases[0].id);
         if (wantId) this.loadCase(wantId);
       })
@@ -2341,7 +2341,7 @@ class Component extends DCLogic {
 
   createNewCase() {
     const title = (this.state.newCaseTitle || '').trim();
-    if (!title) return this.setState({ newCaseError: 'a case title is required' });
+    if (!title) return this.setState({ newCaseError: 'a workspace title is required' });
     if (this.state.newCaseSaving) return;
     this.setState({ newCaseSaving: true, newCaseError: null });
     fetchJson(CREATE_CASE_URL, {
@@ -2498,6 +2498,31 @@ class Component extends DCLogic {
     return 'USERNAME';
   }
 
+  // Loop 60 follow-up: detect() above is a pattern-only guess with no
+  // "malformed" bucket -- a string shaped like a BTC address but using a
+  // character Base58 never uses (0, O, I, l) matches none of its regexes
+  // and falls through to the USERNAME catch-all, even though the real
+  // detector (the same one every submitted search already calls via
+  // /api/detect) knows it's an invalid address. Debounced, not per
+  // keystroke (same reasoning as detect()'s own comment -- this reuses
+  // runSearch()'s exact detectUrl()/apiFetch() call, just triggered
+  // earlier), and only overrides the instant guess in the "actually
+  // invalid" direction: a valid address keeps showing detect()'s answer
+  // unchanged, so this never contradicts a correct guess, only a wrong one.
+  scheduleDetectCheck(rawQuery) {
+    clearTimeout(this._detectTimer);
+    const q = (rawQuery || '').trim();
+    if (!q) { this.setState({ detectResult: null }); return; }
+    this._detectTimer = setTimeout(() => {
+      apiFetch(detectUrl(q))
+        .then(r => r.ok ? r.json() : null)
+        .then(detectResult => {
+          if (detectResult && (this.state.query || '').trim() === q) this.setState({ detectResult });
+        })
+        .catch(() => {});
+    }, 450);
+  }
+
   renderVals() {
     const st = this.state;
     const cd = st.caseData || EMPTY_CASE;
@@ -2574,7 +2599,13 @@ class Component extends DCLogic {
     return {
       isLanding: st.view === 'landing', isCases: st.view === 'cases', isCase: st.view === 'case',
       isSearch: st.view === 'search',
-      query: st.query, detectedType: this.detect(st.query),
+      query: st.query,
+      // Authoritative check (see scheduleDetectCheck) wins ONLY when it has
+      // resolved for exactly this query and says invalid -- otherwise the
+      // instant client guess is shown unchanged, same as before this loop.
+      detectedType: (st.detectResult && st.detectResult.address === (st.query || '').trim()
+        && st.detectResult.valid_address === false)
+        ? 'INVALID_ADDRESS' : this.detect(st.query),
       // Nothing in the box -> nothing to trace: runSearch() already no-ops
       // on an empty/whitespace query, this just makes the button look like
       // it will instead of staying fully lit either way.
@@ -2682,11 +2713,11 @@ class Component extends DCLogic {
       closeDeleteConfirm: () => this.set({ deleteConfirmOpen: false }),
       deleteConfirmOpen: st.deleteConfirmOpen,
       deletingCase: st.deletingCase,
-      deleteButtonLabel: st.deletingCase ? 'Deleting…' : 'Delete case',
+      deleteButtonLabel: st.deletingCase ? 'Deleting…' : 'Delete workspace',
       confirmDelete: () => this.deleteCase(),
 
       reportDate: new Date().toISOString().slice(0, 10),
-      onQuery: (e) => this.set({ query: e.target.value }),
+      onQuery: (e) => { const v = e.target.value; this.set({ query: v }); this.scheduleDetectCheck(v); },
       onQueryKey: (e) => { if (e.key === 'Enter') this.runSearch(); },
       runTrace: () => this.runSearch(),
       openCases: () => { window.location.hash = '/cases'; this.navigate({ view:'cases' }); },
@@ -2735,7 +2766,7 @@ class Component extends DCLogic {
       // This template engine's {{ }} bindings only resolve dotted paths and
       // top-level equality -- no ternaries -- so every conditional style
       // below is precomputed here rather than inline in the markup.
-      casesPageTitle: st.sidebarView === 'watchlist' ? 'Watchlist' : 'Cases',
+      casesPageTitle: st.sidebarView === 'watchlist' ? 'Watchlist' : 'Workspaces',
       allCasesColor: st.sidebarView === 'all' ? '#2fb4e8' : '#879196',
       allCasesBg: st.sidebarView === 'all' ? '#10171a' : 'transparent',
       allCasesBorder: st.sidebarView === 'all' ? '#2fb4e8' : 'transparent',
@@ -2769,7 +2800,7 @@ class Component extends DCLogic {
       newCaseOpen: st.newCaseOpen,
       newCaseTitle: st.newCaseTitle,
       newCaseError: st.newCaseError,
-      newCaseButtonLabel: st.newCaseSaving ? 'Creating…' : 'Create case',
+      newCaseButtonLabel: st.newCaseSaving ? 'Creating…' : 'Create workspace',
       newCaseSaveBg: st.newCaseTitle.trim() && !st.newCaseSaving ? C.cyan : '#1c2427',
       newCaseSaveColor: st.newCaseTitle.trim() && !st.newCaseSaving ? '#04161f' : '#495255',
       openNewCase: () => this.set({ newCaseOpen:true, newCaseTitle:'', newCaseError:null }),
