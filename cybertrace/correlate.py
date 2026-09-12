@@ -31,6 +31,7 @@ from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Set
 
+from . import dependency
 from .evidence import (ANALYST_TARGET, _INDEX_SOURCES, WALLET_ETYPES_SQL,
                         EvidenceStore, detect_clones, utcnow)
 from .normalize import _registrable
@@ -879,6 +880,13 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
         currency = _TAG_CURRENCY.get(etype)
         if currency:
             by_currency[currency].append(value)
+    # Populated below only `if by_currency:` -- initialized here so the
+    # dependency-resolution pass at the end of this function (which reads
+    # them for every address regardless) never hits an undefined name when a
+    # case has no wallet entities at all.
+    tagged: Dict[str, dict] = {}
+    disclosed: Dict[str, dict] = {}
+    designated: Dict[str, dict] = {}
     if by_currency:
         from .integrations.exchange_tags import exchange_labels, vasp_disclosed_labels
         tagged = exchange_labels(dict(by_currency))
@@ -983,6 +991,36 @@ def _vasp_endpoints(store: EvidenceStore, values: Dict[str, str]) -> Dict[str, d
                 "attribution_source": prev["attribution_source"],
                 "evidence_ids": prev["evidence_ids"]}]
         out[r["addr"]] = entry
+
+    # Upstream-dependency metadata (RESEARCH_LOOP49.md): additive only --
+    # never changes which tier wins `out[entity_id]` above, `attribution`,
+    # `attribution_rank`, or anything risk.py reads. This tier-writing loop
+    # keeps only the highest-ranked hit per address (see this function's own
+    # docstring), so a second, lower-ranked tier's hit on the same address is
+    # otherwise invisible; `tagged`/`disclosed`/`designated` are the raw
+    # per-tier lookups already computed above and still hold every hit, not
+    # just the winner. `dependency_groups` names the real-world upstream
+    # behind every tier that actually fired for this address, so a caller
+    # can tell "two tiers hit this address" from "two tiers hit this address,
+    # from two different real sources" -- the distinction RESEARCH_LOOP48.md
+    # Sec.3/4 found nothing in this codebase could make.
+    for entity_id, entry in out.items():
+        value, _etype = raw.get(entity_id, (None, None))
+        groups: List[str] = []
+        if value is not None:
+            t = tagged.get(value)
+            if t:
+                groups.append(dependency.resolve_tag_upstream(t["pack"]))
+            d = disclosed.get(value)
+            if d:
+                groups.append(dependency.resolve_disclosure_upstream(d["brand"]))
+            o = designated.get(value)
+            if o:
+                groups.append(dependency.resolve_regulatory_upstream())
+        if entry["attribution"] == ANALYST_ASSERTED:
+            groups.append(dependency.resolve_analyst_upstream(entry["exchange"]))
+        entry["dependency_groups"] = sorted(set(groups))
+        entry["independent_evidence_count"] = dependency.independent_evidence_count(groups)
     return out
 
 
@@ -1563,6 +1601,8 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
                         "attribution_rank": _ATTRIBUTION_RANK[end["attribution"]],
                         "attribution_source": end["attribution_source"],
                         "wallet_role": end["wallet_role"],
+                        "dependency_groups": end.get("dependency_groups", []),
+                        "independent_evidence_count": end.get("independent_evidence_count", 1),
                         "proximity": AT_VASP, "direction": DIRECTION_UNKNOWN,
                         # This address IS the VASP endpoint (hops==0), not a
                         # depositor to it -- never a deposit candidate.
@@ -1604,6 +1644,9 @@ def wallet_exchange_paths(store: EvidenceStore, max_hops: int = 4) -> List[dict]
                                  "attribution_rank": _ATTRIBUTION_RANK[end["attribution"]],
                                  "attribution_source": end["attribution_source"],
                                  "wallet_role": end["wallet_role"],
+                                 "dependency_groups": end.get("dependency_groups", []),
+                                 "independent_evidence_count":
+                                     end.get("independent_evidence_count", 1),
                                  "proximity": proximity,
                                  "direction": direction,
                                  "deposit_candidate": _is_deposit_candidate(proximity, direction)}
